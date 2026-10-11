@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/demo.gif" width="720" alt="Laido in action" />
+  <img src="docs/screenshot.png" width="720" alt="Laido — the @ picker open on a ruled sheet: @research, @document, @skill" />
 </p>
 
 Laido is an always-on personal agent whose memory and interface is a plaintext
