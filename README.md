@@ -23,6 +23,31 @@ as an editable widget — never hidden in a chat log.
 
 Your notes are the memory, and the memory is yours.
 
+## Built on Nebius × NVIDIA
+
+Laido runs entirely on **Nebius Token Factory** with **NVIDIA Nemotron open
+models**, routed by task cost so everyday calls stay fast and credits stretch:
+
+| Lane | Model | Where it's used |
+|---|---|---|
+| Fast | `NVIDIA-Nemotron-3-Nano-30B-A3B` | query rewriting, entity-graph extraction, per-file digests, research-loop refinement, simulation-script generation |
+| Main | `nemotron-3-super-120b-a12b` | grounded answers, note summaries, research synthesis, loop cards, final reports |
+| Deep | `Nemotron-3-Ultra-550b-a55b` | deepest reasoning when a question demands it |
+| Embeddings | Token Factory embeddings (1024-dim) | library + notes indexing, every hybrid-retrieval lane |
+
+Every answer Laido gives is a **runtime call to Token Factory** — retrieval
+rewriting, synthesis, per-loop simulations and scheduled autonomous work all
+go through it. The only other runtime services are **Tavily** (web research
+lane) and **AssemblyAI** (optional voice notes). Everything else — notes,
+vectors, graphs, schedules, simulation scripts — is local plain files that
+belong to you.
+
+**Why Token Factory:** one task routed across Nano → Super → Ultra costs
+fractions of a cent per ask while a 120B-class model stays on the critical
+path. The OpenAI-compatible API made the whole agent — including scheduled
+runs while the laptop sleeps — a thin, fast layer to build on open
+infrastructure.
+
 ## What it does
 
 - **A real notepad** — an infinite ruled sheet with draggable, resizable AI

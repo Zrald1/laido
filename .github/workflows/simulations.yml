@@ -1,0 +1,63 @@
+name: Simulations
+
+# Every push proves the features still work end to end: the same simulation
+# suite that runs locally against a real vault and the live APIs, on a
+# throwaway vault seeded from the repo's API-key secrets.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  sim:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check for API keys
+        id: gate
+        run: echo "ok=${{ secrets.NEBIUS_API_KEY != '' }}" >> "$GITHUB_OUTPUT"
+
+      - name: Skip notice
+        if: steps.gate.outputs.ok != 'true'
+        run: echo "No NEBIUS_API_KEY secret configured — simulations skipped."
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.gate.outputs.ok == 'true'
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.gate.outputs.ok == 'true'
+        with:
+          workspaces: src-tauri
+
+      - uses: actions/setup-node@v5
+        if: steps.gate.outputs.ok == 'true'
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Build frontend
+        if: steps.gate.outputs.ok == 'true'
+        run: npm ci && npm run ui
+
+      - name: Seed a throwaway vault with the API keys
+        if: steps.gate.outputs.ok == 'true'
+        run: |
+          VAULT="$RUNNER_TEMP/laido-vault"
+          mkdir -p "$VAULT/.laido" "$VAULT/notes"
+          cat > "$VAULT/.laido/settings.json" <<EOF
+          {
+            "nebius_api_key": "${{ secrets.NEBIUS_API_KEY }}",
+            "tavily_api_key": "${{ secrets.TAVILY_API_KEY }}",
+            "assemblyai_api_key": "${{ secrets.ASSEMBLYAI_API_KEY }}"
+          }
+          EOF
+          printf '# Seed note\n\nThe project deadline is March 14. Laido keeps every note in plain .laido files inside the vault.\n' > "$VAULT/notes/seed.laido"
+
+      - name: Run the simulation suite
+        if: steps.gate.outputs.ok == 'true'
+        working-directory: src-tauri
+        env:
+          LAIDO_VAULT: ${{ runner.temp }}/laido-vault
+        run: cargo test --bin laido sim_ -- --ignored --nocapture --test-threads=1
