@@ -997,6 +997,11 @@ body.reader-mode #reader {
 
 /* ---------- recent menu polish ---------- */
 #recent-menu { max-height: min(60vh, 460px); overflow-y: auto; }
+/* these are flex-column children with max-height — flex-shrink would squash
+   every entry into an invisible sliver once the list is long (overflow:
+   hidden on the buttons zeroes their min-height). never shrink; scroll. */
+#recent-menu > * { flex: 0 0 auto; }
+.skill-pop > * { flex: 0 0 auto; }
 #recent-menu button { padding: 5px 10px; font-size: 12px; }
 #recent-menu .menu-label { border-top: 1px solid var(--line); margin-top: 6px; padding-top: 8px; }
 #recent-menu .menu-label:first-child { border-top: 0; margin-top: 0; }

@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Laido</title>
+  <link rel="stylesheet" href="./styles.css" />
+  <link rel="stylesheet" href="./vendor/katex/katex.min.css" />
+  <script src="./vendor/katex/katex.min.js"></script>
+<script>
+window.__err = "";
+window.addEventListener("error", (e) => (window.__err += " ERR:" + e.message));
+window.addEventListener("unhandledrejection", (e) => (window.__err += " REJ:" + (e.reason?.message || e.reason)));
+const NAMES = ["untitled-31.laido","untitled-30.laido","brief.laido","review.laido","FIle.laido"];
+const RESP = {
+  vault_list: NAMES.map((n) => ({ name: n, modified: 1 })),
+  vault_dir: "C:/Users/Zrald/Documents/Laido/notes",
+  pending_open: null, settings_get: {}, detect_locale: "en", vault_read: "",
+  rag_list: [], schedule_list: [], schedule_month: [], skills_list: [], llm_models: [],
+  vault_stickies: [], rag_search: [],
+};
+window.__TAURI__ = {
+  core: { invoke: async (cmd) => (cmd in RESP ? RESP[cmd] : null), convertFileSrc: (p) => p },
+  event: { listen: async () => () => {}, emit: async () => {} },
+  dialog: { open: async () => null },
+  window: { getCurrentWindow: () => ({ onCloseRequested: async () => {} }) },
+  notification: { isPermissionGranted: async () => false, requestPermission: async () => "denied" },
+};
+const log = [];
+setTimeout(() => {
+  const fm = document.querySelector("#file-menu");
+  const rm = document.querySelector("#recent-menu");
+  const bf = document.querySelector("#btn-file");
+  log.push("start fmHidden=" + fm.classList.contains("hidden") + " rmHidden=" + rm.classList.contains("hidden"));
+  bf.click();
+  log.push("after btn-file fmHidden=" + fm.classList.contains("hidden"));
+  const recentBtn = document.querySelector('[data-cmd="recent"]');
+  log.push("recentBtn=" + !!recentBtn);
+  recentBtn.click();
+  setTimeout(() => {
+    log.push("after recent rmHidden=" + rm.classList.contains("hidden") + " rmButtons=" + rm.querySelectorAll("button").length + " rmHTML=" + rm.innerHTML.length + " err=" + (window.__err || "none"));
+    const box = document.createElement("div");
+    box.style.cssText = "position:fixed;top:4px;left:4px;z-index:9999;background:#fff;color:#000;font:11px monospace;padding:6px;max-width:860px;white-space:pre-wrap";
+    box.textContent = log.join("
+");
+    document.body.append(box);
+  }, 1500);
+}, 3000);
+</script>
+</head>
+<body>
+  <header id="titlebar" data-tauri-drag-region>
+    <div class="brand" data-tauri-drag-region><span class="mark"></span>Laido</div>
+    <div id="tabs" data-tauri-drag-region></div>
+    <button id="new-tab" title="New note (Ctrl+N)">+</button>
+    <div class="drag-fill" data-tauri-drag-region></div>
+    <div class="title-tools">
+      <button id="btn-library" title="Library — files (Ctrl+L)">&#x2630;</button>
+      <button id="btn-calendar" title="Schedule — calendar">&#x25A6;</button>
+      <button id="btn-rail" title="Hide agent panel (Ctrl+J)">&#x25EB;</button>
+      <button id="btn-settings" title="Settings (Ctrl+,)">&#x2699;</button>
+    </div>
+    <div class="win-controls">
+      <button id="win-min" aria-label="Minimize">&#x2013;</button>
+      <button id="win-max" aria-label="Maximize">&#x25A1;</button>
+      <button id="win-close" class="danger" aria-label="Close">&#x2715;</button>
+    </div>
+  </header>
+
+  <main>
+    <aside id="library">
+      <div class="lib-head">
+        <span class="lib-title" data-i18n="lib.title">Library</span>
+        <span class="head-spacer"></span>
+        <button id="lib-close" class="ghost mini" title="Hide library">&#x00AB;</button>
+      </div>
+      <div id="lib-drop" class="lib-drop">
+        <div class="lib-drop-text" data-i18n="lib.drop">Drop files here</div>
+        <button id="lib-browse" class="ghost mini" data-i18n="lib.browse">Browse…</button>
+      </div>
+      <div id="lib-progress" class="lib-progress hidden">
+        <div class="lib-progress-fill"></div>
+        <span class="lib-progress-label">0%</span>
+      </div>
+      <div id="lib-list"></div>
+      <div id="lib-stats" class="muted lib-stats"></div>
+    </aside>
+    <section id="editor">
+      <div class="editor-head">
+        <div class="file-wrap">
+          <button id="btn-file" data-i18n="file.menu">File</button>
+          <div id="file-menu" class="menu hidden">
+            <button data-cmd="save" data-i18n="file.save">Save</button>
+            <button data-cmd="save-as" data-i18n="file.saveAs">Save As&hellip;</button>
+            <button data-cmd="save-all" data-i18n="file.saveAll">Save All</button>
+            <button data-cmd="recent" data-i18n="file.recent">Recent</button>
+            <button data-cmd="open" data-i18n="file.open">Open&hellip;</button>
+            <button data-cmd="print" data-i18n="file.print">Print</button>
+          </div>
+          <div id="recent-menu" class="menu hidden"></div>
+        </div>
+        <span id="note-title" title="Click to rename">—</span>
+        <div class="fmt-tools">
+          <button data-fmt="bold" title="Bold (Ctrl+B)"><b>B</b></button>
+          <button data-fmt="italic" title="Italic (Ctrl+I)"><i>I</i></button>
+          <button id="btn-mark" data-fmt="mark" title="Highlight — click to pick a color"><span class="hl">H</span></button>
+          <button data-fmt="strike" title="Cross out"><span class="st">C</span></button>
+          <button data-fmt="ul" title="Bullet list">&#x2022;</button>
+          <button data-fmt="clear" title="Clear formatting">&#x2715;</button>
+          <span class="tool-gap"></span>
+          <button id="btn-sticky" title="Insert sticky note"><span class="stk">&#x25A4;</span></button>
+          <button id="btn-bigger" title="Bigger text">A+</button>
+          <button id="btn-smaller" title="Smaller text">A-</button>
+          <button id="btn-align" title="Align AI widgets into a grid">⊞</button>
+          <button id="btn-mic" title="Voice note — click to record, click again to transcribe">🎙</button>
+          <div id="voice-pop" class="marker-pop hidden">
+            <button id="voice-live-opt" class="voice-opt">Live transcription</button>
+            <button id="voice-rec-opt" class="voice-opt">Record, then transcribe</button>
+          </div>
+          <div id="mark-pop" class="marker-pop hidden">
+            <button data-color="yellow" class="sw" style="background:#ffe58a" title="Yellow"></button>
+            <button data-color="green" class="sw" style="background:#b8e6a3" title="Green"></button>
+            <button data-color="blue" class="sw" style="background:#a8d3f0" title="Blue"></button>
+            <button data-color="pink" class="sw" style="background:#f5b8cf" title="Pink"></button>
+            <button data-color="orange" class="sw" style="background:#ffd0a3" title="Orange"></button>
+            <button data-color="purple" class="sw" style="background:#d9c2f0" title="Purple"></button>
+          </div>
+          <div id="sticky-menu" class="menu hidden"></div>
+        </div>
+        <span class="head-spacer"></span>
+        <span id="save-state">saved</span>
+      </div>
+      <div id="note-body" contenteditable="true" spellcheck="false"></div>
+    </section>
+
+    <aside id="rail">
+      <div class="rail-block">
+        <h3 data-i18n="rail.agent">Agent</h3>
+        <div id="api-status" class="status"><span class="dot warn"></span><span id="api-status-text">checking…</span></div>
+        <select id="model-quick" class="model-select" title="Agent model (main)"></select>
+      </div>
+      <div class="rail-block">
+        <h3>Wrap</h3>
+        <select id="model-rewrite" class="model-select" title="Rewriter model — interprets your question before searching files"></select>
+      </div>
+      <div class="rail-block">
+        <h3>OCR</h3>
+        <select id="model-ocr" class="model-select" title="OCR model — vision models only; reads scanned PDFs added to the Library"></select>
+      </div>
+      <div class="rail-block">
+        <h3 data-i18n="rail.schedule">Schedule</h3>
+        <div id="schedules" class="muted">none — write @schedule in a note</div>
+      </div>
+      <div class="rail-block">
+        <h3 data-i18n="rail.skills">Skills</h3>
+        <div class="rail-tools">
+          <input id="skill-search" type="search" autocomplete="off" placeholder="Search skills…" />
+          <button id="skill-new" class="ghost mini" title="New skill">+</button>
+        </div>
+        <div id="skills" class="muted">none yet</div>
+      </div>
+      <div class="rail-block">
+        <h3 data-i18n="rail.activity">Activity</h3>
+        <div id="activity" class="muted">quiet&hellip;</div>
+      </div>
+    </aside>
+  </main>
+
+  <div id="open-modal" class="modal hidden">
+    <div class="modal-card">
+      <h2>Open note</h2>
+      <input id="open-filter" type="search" placeholder="Filter notes…" autocomplete="off" />
+      <div id="open-location" class="muted open-location"></div>
+      <div id="open-list" class="open-list"></div>
+      <div class="modal-actions">
+        <span class="muted"></span>
+        <button id="open-close" class="ghost">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="reminders"></div>
+  <div id="skill-pop" class="skill-pop hidden"></div>
+  <div id="mention-pop" class="skill-pop hidden"></div>
+  <div id="voice-live" class="hidden"></div>
+
+  <div id="reader" class="reader">
+    <div class="reader-head" data-tauri-drag-region>
+      <span id="reader-title" class="reader-title-text"></span>
+      <span id="reader-state" class="reader-state"></span>
+      <span class="head-spacer"></span>
+      <button id="reader-note" class="ghost mini" title="Open this note in Laido"></button>
+      <button id="reader-saveas" class="ghost mini" data-i18n="reader.saveAs" title="Save the edited result as a new note">Save as note</button>
+      <button id="reader-min" class="ghost mini" title="Minimize">&#x2013;</button>
+      <button id="reader-max" class="ghost mini" title="Maximize">&#x25A1;</button>
+      <button id="reader-close" class="ghost mini" title="Close">&#x2715;</button>
+    </div>
+    <div id="reader-body" class="reader-body"></div>
+  </div>
+
+  <div id="skill-modal" class="modal hidden">
+    <div class="modal-card">
+      <h2 id="skill-modal-title">New skill</h2>
+      <label data-i18n="skill.name">Name</label>
+      <input id="skill-name" placeholder="weekly-sync" autocomplete="off" />
+      <label data-i18n="skill.description">Description</label>
+      <input id="skill-desc" placeholder="Prepare the weekly project sync" autocomplete="off" />
+      <label data-i18n="skill.steps">Steps — one per line</label>
+      <textarea id="skill-steps" rows="7" spellcheck="false"></textarea>
+      <p class="muted" data-i18n="skill.help"></p>
+      <div class="modal-actions">
+        <span id="skill-status" class="muted"></span>
+        <button id="skill-sample" class="ghost" data-i18n="skill.sample">Insert sample</button>
+        <button id="skill-cancel" class="ghost" data-i18n="set.close">Cancel</button>
+        <button id="skill-save" class="primary" data-i18n="file.save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="cal-modal" class="modal hidden">
+    <div class="modal-card cal-card">
+      <div class="cal-top">
+        <button id="cal-prev" class="ghost mini">&#x25C0;</button>
+        <span id="cal-title" class="cal-title-text"></span>
+        <button id="cal-next" class="ghost mini">&#x25B6;</button>
+        <button id="cal-today" class="ghost mini" data-i18n="cal.today">Today</button>
+        <span class="cal-views" id="cal-views">
+          <button data-v="month" class="on">Month</button>
+          <button data-v="week">Week</button>
+          <button data-v="day">Day</button>
+          <button data-v="agenda">Agenda</button>
+        </span>
+        <span class="head-spacer"></span>
+        <button id="cal-add-btn" class="primary mini">+ Add entry</button>
+        <button id="cal-close" class="ghost" data-i18n="set.close">Close</button>
+      </div>
+      <div id="cal-view" class="cal-view"></div>
+      <div id="cal-detail" class="cal-detail hidden"></div>
+    </div>
+  </div>
+
+  <div id="cal-add" class="modal hidden">
+    <div class="modal-card cal-addcard">
+      <div class="cal-atop">
+        <h2 id="cal-add-title">New entry</h2>
+        <button id="cal-add-cancel" class="ghost mini">&#x2715;</button>
+      </div>
+      <div id="cal-add-text-row">
+        <label>What should it do?</label>
+        <input id="cal-add-text" placeholder="e.g. check the inbox" />
+      </div>
+      <label>Action</label>
+      <div id="cal-add-kinds" class="cal-kinds"></div>
+      <label>Repeats</label>
+      <select id="cal-freq" class="model-select">
+        <option value="once">Once (this date)</option>
+        <option value="daily">Every day</option>
+        <option value="weekly">Every week (this weekday)</option>
+        <option value="monthly">Every month (this day)</option>
+        <option value="weekdays">Weekdays (Mon–Fri)</option>
+        <option value="every">Every N hours</option>
+      </select>
+      <input id="cal-add-every" type="number" min="1" max="72" value="2" class="hidden" />
+      <div class="cal-add-row" id="cal-add-date-row">
+        <div><label>Date</label><input id="cal-add-date" type="date" /></div>
+        <div><label>Time</label><input id="cal-add-time" type="time" value="08:00" /></div>
+      </div>
+      <label>Into note</label>
+      <input id="cal-add-note" value="schedule.md" />
+      <div class="modal-actions">
+        <span id="cal-add-hint" class="muted"></span>
+        <button id="cal-add-discard" class="ghost">Discard</button>
+        <button id="cal-add-save" class="primary">Inscribe entry</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="settings-modal" class="modal hidden">
+    <div class="modal-card">
+      <h2>Settings</h2>
+      <label for="key-nebius">Nebius Token Factory API key</label>
+      <input id="key-nebius" type="password" placeholder="from tokenfactory.nebius.com" autocomplete="off" />
+      <label for="key-tavily">Tavily API key <span class="muted">(for @research)</span></label>
+      <input id="key-tavily" type="password" placeholder="from tavily.com" autocomplete="off" />
+      <label for="key-assemblyai">AssemblyAI API key <span class="muted">(for voice notes)</span></label>
+      <input id="key-assemblyai" type="password" placeholder="from assemblyai.com" autocomplete="off" />
+      <label for="lang-select" data-i18n="set.language">Language</label>
+      <select id="lang-select" class="model-select"></select>
+      <label>Fast model <span class="muted">— classification, runs on every save</span></label>
+      <select id="model-fast" class="model-select"></select>
+      <label>Main model <span class="muted">— annotation &amp; research</span></label>
+      <select id="model-main" class="model-select"></select>
+      <label>Deep model <span class="muted">— deep questions (?)</span></label>
+      <select id="model-deep" class="model-select"></select>
+      <label>Rewriter model <span class="muted">— interprets your question before file search</span></label>
+      <select id="model-rewrite-set" class="model-select"></select>
+      <label>OCR model <span class="muted">— vision only; transcribes scanned PDFs added to the Library</span></label>
+      <select id="model-ocr-set" class="model-select"></select>
+      <button id="models-refresh" class="ghost">Load models from Nebius</button>
+      <p class="muted">Keys are stored locally in your vault&rsquo;s <code>.laido/settings.json</code>.
+      Nothing is sent anywhere until you ask.</p>
+      <div class="modal-actions">
+        <span id="settings-status" class="muted"></span>
+        <button id="settings-test" class="ghost" data-i18n="set.save">Save &amp; test</button>
+        <button id="settings-save" class="primary" data-i18n="file.save">Save</button>
+        <button id="settings-close" class="ghost" data-i18n="set.close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
