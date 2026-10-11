@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "ui": "tsc",
+    "tauri": "tauri",
     "dev": "tsc && tauri dev",
     "build": "tsc && tauri build",
     "loc": "node scripts/loc.mjs"
