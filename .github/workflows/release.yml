@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            label: macOS (Apple Silicon)
+          - platform: macos-13
+            label: macOS (Intel)
+          - platform: ubuntu-22.04
+            label: Linux
+          - platform: windows-latest
+            label: Windows
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libasound2-dev \
+            libxdo-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      # a tag push (v*) builds AND publishes a GitHub Release with the
+      # installers; a plain main push just verifies the build on all platforms
+      - name: Build Laido
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+          releaseName: "Laido ${{ github.ref_name }}"
+          releaseBody: |
+            **Laido — the notepad that acts on what you write.**
+
+            Installers for every platform are attached below. Unsigned builds —
+            your OS may ask you to confirm before the first launch.
+
+            - **Windows:** `.msi` or `.exe` (NSIS)
+            - **macOS:** `.dmg` (Apple Silicon and Intel)
+            - **Linux:** `.AppImage`, `.deb`, `.rpm`
+
+            First launch: open Settings and add your Nebius / Tavily /
+            AssemblyAI keys. Your notes live in `Documents/Laido`.
+          releaseDraft: false
+          prerelease: false
