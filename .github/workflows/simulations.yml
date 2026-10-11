@@ -23,6 +23,18 @@ jobs:
         if: steps.gate.outputs.ok != 'true'
         run: echo "No NEBIUS_API_KEY secret configured — simulations skipped."
 
+      - name: Linux dependencies
+        if: steps.gate.outputs.ok == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libasound2-dev \
+            libxdo-dev
+
       - uses: dtolnay/rust-toolchain@stable
         if: steps.gate.outputs.ok == 'true'
 
