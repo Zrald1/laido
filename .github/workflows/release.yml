@@ -17,8 +17,6 @@ jobs:
         include:
           - platform: macos-latest
             label: macOS (Apple Silicon)
-          - platform: macos-13
-            label: macOS (Intel)
           - platform: ubuntu-22.04
             label: Linux
           - platform: windows-latest
@@ -68,7 +66,7 @@ jobs:
             your OS may ask you to confirm before the first launch.
 
             - **Windows:** `.msi` or `.exe` (NSIS)
-            - **macOS:** `.dmg` (Apple Silicon and Intel)
+            - **macOS:** `.dmg` (Apple Silicon)
             - **Linux:** `.AppImage`, `.deb`, `.rpm`
 
             First launch: open Settings and add your Nebius / Tavily /

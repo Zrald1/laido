@@ -95,7 +95,7 @@ Commands run only when you press Enter on their line — pasting text is safe.
 ## Download
 
 Grab an installer from the [Releases](https://github.com/Zrald1/laido/releases)
-page — `.msi`/`.exe` for Windows, `.dmg` for macOS (Apple Silicon and Intel),
+page — `.msi`/`.exe` for Windows, `.dmg` for macOS (Apple Silicon),
 `.AppImage`/`.deb`/`.rpm` for Linux. Builds are unsigned, so your OS may ask
 you to confirm before the first launch. Every push to `main` is built on all
 three platforms; pushing a `v*` tag publishes a release automatically.
