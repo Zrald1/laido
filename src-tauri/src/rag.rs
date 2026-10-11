@@ -368,7 +368,13 @@ fn save_vectors_at(path: PathBuf, vecs: &[Vec<f32>]) -> Result<(), String> {
 }
 
 fn load_vectors(slug: &str) -> Vec<Vec<f32>> {
-    load_vectors_at(&vectors_path(slug))
+    // library docs live in vectors/, notes in notes/ — the lanes must find
+    // whichever exists, or note retrieval silently loses every vector lane
+    let lib = load_vectors_at(&vectors_path(slug));
+    if !lib.is_empty() {
+        return lib;
+    }
+    load_vectors_at(&notes_vec_path(slug))
 }
 
 fn load_vectors_at(path: &PathBuf) -> Vec<Vec<f32>> {
