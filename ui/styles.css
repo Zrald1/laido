@@ -94,7 +94,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   gap: 2px;
   padding-right: 8px;
 }
-.title-tools button { width: 30px; height: 26px; border-radius: 6px; color: var(--muted); font-size: 13px; transition: background-color .15s ease, color .15s ease; }
+.title-tools button { width: 36px; height: 30px; border-radius: 7px; color: var(--muted); font-size: 15px; transition: background-color .15s ease, color .15s ease; }
 .title-tools button:hover { background: var(--bg-3); color: var(--text); }
 .title-tools button.on { color: var(--accent); }
 .win-controls { display: flex; height: 100%; }
@@ -147,10 +147,10 @@ body.no-rail .rail-tab { display: block; }
 }
 .file-wrap { position: relative; margin-right: 10px; }
 #btn-file {
-  padding: 4px 10px;
+  padding: 6px 13px;
   border-radius: 7px;
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: 13.5px;
   transition: background-color .15s ease, color .15s ease;
 }
 #btn-file:hover { background: var(--bg-3); color: var(--text); }
@@ -176,7 +176,7 @@ body.no-rail .rail-tab { display: block; }
 
 .fmt-tools { display: flex; align-items: center; gap: 2px; margin-left: 12px; position: relative; }
 .fmt-tools > button {
-  width: 26px; height: 22px; border-radius: 6px; color: var(--muted); font-size: 12px;
+  width: 32px; height: 28px; border-radius: 7px; color: var(--muted); font-size: 14px;
   display: inline-flex; align-items: center; justify-content: center;
   transition: background-color .15s ease, color .15s ease;
 }
@@ -994,6 +994,18 @@ body.reader-mode #reader {
 
 /* ---------- recent menu: full note list, scrollable ---------- */
 #recent-menu { max-height: 70vh; overflow-y: auto; }
+
+/* ---------- bigger widget chrome (AI cards; stickies keep their sizing) ---------- */
+.callout:not(.sticky) .card-del,
+.callout:not(.sticky) .card-pin,
+.callout:not(.sticky) .card-stick,
+.callout:not(.sticky) .card-tts {
+  width: 27px; height: 27px; top: 6px; border-radius: 7px; font-size: 15px;
+}
+.callout:not(.sticky) .card-del { right: 8px; }
+.callout:not(.sticky) .card-pin { right: 39px; }
+.callout:not(.sticky) .card-stick { right: 70px; }
+.callout:not(.sticky) .card-tts { right: 101px; }
 
 /* ---------- recent menu polish ---------- */
 #recent-menu { max-height: min(60vh, 460px); overflow-y: auto; }
