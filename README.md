@@ -1,0 +1,96 @@
+<p align="center">
+  <img src="app-icon.png" width="96" alt="Laido" />
+</p>
+
+<h1 align="center">Laido</h1>
+<p align="center"><strong>The way of AI — a notepad that acts on what you write.</strong></p>
+
+Laido is an always-on personal agent whose memory and interface is a plaintext
+notepad. You write notes; Laido reads them, answers from them, researches the
+web, runs scheduled work while you sleep, and leaves every result on the page
+as an editable widget — never hidden in a chat log.
+
+Your notes are the memory, and the memory is yours.
+
+## What it does
+
+- **A real notepad** — an infinite ruled sheet with draggable, resizable AI
+  widgets living beside your text. Everything autosaves to local files.
+- **Hybrid retrieval** — vector search + BM25 + entity graph + quantum-inspired
+  lanes (density-matrix query, graph walk, interference re-ranking) over your
+  embedded library, fused with web research. Cite-first answers.
+- **Your whole vault is searchable** — notes are indexed alongside library
+  files; `@ask` fuses library + notes + web into one grounded answer.
+- **Research loops** — `@loop 10 arxiv breakthroughs in quantization` iterates:
+  each loop refines the search angle, synthesizes findings, writes and runs a
+  Python simulation of the central claim in a sandbox, and feeds the result
+  into the next loop. Loop cards pin themselves in a clean grid.
+- **Scheduled autonomy** — `@schedule daily 08:00 brief` and friends. The agent
+  works while the laptop sleeps and writes results into your notes, with a
+  calendar (month/week/day/agenda) to manage it.
+- **Skills** — reusable multi-step routines written in plain lines
+  (`@research`, `prompt:`, `remind:`, `summary`, `loop:`), plus built-in
+  presets (daily brief, weekly review, meeting prep, research loop…).
+- **Voice notes** — record natively and transcribe with AssemblyAI, either
+  live streaming (text appears as you speak) or record-then-transcribe.
+- **Read widgets aloud** — every AI card has a text-to-speech button.
+- **`.laido` files** — notes are plain markdown in `.laido` files inside
+  `Documents/Laido`, with the Laido icon on Windows. Copy the folder and you
+  moved your agent's memory; delete a file and it forgets.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `@ask <question>` | Library + your notes + web, fused into one cited answer |
+| `@document <file?> <question>` | Ask a specific library file (or all files) |
+| `@research <topic>` | Deep research — your files + the web |
+| `@loop [n] [@target] <query>` | Iterative research with per-loop simulations (`@loop stop` ends early) |
+| `@summary [instruction]` | Summarize the current note (including its widgets) |
+| `@recall [target] [n]` | Quiz yourself from your corpus; schedules spaced reviews |
+| `@tasks [target]` | Extract action items from files or notes |
+| `@related` | The notes closest to this one, as `[[links]]` |
+| `@skill <name>` | Run a saved skill |
+| `@schedule <spec> <action>` | Recurring agent work (`daily 08:00 brief`, `every 6h`, `mon-fri 09:00 …`) |
+| `@sticky` / `@schedule` / … | Sticky notes, calendar entries, and more in the pickers |
+
+Commands run only when you press Enter on their line — pasting text is safe.
+
+## Quickstart
+
+```bash
+npm install
+npm run dev        # tsc + tauri dev
+npm run build      # production bundle
+```
+
+Requires Rust (stable), Node 20+, and a system webview (WebView2 on Windows,
+WebKitGTK on Linux).
+
+On first launch, open **Settings** and add your keys:
+
+- **Nebius Token Factory** — inference (Nemotron 3 Nano · Super · Ultra,
+  routed by task cost)
+- **Tavily** — `@research` / `@ask` web lane
+- **AssemblyAI** — voice notes
+
+All keys are stored locally in your vault (`.laido/settings.json`), and all
+data stays in `~/Documents/Laido` unless you explicitly ask for web research.
+
+## Architecture
+
+- **Rust + Tauri v2 backend, vanilla TypeScript + plain CSS frontend** — one
+  small binary for Windows / macOS / Linux, no runtime to install.
+- **Local-first storage** — notes, library index, vectors, graphs, schedules
+  and simulation scripts all live in the vault folder as plain files.
+- **Sandboxed agent** — every file the AI reads or writes resolves inside the
+  vault; outside files enter only through your explicit upload.
+- **Retrieval** — flat vector files + BM25 + entity graph, fused with
+  reciprocal-rank fusion and interference re-ranking; map-reduce for
+  corpus-wide summaries.
+- **Visible by design** — every AI action leaves a trace: a widget on the
+  page or a line in the activity feed. No invisible magic.
+
+## License
+
+Apache-2.0

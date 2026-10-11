@@ -1,0 +1,40 @@
+# dependencies & build output
+node_modules/
+ui/*.js
+ui/*.js.map
+src-tauri/target/
+src-tauri/gen/
+dist/
+build/
+icon-source.png
+
+# docs — README only in the repo; other .md notes stay local
+*.md
+!README.md
+
+# secrets & local config — never commit API keys
+.env
+.env.*
+!.env.example
+settings.json
+
+# os / editor junk
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+
+# logs & temp
+*.log
+*.tmp
+*.bak
+
+# secrets — never versioned
+.env
+.env.*
+*.key
+*.pem
+settings.json
+.laido/
+secrets*
