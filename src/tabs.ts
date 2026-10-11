@@ -102,6 +102,22 @@ export async function openTab(name: string) {
   }
 }
 
+/** names saved before the .laido migration still say .md — repair them
+ *  against the vault so restored tabs, recent lists and menus always work */
+function repairNames(names: string[], all: string[]): string[] {
+  const set = new Set(all);
+  const out: string[] = [];
+  for (const n of names) {
+    let fixed = n;
+    if (!set.has(fixed) && /\.md$/.test(n)) {
+      const alt = n.replace(/\.md$/, ".laido");
+      if (set.has(alt)) fixed = alt;
+    }
+    if (set.has(fixed) && !out.includes(fixed)) out.push(fixed);
+  }
+  return out;
+}
+
 export async function initTabs() {
   const qp = new URLSearchParams(location.search).get("note");
   if (qp) {
@@ -121,15 +137,18 @@ export async function initTabs() {
       tabs = [];
     }
   }
-  if (tabs.length === 0) {
-    const notes = await invoke<Array<{ name: string }>>("vault_list");
-    if (notes.length > 0) tabs = [notes[0].name];
-  }
+  const notes = await invoke<Array<{ name: string }>>("vault_list").catch(() => []);
+  const allNames = notes.map((n) => n.name);
+  tabs = repairNames(tabs, allNames);
+  active = repairNames(active ? [active] : [], allNames)[0] ?? "";
+  if (tabs.length === 0 && allNames.length > 0) tabs = [allNames[0]];
   if (active === "" && tabs.length > 0) active = tabs[0];
+  persist();
   render();
   if (active) {
     try {
       await loadNote(active);
+      pushRecent(active);
     } catch {
       await close(active);
     }
@@ -245,6 +264,14 @@ async function openRecentMenu() {
   } catch {
     all = [];
   }
+  // recent entries saved before the .laido migration say .md — repair them
+  // against the vault and drop anything that no longer exists
+  list = repairNames(list, all);
+  try {
+    localStorage.setItem(RECENT_KEY, JSON.stringify(list));
+  } catch {
+    /* ignore */
+  }
   const add = (label: string, name: string) => {
     const b = document.createElement("button");
     b.textContent = label;
@@ -294,9 +321,20 @@ async function openExternal() {
   try {
     const picked = await api.open({
       multiple: false,
-      filters: [{ name: "Notes", extensions: ["md", "markdown", "txt"] }],
+      filters: [
+        { name: "Laido notes", extensions: ["laido"] },
+        { name: "Markdown & text", extensions: ["md", "markdown", "txt"] },
+      ],
     });
     if (!picked || typeof picked !== "string") return;
+    // a note that already lives in the vault opens directly — importing it
+    // would duplicate it as name-2.laido
+    const dir = await invoke<string>("vault_dir").catch(() => "");
+    const file = picked.replace(/\\/g, "/").split("/").pop() ?? "";
+    if (dir && picked.replace(/\\/g, "/").startsWith(dir.replace(/\\/g, "/")) && file) {
+      await openTab(file);
+      return;
+    }
     const name = await invoke<string>("import_note", { path: picked });
     addActivity(`⤓ opened ${name} from disk`);
     await openTab(name);
