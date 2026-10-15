@@ -1,3 +1,6 @@
+
+const S = (v: unknown): string => typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : "";
+const DS = (v: string | undefined): string => { const s = v ?? ""; return /^(?:undefined|null|NaN|-?Infinity|[object [^]]*])$/.test(s) ? "" : s; };
 /* ---------- canvas — freeform drawing card ------------------------------
  * `[!canvas] title` + a `> {"v":1,"elements":[…]}` line persists an
  * Excalidraw-lite scene: elements carry id/type/geometry, the JSON travels
@@ -6,7 +9,7 @@
  * Delete removes; dbl-click a text to edit it. */
 
 const esc = (s: string) =>
-  String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  S(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 export interface CEl {
   id: string;
@@ -77,7 +80,7 @@ const toolsHtml = () =>
   `</span></span>`;
 
 export function canvasCallout(block: string[]): string {
-  if (!Array.isArray(block)) block = [];
+  if (!Array.isArray(block)) block = []; block = block.map((l) => S(l));
   const head = block[0] ?? "";
   const topic = head.replace(/^\[!\w+\]\s*/, "").trim() || "canvas";
   const scene = block.slice(1).join("\n").trim();
@@ -93,7 +96,7 @@ export function canvasCallout(block: string[]): string {
 }
 
 export function buildCanvasCard(title: string): HTMLElement {
-  title = String(title ?? "");
+  title = S(title);
   const card = document.createElement("div");
   card.className = "callout canvas-card";
   card.dataset.kind = "canvas";
@@ -109,8 +112,8 @@ export function buildCanvasCard(title: string): HTMLElement {
 /** scene → the two-line `[!canvas]` callout that round-trips it */
 export function canvasToMd(card: HTMLElement): string {
   if (!card?.dataset) return "";
-  const scene = card.dataset.scene?.trim();
-  return `> [!canvas] ${card.dataset.title ?? "canvas"}` + (scene ? `\n> ${scene}` : "");
+  const scene = DS(card.dataset.scene)?.trim();
+  return `> [!canvas] ${DS(card.dataset.title) ?? "canvas"}` + (scene ? `\n> ${scene}` : "");
 }
 
 export function wireCanvas(card: HTMLElement) {

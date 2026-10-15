@@ -1,3 +1,5 @@
+
+const S = (v: unknown): string => typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : "";
 /* ---------- `[[` autocomplete context — pure text helpers -------------
  * Kept DOM-free so the suggester's query grammar is unit-testable. */
 
@@ -7,7 +9,7 @@
 export function matchWikiCtx(
   before: string,
 ): { start: number; q: string; embed: boolean } | null {
-  before = String(before ?? "");
+  before = S(before);
   const m = before.match(/!?\[\[([^\[\]]*)$/);
   if (!m) return null;
   const open = m[0].indexOf("[[");
@@ -22,7 +24,7 @@ export function matchWikiCtx(
 /** split a `[[…` query into note-part vs heading-part —
  *  `[[stem#partial` → {stem:"stem", head:"partial"}; `[[#h` → stem "" */
 export function splitWikiQuery(q: string): { stem: string; head: string } | null {
-  const m = String(q ?? "").match(/^([^#]*)#(.*)$/);
+  const m = S(q).match(/^([^#]*)#(.*)$/);
   if (!m) return null;
   return { stem: m[1].trim(), head: m[2] };
 }

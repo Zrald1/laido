@@ -11,8 +11,11 @@ import { invoke } from "./ipc.js";
 import { stem } from "./match.js";
 import { addActivity } from "./log.js";
 
+const S = (v: unknown): string => typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : "";
+const DS = (v: string | undefined): string => { const s = v ?? ""; return /^(?:undefined|null|NaN|-?Infinity|[object [^]]*])$/.test(s) ? "" : s; };
+
 const esc = (s: string) =>
-  String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  S(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 const headHtml = (title: string) =>
   `<div class="callout-head"><span class="callout-title">▦ ${esc(title)}</span>` +
@@ -28,7 +31,7 @@ const headHtml = (title: string) =>
   `<button class="base-re" title="rescan">⟳</button></span></div>`;
 
 export function baseCallout(block: string[]): string {
-  if (!Array.isArray(block)) block = [];
+  if (!Array.isArray(block)) block = []; block = block.map((l) => S(l));
   const head = block[0] ?? "";
   const topic = head.replace(/^\[!\w+\]\s*/, "").trim() || "base";
   let q = "";
@@ -94,7 +97,7 @@ export function baseCallout(block: string[]): string {
 }
 
 export function buildBaseCard(title: string): HTMLElement {
-  title = String(title ?? "");
+  title = S(title);
   const card = document.createElement("div");
   card.className = "callout base-card";
   card.dataset.kind = "base";
@@ -119,36 +122,36 @@ export function buildBaseCard(title: string): HTMLElement {
 
 export function baseToMd(card: HTMLElement): string {
   if (!card?.dataset) return "";
-  const lines = [`> [!base] ${card.dataset.title ?? "base"}`];
-  const q = card.dataset.q?.trim();
-  const cols = card.dataset.cols?.trim();
-  const group = card.dataset.group?.trim();
-  const sort = card.dataset.sort?.trim();
-  const gorder = card.dataset.gorder?.trim();
-  const sum = card.dataset.sum?.trim();
+  const lines = [`> [!base] ${DS(card.dataset.title) ?? "base"}`];
+  const q = DS(card.dataset.q)?.trim();
+  const cols = DS(card.dataset.cols)?.trim();
+  const group = DS(card.dataset.group)?.trim();
+  const sort = DS(card.dataset.sort)?.trim();
+  const gorder = DS(card.dataset.gorder)?.trim();
+  const sum = DS(card.dataset.sum)?.trim();
   if (q) lines.push(`> q: ${q}`);
   if (cols) lines.push(`> cols: ${cols}`);
   if (sort) lines.push(`> sort: ${sort}`);
   if (group) lines.push(`> group: ${group}`);
   if (gorder) lines.push(`> gorder: ${gorder}`);
   if (sum) lines.push(`> sum: ${sum}`);
-  for (const d of (card.dataset.fx ?? "").split(";;").filter(Boolean)) {
+  for (const d of (DS(card.dataset.fx) ?? "").split(";;").filter(Boolean)) {
     const eq = d.indexOf("=");
     if (eq > 0) lines.push(`> f: ${d.slice(0, eq)} = ${d.slice(eq + 1)}`);
   }
-  const dateP = card.dataset.date?.trim();
+  const dateP = DS(card.dataset.date)?.trim();
   if (dateP) lines.push(`> date: ${dateP}`);
-  const lim = card.dataset.limit?.trim();
+  const lim = DS(card.dataset.limit)?.trim();
   if (lim) lines.push(`> limit: ${lim}`);
-  const ord = card.dataset.corder?.trim();
+  const ord = DS(card.dataset.corder)?.trim();
   if (ord) lines.push(`> corder: ${ord}`);
-  const sp = card.dataset.span?.trim();
+  const sp = DS(card.dataset.span)?.trim();
   if (sp && sp !== "month") lines.push(`> span: ${sp}`);
-  const dirP = card.dataset.in?.trim();
+  const dirP = DS(card.dataset.in)?.trim();
   if (dirP) lines.push(`> in: ${dirP}`);
-  const hideP = card.dataset.hide?.trim();
+  const hideP = DS(card.dataset.hide)?.trim();
   if (hideP) lines.push(`> hide: ${hideP}`);
-  const view = card.dataset.view ?? "table";
+  const view = DS(card.dataset.view) ?? "table";
   if (view !== "table" && (view !== "board" || group)) lines.push(`> view: ${view}`);
   return lines.join("\n");
 }
@@ -156,9 +159,9 @@ export function baseToMd(card: HTMLElement): string {
 /** compare two prop values — numeric when both parse as numbers,
  *  else lexical (ISO dates sort correctly as strings). Pure. */
 export function propCmp(got: string, op: string, want: string): boolean {
-  const g = String(got ?? "").trim();
-  const w = String(want ?? "").trim();
-  op = String(op ?? "");
+  const g = S(got).trim();
+  const w = S(want).trim();
+  op = S(op);
   if (op === "=" || op === "==") {
     // `a|b` alternates — `prop:status=wip|done` is an OR group
     const wants = w.toLowerCase().split("|").map((s) => s.trim()).filter(Boolean);
@@ -187,7 +190,7 @@ type FVal = number | string;
 
 export function evalFormula(expr: string, props: Map<string, string>): FVal {
   let i = 0;
-  const s = String(expr ?? "");
+  const s = S(expr);
   if (!(props instanceof Map)) props = new Map();
   const ws = () => { while (i < s.length && /\s/.test(s[i])) i++; };
   const num = (v: FVal): number => {
@@ -242,11 +245,11 @@ export function evalFormula(expr: string, props: Map<string, string>): FVal {
         case "round": return Math.round(num(args[0] ?? 0));
         case "floor": return Math.floor(num(args[0] ?? 0));
         case "ceil": return Math.ceil(num(args[0] ?? 0));
-        case "len": return String(args[0] ?? "").length;
-        case "upper": return String(args[0] ?? "").toUpperCase();
-        case "lower": return String(args[0] ?? "").toLowerCase();
+        case "len": return S(args[0]).length;
+        case "upper": return S(args[0]).toUpperCase();
+        case "lower": return S(args[0]).toLowerCase();
         case "concat": return args.map((a) => String(a)).join("");
-        case "contains": return String(args[0] ?? "").toLowerCase().includes(String(args[1] ?? "").toLowerCase()) ? 1 : 0;
+        case "contains": return S(args[0]).toLowerCase().includes(S(args[1]).toLowerCase()) ? 1 : 0;
         default: return "";
       }
     }
@@ -312,10 +315,10 @@ export function evalFormula(expr: string, props: Map<string, string>): FVal {
 
 /** parse `f:`/`formula:` lines → name→expr map. Pure. */
 export function parseFormulas(lines: string[]): Map<string, string> {
-  if (!Array.isArray(lines)) lines = [];
+  if (!Array.isArray(lines)) lines = []; lines = lines.map((l) => S(l));
   const out = new Map<string, string>();
   for (const l of lines) {
-    const m = String(l ?? "").match(/^(?:f|formula|calc)\s*:\s*([\w-]+)\s*=\s*(.+)$/i);
+    const m = S(l).match(/^(?:f|formula|calc)\s*:\s*([\w-]+)\s*=\s*(.+)$/i);
     if (m) out.set(m[1].toLowerCase(), m[2].trim());
   }
   return out;
@@ -329,8 +332,8 @@ export function parseFormulas(lines: string[]): Map<string, string> {
  *  kinds (task/card) can't answer off the index — they fall back to the
  *  fm form, so `is:task` reads `task: true` / `status: task`. Pure. */
 export function isToken(p: string, noteStem: string, props: Map<string, string>): boolean {
-  p = String(p ?? "");
-  noteStem = String(noteStem ?? "");
+  p = S(p);
+  noteStem = S(noteStem);
   if (!(props instanceof Map)) props = new Map();
   const s = noteStem.toLowerCase();
   const get = (k: string) =>
@@ -370,8 +373,8 @@ export function baseMatch(
   noteStem: string,
   props: Map<string, string>,
 ): boolean {
-  q = String(q ?? "");
-  noteStem = String(noteStem ?? "");
+  q = S(q);
+  noteStem = S(noteStem);
   if (!(props instanceof Map)) props = new Map();
   // pull `prop:k="v with spaces"` out before space-tokenizing
   const quoted: string[] = [];
@@ -468,16 +471,16 @@ export function buildPropMaps(ix: IndexLike): Map<string, Map<string, string>> {
   };
   for (const row of list(ix.props)) {
     if (!Array.isArray(row)) continue;
-    const [note, k, v] = row.map((x) => String(x ?? ""));
+    const [note, k, v] = row.map((x) => S(x));
     if (!byNote.has(note)) byNote.set(note, fileOf(note));
     byNote.get(note)!.set(k, v);
   }
-  for (const n of list(ix.notes).map((x) => String(x ?? ""))) if (!byNote.has(n)) byNote.set(n, fileOf(n));
+  for (const n of list(ix.notes).map((x) => S(x))) if (!byNote.has(n)) byNote.set(n, fileOf(n));
   return byNote;
 }
 
 export function baseSort(spec: string): (a: Map<string, string>, b: Map<string, string>) => number {
-  const rules = String(spec ?? "").split(",").map((s) => s.trim()).filter(Boolean).map((s) => {
+  const rules = S(spec).split(",").map((s) => s.trim()).filter(Boolean).map((s) => {
     const m = s.match(/^(-?)([\w.-]+)(?:\s+(asc|desc))?$/i);
     return m ? { key: m[2].toLowerCase(), desc: m[1] === "-" || m[3]?.toLowerCase() === "desc" } : null;
   }).filter((r): r is { key: string; desc: boolean } => !!r);

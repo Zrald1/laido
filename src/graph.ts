@@ -10,14 +10,17 @@ import { invoke } from "./ipc.js";
 import { stem } from "./match.js";
 import { baseMatch, buildPropMaps, type IndexLike } from "./base.js";
 
+const S = (v: unknown): string => typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : "";
+const DS = (v: string | undefined): string => { const s = v ?? ""; return /^(?:undefined|null|NaN|-?Infinity|[object [^]]*])$/.test(s) ? "" : s; };
+
 interface GNode { note: string; x: number; y: number; vx: number; vy: number; deg: number; }
 interface GEdge { a: number; b: number; }
 
 const esc = (s: string) =>
-  String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  S(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 export function graphCallout(block: string[]): string {
-  if (!Array.isArray(block)) block = [];
+  if (!Array.isArray(block)) block = []; block = block.map((l) => S(l));
   const head = block[0] ?? "";
   const topic = head.replace(/^\[!\w+\]\s*/, "").trim() || "vault map";
   const raw = "> " + block.join("\n> ");
@@ -34,11 +37,11 @@ export function graphCallout(block: string[]): string {
 
 export function graphToMd(card: HTMLElement): string {
   if (!card?.dataset) return "";
-  return `> [!graph] ${card.dataset.title ?? "vault map"}`;
+  return `> [!graph] ${DS(card.dataset.title) ?? "vault map"}`;
 }
 
 export function buildGraphCard(title: string): HTMLElement {
-  title = String(title ?? "");
+  title = S(title);
   const card = document.createElement("div");
   card.className = "callout graph-card";
   card.dataset.kind = "graph";

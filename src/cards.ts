@@ -12,6 +12,9 @@
 
 import { addActivity } from "./log.js";
 
+const S = (v: unknown): string => typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : "";
+const DS = (v: string | undefined): string => { const s = v ?? ""; return /^(?:undefined|null|NaN|-?Infinity|[object [^]]*])$/.test(s) ? "" : s; };
+
 export interface FlashCard {
   front: string;
   back: string;
@@ -26,7 +29,7 @@ export interface Sched {
 
 /** fnv-1a 8-hex — the card-line id that survives reload */
 export function h8(s: string): string {
-  s = String(s ?? "");
+  s = S(s);
   let h = 0x811c9dc5;
   for (let i = 0; i < s.length; i++) {
     h ^= s.charCodeAt(i);
@@ -36,7 +39,7 @@ export function h8(s: string): string {
 }
 
 const escHtml = (s: string) =>
-  String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  S(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 const todayIso = (): string => {
   const d = new Date();
@@ -45,7 +48,7 @@ const todayIso = (): string => {
 
 const addDays = (iso: string, n: number): string => {
   const d = new Date(`${iso}T12:00:00`); // noon — dodge DST edges
-  if (!Number.isFinite(+d) || !Number.isFinite(n)) return String(iso ?? "");
+  if (!Number.isFinite(+d) || !Number.isFinite(n)) return S(iso);
   d.setDate(d.getDate() + n);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 };
@@ -83,7 +86,7 @@ export function previewIvl(s: Sched, g: 0 | 1 | 2 | 3): string {
 }
 
 export function isDue(s: Sched | undefined, today = todayIso()): boolean {
-  return !s || String(s.due ?? "") <= today;
+  return !s || S(s.due) <= today;
 }
 
 /* ---------- markdown <-> model ---------- */
@@ -95,7 +98,7 @@ export interface CardDeck {
 }
 
 export function parseCards(block: string[]): CardDeck {
-  if (!Array.isArray(block)) block = [];
+  if (!Array.isArray(block)) block = []; block = block.map((l) => S(l));
   const head = block[0] ?? "";
   const title = head.replace(/^\[!\w+\]\s*/, "").trim() || "cards";
   const cards: FlashCard[] = [];
@@ -122,7 +125,7 @@ export function parseCards(block: string[]): CardDeck {
 
 export function cardsToMd(card: HTMLElement): string {
   if (!card?.dataset) return "";
-  const title = card.dataset.topic ?? "cards";
+  const title = DS(card.dataset.topic) ?? "cards";
   const lines = [`> [!cards] ${title}`];
   const seen = new Set<string>();
   card.querySelectorAll<HTMLElement>(".fc-row").forEach((r) => {
@@ -134,7 +137,7 @@ export function cardsToMd(card: HTMLElement): string {
   // only persist sched state whose card still exists
   let sched: Record<string, Sched> = {};
   try {
-    sched = card.dataset.sched ? JSON.parse(card.dataset.sched) as Record<string, Sched> : {};
+    sched = DS(card.dataset.sched) ? JSON.parse(DS(card.dataset.sched)) as Record<string, Sched> : {};
   } catch { sched = {}; }
   for (const h of seen) {
     const s = sched[h];
@@ -157,7 +160,7 @@ export function cardsInnerHtml(): string {
 }
 
 export function buildCardsCard(title: string, cards: FlashCard[] = []): HTMLElement {
-  title = String(title ?? "");
+  title = S(title);
   const el = document.createElement("div");
   el.className = "callout cards-card";
   el.dataset.kind = "cards";
@@ -178,7 +181,7 @@ function fcRow(c: FlashCard, sched: Map<string, Sched>, changed: () => void): HT
   const r = document.createElement("div");
   r.className = "fc-row";
   r.dataset.h = h;
-  r.dataset.back = String(c.back ?? "");
+  r.dataset.back = S(c.back);
   const due = sched.get(h);
   const dueLabel =
     due && due.ivl > 0
@@ -265,7 +268,7 @@ export function wireCards(card: HTMLElement) {
   const wireRow = (r: HTMLElement) => {
     const c = rowCard(r);
     r.dataset.h = h8(c.front);
-    r.dataset.back = String(c.back ?? "");
+    r.dataset.back = S(c.back);
     r.querySelector<HTMLElement>(".fc-del")?.addEventListener("click", (e) => {
       e.stopPropagation();
       r.remove();
@@ -280,8 +283,8 @@ export function wireCards(card: HTMLElement) {
   list.querySelectorAll<HTMLElement>(".fc-row").forEach(wireRow);
 
   const addCard = (front: string, back: string): string => {
-    front = String(front ?? "").trim();
-    back = String(back ?? "").trim();
+    front = S(front).trim();
+    back = S(back).trim();
     if (!front || !back) return "✕ card needs a front :: back";
     const r = fcRow({ front, back }, schedOf(), () => {
       refreshCount();
@@ -301,7 +304,7 @@ export function wireCards(card: HTMLElement) {
   };
 
   const delCard = (frontPrefix: string): string => {
-    frontPrefix = String(frontPrefix ?? "");
+    frontPrefix = S(frontPrefix);
     const r = Array.from(list.querySelectorAll<HTMLElement>(".fc-row")).find((x) =>
       (x.querySelector<HTMLElement>(".fc-front")?.textContent ?? "").startsWith(frontPrefix),
     );
@@ -314,7 +317,8 @@ export function wireCards(card: HTMLElement) {
   };
 
   const rateCard = (frontPrefix: string, g: 0 | 1 | 2 | 3): string => {
-    frontPrefix = String(frontPrefix ?? "");
+    frontPrefix = S(frontPrefix);
+    if (!(g === 0 || g === 1 || g === 2 || g === 3)) return `✕ grade must be 0–3`;
     const r = Array.from(list.querySelectorAll<HTMLElement>(".fc-row")).find((x) =>
       (x.querySelector<HTMLElement>(".fc-front")?.textContent ?? "").startsWith(frontPrefix),
     );

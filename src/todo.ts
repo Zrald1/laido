@@ -1,3 +1,6 @@
+
+const S = (v: unknown): string => typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : "";
+const DS = (v: string | undefined): string => { const s = v ?? ""; return /^(?:undefined|null|NaN|-?Infinity|[object [^]]*])$/.test(s) ? "" : s; };
 /* ---------- Laido Todo — tasks that live inside the note ----------
  * A `> [!todo]` callout persists as markdown checklist lines:
  *   > - [ ] buy milk @today        → open task, due today
@@ -21,7 +24,7 @@ const WD = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 
 /** "tomorrow", "+3d", "fri", "2026-02-10", "02-10" → ISO date, else "" */
 export function parseWhen(raw: string): string {
-  const t = String(raw ?? "").trim().toLowerCase();
+  const t = S(raw).trim().toLowerCase();
   if (!t) return "";
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -62,6 +65,7 @@ export function parseWhen(raw: string): string {
 
 /** ISO → friendly chip: overdue/today/tomorrow/weekday/date */
 export function whenLabel(when: string): { label: string; cls: string } {
+  when = S(when);
   if (!when) return { label: "", cls: "" };
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
@@ -78,7 +82,7 @@ export function whenLabel(when: string): { label: string; cls: string } {
 
 /** "- [ ] text @when" / "- [x] text" → item; null when the line isn't a task */
 export function parseTodoLine(line: string): TodoItem | null {
-  const m = String(line ?? "").trim().match(/^[-*]\s+\[([ xX])\]\s+(.*)$/);
+  const m = S(line).trim().match(/^[-*]\s+\[([ xX])\]\s+(.*)$/);
   if (!m) return null;
   const it: TodoItem = { text: "", done: m[1] !== " ", when: "" };
   let rest = m[2];
@@ -94,12 +98,12 @@ export function parseTodoLine(line: string): TodoItem | null {
   return it;
 }
 
-const escCell = (s: string) => String(s ?? "").replace(/\|/g, "\\|");
-const unesc = (s: string) => String(s ?? "").replace(/\\\|/g, "|");
+const escCell = (s: string) => S(s).replace(/\|/g, "\\|");
+const unesc = (s: string) => S(s).replace(/\\\|/g, "|");
 
 /** callout body lines (post-`>` strip) → items */
 export function parseTodo(block: string[]): { title: string; items: TodoItem[] } {
-  if (!Array.isArray(block)) block = [];
+  if (!Array.isArray(block)) block = []; block = block.map((l) => S(l));
   const title = (block[0] ?? "").replace(/^\[!\w+\]\s*/, "").trim() || "todo";
   const items: TodoItem[] = [];
   for (const raw of block.slice(1)) {
@@ -115,7 +119,7 @@ export function parseTodo(block: string[]): { title: string; items: TodoItem[] }
 /** live card DOM → markdown callout */
 export function todoToMd(card: HTMLElement): string {
   if (!card?.dataset) return "";
-  const lines: string[] = [`> [!todo] ${card.dataset.topic ?? "todo"}`];
+  const lines: string[] = [`> [!todo] ${DS(card.dataset.topic) ?? "todo"}`];
   card.querySelectorAll<HTMLElement>(".todo-item").forEach((el) => {
     const done = el.dataset.done === "1";
     const when = el.dataset.when ?? "";
@@ -128,7 +132,7 @@ export function todoToMd(card: HTMLElement): string {
 /* ---------- markup ---------- */
 
 const escHtml = (s: string) =>
-  String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  S(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 function itemHtml(it: TodoItem): string {
   const w = it.when ? ` data-when="${escHtml(it.when)}"` : "";
@@ -157,7 +161,7 @@ export function todoInnerHtml(d: { title: string; items: TodoItem[] }): string {
 
 /** spawn-time card builder */
 export function buildTodoCard(title: string): HTMLElement {
-  title = String(title ?? "");
+  title = S(title);
   const card = document.createElement("div");
   card.className = "callout todo-card";
   card.dataset.kind = "todo";
@@ -279,7 +283,7 @@ export function wireTodo(card: HTMLElement) {
         const w = parseWhen(wm[1]);
         if (w) {
           text.textContent = t.slice(0, wm.index).trim();
-          el.dataset.when = w;
+          el.dataset.when = S(w);
         }
       }
       paintChip(el);
@@ -307,7 +311,8 @@ export function wireTodo(card: HTMLElement) {
   };
 
   const add = (text: string, when = ""): number => {
-    text = String(text ?? "");
+    text = S(text);
+    when = S(when);
     const it: TodoItem = { text: "", done: false, when: "" };
     // "@when" trailing the text sets the due date
     const wm = text.match(/@(\S+)\s*$/);

@@ -7,12 +7,15 @@
 
 import { invoke } from "./ipc.js";
 
+const S = (v: unknown): string => typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : "";
+const DS = (v: string | undefined): string => { const s = v ?? ""; return /^(?:undefined|null|NaN|-?Infinity|[object [^]]*])$/.test(s) ? "" : s; };
+
 // note opening goes through the `nav:open` event (tabs.js listens) — a
 // direct import would drag the whole editor graph into leaf modules
 const openNote = (name: string) =>
   document.dispatchEvent(new CustomEvent("nav:open", { detail: name }));
 
-const escH = (s: string) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;");
+const escH = (s: string) => S(s).replace(/&/g, "&amp;").replace(/</g, "&lt;");
 
 export interface AgendaTask {
   text: string;
@@ -37,9 +40,9 @@ const weekIso = () => {
 
 /** bucket a due date: 0 overdue · 1 today · 2 this week · 3 later — pure */
 export function dueBucket(due: string, today: string, weekEnd: string): number {
-  due = String(due ?? "");
-  today = String(today ?? "");
-  weekEnd = String(weekEnd ?? "");
+  due = S(due);
+  today = S(today);
+  weekEnd = S(weekEnd);
   if (due < today) return 0;
   if (due === today) return 1;
   if (due <= weekEnd) return 2;
@@ -48,7 +51,7 @@ export function dueBucket(due: string, today: string, weekEnd: string): number {
 const BUCKETS = ["overdue", "today", "this week", "later"];
 
 export function agendaCallout(block: string[]): string {
-  if (!Array.isArray(block)) block = [];
+  if (!Array.isArray(block)) block = []; block = block.map((l) => S(l));
   const head = block[0] ?? "";
   const topic = head.replace(/^\[!\w+\]\s*/, "").trim() || "agenda";
   const raw = "> " + block.join("\n> ");
@@ -73,7 +76,7 @@ export function buildAgendaCard(title: string): HTMLElement {
 
 export function agendaToMd(card: HTMLElement): string {
   if (!card?.dataset) return "";
-  return `> [!agenda] ${card.dataset.topic ?? "agenda"}`;
+  return `> [!agenda] ${DS(card.dataset.topic) ?? "agenda"}`;
 }
 
 export async function scanAgenda(): Promise<AgendaNote[]> {

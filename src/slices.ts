@@ -1,3 +1,5 @@
+
+const S = (v: unknown): string => typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : "";
 /* ---------- section/block slicing + splicing — pure markdown ranges ----
  * `![[note#frag]]` embeds and the peek popover slice a note to one
  * section/block; the peek editor writes edits back by splicing over the
@@ -6,6 +8,8 @@
 /** `[start, end)` line range of the `head` section — heading included,
  *  ends at the next same-or-higher heading or EOF */
 export function sectionRange(md: string, head: string): [number, number] | null {
+  md = S(md);
+  head = S(head);
   const lines = md.split("\n");
   const target = head.trim().toLowerCase();
   let start = -1;
@@ -26,6 +30,8 @@ export function sectionRange(md: string, head: string): [number, number] | null 
 }
 
 export function sliceSection(md: string, head: string): string {
+  md = S(md);
+  head = S(head);
   const r = sectionRange(md, head);
   if (!r) return `*(no section "${head}")*`;
   return md.split("\n").slice(r[0], r[1]).join("\n");
@@ -38,6 +44,8 @@ export function blockRange(
   md: string,
   id: string,
 ): { s: number; e: number; trailing: boolean } | null {
+  md = S(md);
+  id = S(id);
   const lines = md.split("\n");
   const re = new RegExp(`\\s?\\^${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`);
   let j = -1;
@@ -68,6 +76,8 @@ export function blockRange(
 /** `![[note#^id]]` — slice `md` to the block carrying `^id`; the id is
  *  stripped from the returned text. */
 export function sliceBlock(md: string, id: string): string {
+  md = S(md);
+  id = S(id);
   const r = blockRange(md, id);
   if (!r) return `*(no block "^${id}")*`;
   const lines = md.split("\n").slice(r.s, r.e + 1);
@@ -81,6 +91,9 @@ export function sliceBlock(md: string, id: string): string {
 
 /** replace a section's lines with `text`; returns null when absent */
 export function spliceSection(md: string, head: string, text: string): string | null {
+  md = S(md);
+  head = S(head);
+  text = S(text);
   const r = sectionRange(md, head);
   if (!r) return null;
   const lines = md.split("\n");
@@ -100,6 +113,9 @@ export function spliceSection(md: string, head: string, text: string): string | 
 /** replace a `^id` block's text; preserves the id (trailing ids re-append
  *  to the new last line, standalone ids' line is outside the range) */
 export function spliceBlock(md: string, id: string, text: string): string | null {
+  md = S(md);
+  id = S(id);
+  text = S(text);
   const r = blockRange(md, id);
   if (!r) return null;
   const lines = md.split("\n");

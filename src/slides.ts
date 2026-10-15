@@ -9,6 +9,12 @@ import { paintChart, fromSheetRange } from "./chart.js";
 import { addActivity } from "./log.js";
 import { pickOpen, pickSave } from "./sheet.js";
 
+const S = (v: unknown): string => typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : "";
+const DS = (v: string | undefined): string => { const s = v ?? ""; return /^(?:undefined|null|NaN|-?Infinity|[object [^]]*])$/.test(s) ? "" : s; };
+
+const intIdx = (v: unknown): number =>
+  typeof v === "number" && Number.isFinite(v) ? Math.trunc(v) : -1;
+
 export interface Slide {
   layout: string;
   title: string;
@@ -26,7 +32,7 @@ export interface Slide {
 }
 
 export const emptySlide = (layout = "bullets"): Slide => ({
-  layout,
+  layout: typeof layout === "string" ? layout : "bullets",
   title: "",
   sub: "",
   bullets: [],
@@ -68,18 +74,19 @@ export const DECK_TRANSITIONS = ["none", "fade", "push", "wipe", "zoom"] as cons
 
 /* ---------- markdown <-> model ---------- */
 
-const escCell = (s: string) => String(s ?? "").replace(/\|/g, "\\|");
-const unesc = (s: string) => String(s ?? "").replace(/\\\|/g, "|");
+const escCell = (s: string) => S(s).replace(/\|/g, "\\|");
+const unesc = (s: string) => S(s).replace(/\\\|/g, "|");
 
 /** `[!slide bullets bg=#fff]` → slide + attrs */
 export function parseSlideHead(line: string): { layout: string; bg: string } {
-  const m = String(line ?? "").match(/^\[!slide\s*([^\]\s]+)?\s*(?:bg=(\S+))?\s*\]/i);
+  const m = S(line).match(/^\[!slide\s*([^\]\s]+)?\s*(?:bg=(\S+))?\s*\]/i);
   return { layout: (m?.[1] ?? "bullets").toLowerCase(), bg: m?.[2] ?? "" };
 }
 
 /** one body line inside a [!slide] block mutates the slide model */
 export function parseSlideLine(slide: Slide, line: string) {
-  const t = String(line ?? "").trim();
+  if (!slide || typeof slide !== "object") return;
+  const t = S(line).trim();
   if (t.startsWith("## ")) slide.sub = unesc(t.slice(3));
   else if (t.startsWith("# ")) slide.title = unesc(t.slice(2));
   else if (/^\d+\.\s/.test(t)) slide.bullets.push(unesc(t.replace(/^\d+\.\s*/, "· ")));
@@ -115,7 +122,7 @@ export function parseDeck(block: string[]): {
   transition: string;
   slides: Slide[];
 } {
-  if (!Array.isArray(block)) block = [];
+  if (!Array.isArray(block)) block = []; block = block.map((l) => S(l));
   const head = block[0] ?? "";
   const title = head.replace(/^\[!\w+\]\s*/, "").trim() || "deck";
   let theme = "dark";
@@ -167,10 +174,10 @@ function slideLines(s: Slide): string[] {
 
 export function deckToMd(card: HTMLElement): string {
   if (!card?.dataset) return "";
-  const theme = card.dataset.theme ?? "dark";
-  const trans = card.dataset.trans ?? "fade";
+  const theme = DS(card.dataset.theme) ?? "dark";
+  const trans = DS(card.dataset.trans) ?? "fade";
   const lines: string[] = [
-    `> [!slides] ${card.dataset.topic ?? "deck"}`,
+    `> [!slides] ${DS(card.dataset.topic) ?? "deck"}`,
     `> [!theme ${theme}]`,
     `> [!transition ${trans}]`,
   ];
@@ -221,12 +228,16 @@ export function slideFromDom(sl: HTMLElement): Slide {
 /* ---------- slide markup (string HTML — used by render.ts AND thumbs) ---------- */
 
 const escHtml = (s: string) =>
-  String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  S(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 const ed = `contenteditable="true" spellcheck="false"`;
 
 /** render one slide model to markup — layout decides which parts show */
 export function slideHtml(s: Slide, i: number): string {
+  if (!s || typeof s !== "object") s = emptySlide("blank");
+  i = intIdx(i) < 0 ? 0 : intIdx(i);
+  if (!Array.isArray(s.bullets)) s.bullets = [];
+  if (!Array.isArray(s.cols)) s.cols = [[], []];
   const bg = s.bg ? ` data-bg="${escHtml(s.bg)}" style="background:${escHtml(s.bg)}"` : "";
   const title = `<h1 class="d-title" ${ed} data-ph="Slide title">${escHtml(s.title)}</h1>`;
   const sub = `<h2 class="d-sub" ${ed} data-ph="Subtitle">${escHtml(s.sub)}</h2>`;
@@ -242,7 +253,7 @@ export function slideHtml(s: Slide, i: number): string {
   const cols = `<div class="d-cols">${s.cols
     .map(
       (col) =>
-        `<ul class="d-col">${col.map((b) => `<li ${ed}>${escHtml(b)}</li>`).join("")}<li ${ed}></li></ul>`,
+        `<ul class="d-col">${(Array.isArray(col) ? col : []).map((b) => `<li ${ed}>${escHtml(b)}</li>`).join("")}<li ${ed}></li></ul>`,
     )
     .join("")}</div>`;
   let inner = "";
@@ -467,6 +478,8 @@ export function wireDeck(card: HTMLElement) {
   };
 
   const addSlide = (layout = "bullets", at?: number): number => {
+    layout = S(layout) || "bullets";
+    at = at === undefined ? undefined : intIdx(at);
     const s = emptySlide(layout);
     const tmp = document.createElement("div");
     tmp.innerHTML = slideHtml(s, -1);
@@ -482,6 +495,7 @@ export function wireDeck(card: HTMLElement) {
   };
 
   const delSlide = (i: number) => {
+    i = intIdx(i);
     const list = slides();
     if (list.length <= 1) return; // a deck keeps at least one slide
     list[i]?.remove();
@@ -491,6 +505,8 @@ export function wireDeck(card: HTMLElement) {
   };
 
   const move = (from: number, to: number) => {
+    from = intIdx(from);
+    to = intIdx(to);
     const list = slides();
     if (from === to || !list[from]) return;
     const el = list[from];
@@ -1069,9 +1085,10 @@ export function wireDeck(card: HTMLElement) {
         })
         .join("\n"),
     addSlide: (layout, at) => addSlide(layout, at),
-    delSlide: (i) => delSlide(i),
-    moveSlide: (from, to) => move(from, to),
+    delSlide: (i) => delSlide(intIdx(i)),
+    moveSlide: (from, to) => move(intIdx(from), intIdx(to)),
     setLayout: (i, layout) => {
+      i = intIdx(i);
       const sl = slides()[i];
       if (!sl) return;
       const s = slideFromDom(sl);
@@ -1079,18 +1096,20 @@ export function wireDeck(card: HTMLElement) {
       rebuildSlide(i, s);
     },
     setSlide: (i, patch) => {
+      i = intIdx(i);
       const sl = slides()[i];
-      if (!sl) return;
+      if (!sl || !patch || typeof patch !== "object") return;
       const s = slideFromDom(sl);
       Object.assign(s, patch);
       rebuildSlide(i, s);
     },
     appendBullet: (i, text) => {
+      i = intIdx(i);
       const sl = slides()[i];
       if (!sl) return;
       const s = slideFromDom(sl);
       s.bullets = s.bullets.filter(Boolean);
-      s.bullets.push(text);
+      s.bullets.push(S(text));
       rebuildSlide(i, s);
     },
     setTheme: (name) => {
@@ -1105,19 +1124,23 @@ export function wireDeck(card: HTMLElement) {
       touch();
     },
     setBg: (i, color) => {
+      i = intIdx(i);
       const sl = slides()[i];
       if (!sl) return;
+      color = S(color);
       sl.dataset.bg = color;
       sl.style.background = color || "";
       touch();
     },
     setNote: (i, text) => {
+      i = intIdx(i);
       const sl = slides()[i];
       if (!sl) return;
-      sl.dataset.note = text;
+      sl.dataset.note = S(text);
       touch();
     },
     duplicate: (i) => {
+      i = intIdx(i);
       const s = slideFromDom(slides()[i]);
       const idx = addSlide(s.layout, i + 1);
       rebuildSlide(idx, s);
@@ -1137,7 +1160,7 @@ export function wireDeck(card: HTMLElement) {
 
 /** spawn-time card builder — an empty deck with a title slide */
 export function buildDeckCard(title: string): HTMLElement {
-  title = String(title ?? "");
+  title = typeof title === "string" ? title : "";
   const card = document.createElement("div");
   card.className = "callout deck-card";
   card.dataset.kind = "deck";

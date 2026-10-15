@@ -10,6 +10,8 @@ import { parseBrowser, browserInnerHtml } from "./browser.js";
 import { parseChart, chartInnerHtml } from "./chart.js";
 import { parseCards, cardsInnerHtml, h8 } from "./cards.js";
 
+const S = (v: unknown): string => typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : "";
+
 const esc = (s: string) =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
@@ -393,12 +395,12 @@ function cardsCallout(block: string[]): string {
 }
 
 export function renderCalloutMd(md: string): string {
-  const block = String(md ?? "").split("\n").map((l) => l.trimStart().replace(/^>\s?/, ""));
+  const block = S(md).split("\n").map((l) => l.trimStart().replace(/^>\s?/, ""));
   return callout(block);
 }
 
 export function renderMarkdown(src: string, depth = 0): string {
-  const lines = String(src ?? "").split("\n");
+  const lines = S(src).split("\n");
   const out: string[] = [];
 
   // YAML frontmatter (`---`…`---` at byte 0) → an editable properties

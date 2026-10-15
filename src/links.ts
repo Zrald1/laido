@@ -13,6 +13,8 @@ import { fuzzy, stem } from "./match.js";
 import { addActivity } from "./log.js";
 import { propCmp } from "./base.js";
 
+const S = (v: unknown): string => typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : "";
+
 export interface VaultIndex {
   notes: string[];
   links: [string, string][];
@@ -72,6 +74,7 @@ export function startVaultWatcher() {
 
 /** notes that `[[link]]` TO the current note + notes that mention it bare */
 export function linkInfo(name: string): { linked: string[]; mentioned: string[] } {
+  name = S(name);
   if (!index) return { linked: [], mentioned: [] };
   const t = stem(name).toLowerCase();
   const linked = index.links
@@ -755,6 +758,8 @@ export function initOutline() {
  * index-only predicates answer without touching the disk; the rest map
  * to a vault_find substring probe. */
 export function isSetFromIndex(p: string, notes: string[]): Set<string> | null {
+  p = S(p);
+  if (!Array.isArray(notes)) notes = [];
   if (p === "daily")
     return new Set(notes.filter((n) => /^\d{4}-\d{2}-\d{2}/.test(stem(n))));
   if (p === "template" || p === "tpl")
@@ -777,13 +782,18 @@ export function isDateSet(
   props: [string, string, string][],
   notes: string[],
 ): Set<string> | null {
+  p = S(p);
+  if (!Array.isArray(props)) props = [];
+  if (!Array.isArray(notes)) notes = [];
   const KEYS = ["due", "deadline", "date", "scheduled", "on"];
   const today = new Date().toISOString().slice(0, 10);
   const week = new Date(Date.now() + 6 * 86400e3).toISOString().slice(0, 10);
   // stem-dated daily notes count as their date — but only for
   // today/week, not overdue (every past daily would flood the list)
   const dayOf = (n: string, stemFallback: boolean): string => {
-    for (const [nn, k, v] of props) {
+    for (const row of props) {
+      if (!Array.isArray(row)) continue;
+      const [nn, k, v] = row.map((x) => S(x));
       if (nn !== n || !KEYS.includes(k.toLowerCase())) continue;
       const d = v.match(/\d{4}-\d{2}-\d{2}/)?.[0];
       if (d) return d;
@@ -805,10 +815,15 @@ export function isDateSet(
  * `is:deadend` (links out to nothing), `is:hub` (3+ inbound). Counted
  * off index.links — same rule as file.backlinks/file.outlinks. */
 export function isLinkSet(p: string, links: [string, string][], notes: string[]): Set<string> | null {
+  p = S(p);
+  if (!Array.isArray(links)) links = [];
+  if (!Array.isArray(notes)) notes = [];
   const want = { orphan: 1, deadend: 1, hub: 1 }[p];
   if (!want) return null;
   const inL = new Map<string, number>(), outL = new Map<string, number>();
-  for (const [from, to] of links) {
+  for (const row of links) {
+    if (!Array.isArray(row)) continue;
+    const [from, to] = row.map((x) => S(x));
     // targets are raw [[stems]]; normalize everything to stems
     inL.set(stem(to), (inL.get(stem(to)) ?? 0) + 1);
     outL.set(stem(from), (outL.get(stem(from)) ?? 0) + 1);
@@ -830,6 +845,7 @@ export function isProbe(p: string): string | null {
  * (`is:done` → `done: true` checkboxes) or `status: X` (`is:wip` →
  * `status: wip`), on top of any content probe */
 export function isFmQueries(p: string): string[] {
+  p = S(p);
   return [`prop:${p}=true`, `prop:status=${p}`];
 }
 
@@ -841,6 +857,8 @@ export function isFmQueries(p: string): string[] {
  * from being undone. */
 /** wrap bare `stem` mentions in a line's non-link segments — pure */
 export function linkifyLine(line: string, stems: string[]): [string, number] {
+  line = S(line);
+  if (!Array.isArray(stems)) stems = [];
   let count = 0;
   const out = line
     .split(/(\[\[[^\]]*\]\]|!\[[^\]]*\]\([^)]*\))/)
@@ -848,6 +866,7 @@ export function linkifyLine(line: string, stems: string[]): [string, number] {
       if (i % 2 === 1) return seg; // inside a link/embed — leave it
       let s = seg;
       for (const stm of stems) {
+        if (typeof stm !== "string" || !stm) continue;
         const re = new RegExp(
           `(?<![\\w/\\[#])(${stm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})(?![\\w\\]])`,
           "gi",

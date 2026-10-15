@@ -5,6 +5,8 @@ import { openCalendar } from "./calendar.js";
 import { openTab } from "./tabs.js";
 import { t } from "./i18n.js";
 
+const S = (v: unknown): string => typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : "";
+
 export interface Settings {
   nebius_api_key: string;
   tavily_api_key: string;
@@ -223,9 +225,9 @@ export interface Notice {
 const NOTICE_KEY = "laido.notices";
 
 export function noticeKey(kind: string, note: string, text: string, ts: number): string {
-  kind = String(kind ?? "");
-  note = String(note ?? "");
-  text = String(text ?? "");
+  kind = typeof kind === "string" ? kind : "";
+  note = typeof note === "string" ? note : "";
+  text = typeof text === "string" ? text : "";
   ts = Number.isFinite(ts) ? ts : 0;
   if (kind === "remind") return `${kind}|${note}|${text}|${ts}`;
   if (kind === "brief" || kind === "review") {
@@ -311,7 +313,7 @@ export function renderNoticeCard(
   onDismiss?: () => void,
 ): HTMLElement {
   n = n && typeof n === "object" ? n : ({} as Notice);
-  n.kind = String(n.kind ?? "");
+  n.kind = S(n.kind);
   n.ts = Number.isFinite(n.ts) ? n.ts : 0;
   const card = document.createElement("div");
   card.className = `reminder notice-${n.kind}`;
@@ -641,10 +643,10 @@ export async function initAgent() {
       // every successful research-loop card stays pinned, and the whole run
       // auto-lays-out into a clean two-column grid as loops arrive
       if (card && (p.kind === "loop" || p.kind === "loop-final")) {
-        card.dataset.loopRun = p.run ?? "loop";
-        card.dataset.loopIndex = String(p.loop ?? 0);
+        card.dataset.loopRun = S(p.run) || "loop";
+        card.dataset.loopIndex = String(typeof p.loop === "number" && Number.isFinite(p.loop) ? Math.trunc(p.loop) : 0);
         pinCard(card);
-        layoutLoopRun(p.run ?? "loop");
+        layoutLoopRun(S(p.run) || "loop");
       }
     } else {
       await invoke("vault_insert", {

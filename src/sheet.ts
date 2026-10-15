@@ -17,13 +17,17 @@
 import { invoke } from "./ipc.js";
 import { tryCardUndo } from "./cardundo.js";
 
+const S = (v: unknown): string => typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : "";
+const DS = (v: string | undefined): string => { const s = v ?? ""; return /^(?:undefined|null|NaN|-?Infinity|[object [^]]*])$/.test(s) ? "" : s; };
+
 const COLS = (i: number) => String.fromCharCode(65 + i);
-const escH = (s: string) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;");
+const escH = (s: string) => S(s).replace(/&/g, "&amp;").replace(/</g, "&lt;");
 
 /** board column keys — distinct values, "" becomes "(blank)", sorted with
  *  the blank bucket last (pure so tests can lock the ordering) */
 export function groupKeys(vals: string[]): string[] {
-  const ks = [...new Set(vals.map((v) => (v === "" ? "(blank)" : v)))];
+  if (!Array.isArray(vals)) return [];
+  const ks = [...new Set(vals.map((v) => { const s = S(v); return s === "" ? "(blank)" : s; }))];
   return ks.sort((a, b) =>
     a === "(blank)" ? 1 : b === "(blank)" ? -1 : a.localeCompare(b),
   );
@@ -32,7 +36,7 @@ export function groupKeys(vals: string[]): string[] {
 /** lenient date parse → [y, m(0-based), d] or null; accepts ISO,
  *  M/D/Y, and anything Date.parse gets */
 export function parseDay(v: string): [number, number, number] | null {
-  const s = String(v ?? "").trim();
+  const s = S(v).trim();
   if (!s) return null;
   let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
   if (m) return [+m[1], +m[2] - 1, +m[3]];
@@ -58,8 +62,8 @@ export const isoOf = (y: number, m: number, d: number) =>
  * RFC-4180-ish: quoted fields, "" escapes, embedded commas/newlines. */
 
 export function parseDelim(text: string, delim: string): string[][] {
-  text = String(text ?? "");
-  delim = String(delim ?? ",");
+  text = S(text);
+  delim = (S(delim) || ",");
   const rows: string[][] = [];
   let cell = "";
   let row: string[] = [];
@@ -92,9 +96,13 @@ export function parseDelim(text: string, delim: string): string[][] {
 }
 
 export function toDelim(rows: string[][], delim: string): string {
-  const esc = (v: string) =>
-    /["\n\r]/.test(v) || v.includes(delim) ? `"${v.replace(/"/g, '""')}"` : v;
-  return rows.map((r) => r.map(esc).join(delim)).join("\r\n") + "\r\n";
+  if (!Array.isArray(rows)) return "";
+  delim = S(delim) || "\t";
+  const esc = (v: string) => {
+    const s = S(v);
+    return /["\n\r]/.test(s) || s.includes(delim) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  return rows.map((r) => (Array.isArray(r) ? r : [r]).map(esc).join(delim)).join("\r\n") + "\r\n";
 }
 
 export interface SheetRow {
@@ -103,7 +111,7 @@ export interface SheetRow {
 
 /** parse a `|a|b|c|` row line back into cell raw values */
 export function parseSheetLine(line: string): string[] {
-  line = String(line ?? "");
+  line = S(line);
   const out: string[] = [];
   let cur = "";
   let esc = false;
@@ -121,7 +129,7 @@ export function parseSheetLine(line: string): string[] {
   return out.map((c) => c.trim());
 }
 
-const escCell = (raw: string) => String(raw ?? "").replace(/\|/g, "\\|");
+const escCell = (raw: string) => S(raw).replace(/\|/g, "\\|");
 
 /** grid → markdown rows for cardToMd. Beyond the `| a | b |` data rows the
  *  callout carries `> [!meta]` lines — cell formats, conditional rules,
@@ -175,11 +183,16 @@ export function sheetToMd(card: HTMLElement): string {
     rows.push(`> | ${cells.join(" | ")} |`);
   }
   const meta = collectMetaLines(card).map((l) => `> ${l}`);
-  return `> [!sheet] ${card.dataset.topic ?? "sheet"}\n${rows.join("\n")}${meta.length ? "\n" + meta.join("\n") : ""}`;
+  return `> [!sheet] ${DS(card.dataset.topic) ?? "sheet"}\n${rows.join("\n")}${meta.length ? "\n" + meta.join("\n") : ""}`;
 }
 
+const intIdx = (v: unknown): number =>
+  typeof v === "number" && Number.isFinite(v) ? Math.trunc(v)
+  : typeof v === "string" && v.trim() !== "" && Number.isFinite(+v) ? Math.trunc(+v)
+  : -1;
+
 const tdAt = (card: HTMLElement, r: number, c: number) =>
-  card.querySelector<HTMLElement>(`.sheet-grid tr[data-r="${r}"] td[data-raw][data-c="${c}"]`);
+  card.querySelector<HTMLElement>(`.sheet-grid tr[data-r="${intIdx(r)}"] td[data-raw][data-c="${intIdx(c)}"]`);
 
 const rawAt = (card: HTMLElement, r: number, c: number) => tdAt(card, r, c)?.dataset.raw ?? "";
 
@@ -2462,6 +2475,8 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
     redoStk.length = 0;
   };
   const restore = (snap: Snap) => {
+    if (!snap || !Array.isArray(snap.raws)) snap = { raws: [], meta: [] };
+    snap = { ...snap, raws: snap.raws.filter((r) => Array.isArray(r)).map((r) => r.map(S)) };
     grid!.querySelectorAll("tr[data-r]").forEach((t) => t.remove());
     grid!.querySelectorAll("tr.sheet-cols th[data-c]").forEach((t) => t.remove());
     const cols = Math.max(1, ...snap.raws.map((r) => r.length));
@@ -2596,6 +2611,8 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
     });
   };
   const delRow = (r: number) => {
+    r = intIdx(r);
+    if (r < 0) return;
     grid!.querySelector<HTMLElement>(`tr[data-r="${r}"]`)?.remove();
     clearSelVisual();
     relabel(grid!);
@@ -2604,6 +2621,8 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
     onChange();
   };
   const delCol = (c: number) => {
+    c = intIdx(c);
+    if (c < 0) return;
     grid!.querySelectorAll<HTMLElement>(`tr[data-r] td[data-raw][data-c="${c}"]`).forEach((t) =>
       t.remove(),
     );
@@ -3013,7 +3032,7 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
     const th = document.createElement("th");
     tr.append(th);
     wireRowTh(th);
-    for (let c = 0; c < cols; c++) tr.append(makeTd(card, r, c, raws?.[c] ?? "", onChange, ui));
+    for (let c = 0; c < cols; c++) tr.append(makeTd(card, r, c, S(raws?.[c]), onChange, ui));
     const ctl = document.createElement("td");
     ctl.className = "sheet-rowctl";
     tr.append(ctl);
@@ -3209,13 +3228,15 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
 
   /* -- hide / unhide -- */
   const hideRow = (r: number, fire = true) => {
-    const tr = grid!.querySelector<HTMLElement>(`tr[data-r="${r}"]`);
+    const tr = grid!.querySelector<HTMLElement>(`tr[data-r="${intIdx(r)}"]`);
     if (!tr) return;
     tr.dataset.uhide = "1";
     tr.style.display = "none";
     if (fire) onChange();
   };
   const hideCol = (c: number, fire = true) => {
+    c = intIdx(c);
+    if (c < 0) return;
     grid!.querySelector<HTMLElement>(`tr.sheet-cols th[data-c="${c}"]`)?.setAttribute("data-h", "1");
     grid!
       .querySelectorAll<HTMLElement>(
@@ -3264,13 +3285,16 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
 
   /* -- remove duplicates on a column (keeps the first occurrence) -- */
   const dedupe = (c: number): number => {
+    const col = intIdx(c);
     pushUndo();
     const seen = new Set<string>();
     let removed = 0;
     for (const tr of Array.from(grid!.querySelectorAll<HTMLElement>("tr[data-r]"))) {
-      const txt = (
-        tr.querySelector<HTMLElement>(`td[data-raw][data-c="${c}"]`)?.textContent ?? ""
-      ).trim();
+      // no column → dedupe on the whole row's content
+      const txt = col < 0
+        ? Array.from(tr.querySelectorAll<HTMLElement>("td[data-raw]"))
+            .map((t) => t.textContent ?? "").join("")
+        : (tr.querySelector<HTMLElement>(`td[data-raw][data-c="${col}"]`)?.textContent ?? "").trim();
       if (seen.has(txt)) {
         tr.remove();
         removed++;
@@ -3284,9 +3308,11 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
 
   /* -- formats onto the current selection (or a range) -- */
   const setFmtOn = (cells: Array<[number, number]>, f: string) => {
+    if (!Array.isArray(cells)) return;
     pushUndo();
-    for (const [r, c] of cells) {
-      const td = tdAt(card, r, c);
+    for (const cell of cells) {
+      if (!Array.isArray(cell)) continue;
+      const td = tdAt(card, cell[0], cell[1]);
       if (td) td.dataset.fmt = f === "general" ? "" : f;
     }
     repaint();
@@ -4230,7 +4256,7 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
       p = await pickSave(SHEET_SAVE_FILTERS, `${card.dataset.topic || "sheet"}.xlsx`);
       if (!p) return "export cancelled";
     }
-    const ext = String(p).split(".").pop()?.toLowerCase() ?? "xlsx";
+    const ext = S(p).split(".").pop()?.toLowerCase() ?? "xlsx";
     const cells = cellsGrid();
     try {
       if (ext === "csv" || ext === "tsv" || ext === "txt") {
@@ -4290,12 +4316,15 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
     raw: (r, c) => rawAt(card, r, c),
     display: (r, c) => tdAt(card, r, c)?.textContent ?? "",
     set: (r, c, raw) => {
+      r = intIdx(r);
+      c = intIdx(c);
+      if (r < 0 || c < 0) return;
       pushUndo();
       growTo(r, c);
       const td = tdAt(card, r, c);
       if (td) {
-        td.dataset.raw = raw;
-        td.textContent = raw;
+        td.dataset.raw = S(raw);
+        td.textContent = S(raw);
       }
       repaint();
       onChange();
@@ -4303,27 +4332,30 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
     // bulk writes — one undo step, one recalc, no matter how many cells
     setCells: (cells) => {
       if (!Array.isArray(cells)) return;
+      const rows = cells.filter((t): t is [number, number, string] => Array.isArray(t));
+      if (!rows.length) return;
       pushUndo();
       let mr = 0;
       let mc = 0;
-      for (const [r, c] of cells) {
-        mr = Math.max(mr, r);
-        mc = Math.max(mc, c);
+      for (const [r, c] of rows) {
+        mr = Math.max(mr, intIdx(r));
+        mc = Math.max(mc, intIdx(c));
       }
       growTo(mr, mc);
-      for (const [r, c, raw] of cells) {
+      for (const [r, c, raw] of rows) {
         const td = tdAt(card, r, c);
         if (td) {
-          td.dataset.raw = raw;
-          td.textContent = raw;
+          td.dataset.raw = S(raw);
+          td.textContent = S(raw);
         }
       }
       repaint();
       onChange();
     },
     setAll: (raws) => {
+      if (!Array.isArray(raws)) raws = [];
       pushUndo();
-      restore({ raws, meta: collectMetaLines(card) });
+      restore({ raws: raws.filter((r) => Array.isArray(r)).map((r) => r.map(S)), meta: collectMetaLines(card) });
     },
     addRow: (raws) => {
       pushUndo();
@@ -4336,12 +4368,16 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
       onChange();
     },
     delRow: (r) => {
+      const ri = intIdx(r);
+      if (ri < 0) return;
       pushUndo();
-      delRow(r);
+      delRow(ri);
     },
     delCol: (c) => {
+      const ci = intIdx(c);
+      if (ci < 0) return;
       pushUndo();
-      delCol(c);
+      delCol(ci);
     },
     clear: (a, b) => {
       pushUndo();
@@ -4356,12 +4392,14 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
       }
       return out.join("\n");
     },
-    setFmt: (cells, f) => setFmtOn(cells, f),
+    setFmt: (cells, f) => setFmtOn(Array.isArray(cells) ? cells : [], S(f)),
     addCf: (col, op, val, color) => {
+      const ci = intIdx(col);
+      if (ci < 0) return;
       pushUndo();
-      const l = cfRules.get(col) ?? [];
-      l.push({ op, val, color });
-      cfRules.set(col, l);
+      const l = cfRules.get(ci) ?? [];
+      l.push({ op: S(op), val: S(val), color: S(color) });
+      cfRules.set(ci, l);
       syncCfMeta();
       repaint();
       onChange();
@@ -4369,20 +4407,22 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
     clearCf: (col) => {
       pushUndo();
       if (col === undefined) cfRules.clear();
-      else cfRules.delete(col);
+      else cfRules.delete(intIdx(col));
       syncCfMeta();
       repaint();
       onChange();
     },
-    freeze: (row, col) => setFreeze(row, col),
-    hideRow: (r) => hideRow(r),
-    hideCol: (c) => hideCol(c),
+    freeze: (row, col) => setFreeze(!!row, !!col),
+    hideRow: (r) => hideRow(intIdx(r)),
+    hideCol: (c) => hideCol(intIdx(c)),
     unhide: () => unhideAll(),
-    dedupe: (c) => dedupe(c),
+    dedupe: (c) => dedupe(intIdx(c)),
     filter: (c, allowed) => {
+      const ci = intIdx(c);
+      if (ci < 0) return;
       pushUndo();
-      if (allowed === null) filters.delete(c);
-      else filters.set(c, new Set(allowed));
+      if (allowed === null || allowed === undefined || !Array.isArray(allowed)) filters.delete(ci);
+      else filters.set(ci, new Set(allowed.map(S)));
       syncFilterMeta();
       applyFilters();
       onChange();
@@ -4396,7 +4436,7 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
     view: (spec) => {
       if (spec !== undefined) {
         pushUndo();
-        card.dataset.view = spec;
+        card.dataset.view = S(spec);
         applyView();
         onChange();
       }
@@ -4409,7 +4449,7 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
 
 /** spawn-time card builder — an empty grid, title in the head */
 export function buildSheetCard(title: string): HTMLElement {
-  title = String(title ?? "");
+  title = S(title);
   const card = document.createElement("div");
   card.className = "callout sheet-card";
   card.dataset.kind = "sheet";

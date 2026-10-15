@@ -13,6 +13,9 @@
 import { invoke } from "./ipc.js";
 import { addActivity } from "./log.js";
 
+const S = (v: unknown): string => typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : "";
+const DS = (v: string | undefined): string => { const s = v ?? ""; return /^(?:undefined|null|NaN|-?Infinity|[object [^]]*])$/.test(s) ? "" : s; };
+
 export interface PageInfo {
   url: string;
   final_url: string;
@@ -24,7 +27,7 @@ export interface PageInfo {
 }
 
 const escHtml = (s: string) =>
-  String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  S(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 /** "search words" → url; real urls pass through */
 export function toUrl(input: string): string {
@@ -41,7 +44,7 @@ export function toUrl(input: string): string {
 
 /** `[!browser] title` + `url: …` lines → card fields */
 export function parseBrowser(block: string[]): { title: string; url: string } {
-  if (!Array.isArray(block)) block = [];
+  if (!Array.isArray(block)) block = []; block = block.map((l) => S(l));
   const head = block[0] ?? "";
   const title = head.replace(/^\[!\w+\]\s*/, "").trim();
   let url = "";
@@ -54,8 +57,8 @@ export function parseBrowser(block: string[]): { title: string; url: string } {
 
 export function browserToMd(card: HTMLElement): string {
   if (!card?.dataset) return "";
-  const url = card.dataset.url ?? "";
-  const title = card.dataset.topic ?? "browser";
+  const url = DS(card.dataset.url) ?? "";
+  const title = DS(card.dataset.topic) ?? "browser";
   return `> [!browser] ${title}\n> url: ${url}`;
 }
 
@@ -81,7 +84,7 @@ export function browserInnerHtml(): string {
 }
 
 export function buildBrowserCard(title: string, url: string): HTMLElement {
-  title = String(title ?? "");
+  title = S(title);
   const card = document.createElement("div");
   card.className = "callout browser-card";
   card.dataset.kind = "browser";

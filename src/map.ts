@@ -1,10 +1,13 @@
+
+const S = (v: unknown): string => typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : "";
+const DS = (v: string | undefined): string => { const s = v ?? ""; return /^(?:undefined|null|NaN|-?Infinity|[object [^]]*])$/.test(s) ? "" : s; };
 /* ---------- map card — a mind map whose data IS the markdown outline.
  *  Persists as `[!map] title` + indented `- ` bullets (2 spaces/level);
  *  click a node collapses its branch, dblclick renames, ＋ adds a child,
  *  Enter on the add-input commits. The tree lives in a WeakMap; the DOM
  *  renders it. ---------- */
 
-const escH = (s: string) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;");
+const escH = (s: string) => S(s).replace(/&/g, "&amp;").replace(/</g, "&lt;");
 
 export interface MapNode {
   text: string;
@@ -19,12 +22,13 @@ export function parseMapTree(lines: string[]): MapNode[] {
   const root: MapNode[] = [];
   const stack: { indent: number; kids: MapNode[] }[] = [{ indent: -1, kids: root }];
   for (const raw of lines) {
-    const m = raw.match(/^(\s*)(?:[-*+]|\d+\.)\s+(.*)$/);
+    const line = S(raw);
+    const m = line.match(/^(\s*)(?:[-*+]|\d+\.)\s+(.*)$/);
     if (!m) {
       // a bare line becomes a root node (AI-friendliness)
-      if (raw.trim() !== "") {
+      if (line.trim() !== "") {
         stack.length = 1;
-        root.push({ text: raw.trim(), kids: [] });
+        root.push({ text: line.trim(), kids: [] });
       }
       continue;
     }
@@ -40,8 +44,10 @@ export function parseMapTree(lines: string[]): MapNode[] {
 /** tree → indented `- ` markdown lines (2 spaces per level) */
 export function mapTreeLines(roots: MapNode[], depth = 0): string[] {
   const out: string[] = [];
+  if (!Array.isArray(roots)) return out;
   for (const n of roots) {
-    out.push(`${"  ".repeat(depth)}- ${n.text}`);
+    if (!n || typeof n !== "object") continue;
+    out.push(`${"  ".repeat(depth)}- ${S(n.text)}`);
     out.push(...mapTreeLines(n.kids, depth + 1));
   }
   return out;
@@ -49,7 +55,7 @@ export function mapTreeLines(roots: MapNode[], depth = 0): string[] {
 
 /** `[!map] t` + indented rows → html for the static render pass */
 export function mapCallout(block: string[]): string {
-  if (!Array.isArray(block)) block = [];
+  if (!Array.isArray(block)) block = []; block = block.map((l) => S(l));
   const head = block[0] ?? "";
   const topic = head.replace(/^\[!\w+\]\s*/, "").trim() || "map";
   const raw = "> " + block.join("\n> ");
@@ -72,7 +78,7 @@ export function cardMapTree(card: HTMLElement): MapNode[] {
 export function mapToMd(card: HTMLElement): string {
   if (!card?.dataset) return "";
   const rows = mapTreeLines(cardMapTree(card));
-  return `> [!map] ${card.dataset.topic ?? "map"}${rows.length ? "\n" + rows.map((r) => `> ${r}`).join("\n") : ""}`;
+  return `> [!map] ${DS(card.dataset.topic) ?? "map"}${rows.length ? "\n" + rows.map((r) => `> ${r}`).join("\n") : ""}`;
 }
 
 /** render one node row + its (possibly folded) kids column */
@@ -233,7 +239,7 @@ export function wireMap(card: HTMLElement, seed?: MapNode[]) {
       return rows.length;
     },
     del: (prefix) => {
-      const ok = removeNode(tree, String(prefix ?? ""));
+      const ok = removeNode(tree, S(prefix));
       if (ok) {
         repaint();
         changed();
@@ -241,9 +247,9 @@ export function wireMap(card: HTMLElement, seed?: MapNode[]) {
       return ok;
     },
     rename: (prefix, text) => {
-      const n = findNode(tree, String(prefix ?? ""));
+      const n = findNode(tree, S(prefix));
       if (!n) return false;
-      n.text = String(text ?? "");
+      n.text = S(text);
       repaint();
       changed();
       return true;
@@ -306,7 +312,7 @@ function removeNode(roots: MapNode[], prefix: string): boolean {
 
 /** spawn-time builder */
 export function buildMapCard(title: string): HTMLElement {
-  title = String(title ?? "");
+  title = S(title);
   const card = document.createElement("div");
   card.className = "callout map-card";
   card.dataset.kind = "map";

@@ -44,6 +44,8 @@ const record = (name, fn) => {
 const describe = (v) =>
   v === undefined ? "undef" : v === null ? "null" : typeof v === "symbol" ? "sym"
   : typeof v === "bigint" ? "bigint" : typeof v === "function" ? "fn"
+  : typeof v === "number" && Number.isNaN(v) ? "NaN"
+  : typeof v === "number" && !Number.isFinite(v) ? (v > 0 ? "Inf" : "-Inf")
   : v instanceof Date ? "date" : typeof v === "string" && v.length > 40 ? "long"
   : JSON.stringify(v)?.slice(0, 20) ?? String(v);
 const okRet = (name, out) => {
@@ -338,7 +340,10 @@ for (const [kind, s] of Object.entries(SEQ)) {
     record(`${kind}.seq.r${round}.final-md`, () => cardToMd(card));
     const md = cardToMd(card);
     if (md) {
-      const reborn = renderCalloutMd(md);
+      const html = renderCalloutMd(md);
+      const wrap = document.createElement("div");
+      wrap.innerHTML = html;
+      const reborn = wrap.firstElementChild;
       record(`${kind}.seq.r${round}.reborn`, () => {
         if (!reborn?.dataset?.kind) throw new Error("md did not re-render to a card");
       });

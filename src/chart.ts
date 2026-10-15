@@ -11,6 +11,9 @@
 import { invoke } from "./ipc.js";
 import { sheetApi } from "./sheet.js";
 
+const S = (v: unknown): string => typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : "";
+const DS = (v: string | undefined): string => { const s = v ?? ""; return /^(?:undefined|null|NaN|-?Infinity|[object [^]]*])$/.test(s) ? "" : s; };
+
 export const CHART_TYPES = [
   "bar", "barh", "line", "area", "pie", "doughnut", "scatter", "stacked",
 ] as const;
@@ -41,7 +44,7 @@ const emptyModel = (title = "chart"): ChartModel => ({
 /* ---------- markdown <-> model ---------- */
 
 export function parseChart(block: string[]): ChartModel {
-  if (!Array.isArray(block)) block = [];
+  if (!Array.isArray(block)) block = []; block = block.map((l) => S(l));
   const head = block[0] ?? "";
   const m = emptyModel(head.replace(/^\[!\w+\]\s*/, "").trim() || "chart");
   for (const raw of block.slice(1)) {
@@ -70,16 +73,16 @@ export function parseChart(block: string[]): ChartModel {
 
 export function chartToMd(card: HTMLElement): string {
   if (!card?.dataset) return "";
-  const title = card.dataset.topic ?? "chart";
-  const type = card.dataset.ctype ?? "bar";
-  const src = card.dataset.csrc ?? "";
+  const title = DS(card.dataset.topic) ?? "chart";
+  const type = DS(card.dataset.ctype) ?? "bar";
+  const src = DS(card.dataset.csrc) ?? "";
   const lines: string[] = [`> [!chart] ${title}`, `> type: ${type}`];
   if (src) lines.push(`> data: ${src}`);
-  const colors = card.dataset.ccolors ?? "";
+  const colors = DS(card.dataset.ccolors) ?? "";
   if (colors) lines.push(`> colors: ${colors}`);
   // inline snapshot so the file carries the numbers even when sourced
-  const labels = (card.dataset.clabels ?? "").split("\u0001").filter((s) => s !== "");
-  const serJson = card.dataset.cseries ?? "[]";
+  const labels = (DS(card.dataset.clabels) ?? "").split("\u0001").filter((s) => s !== "");
+  const serJson = DS(card.dataset.cseries) ?? "[]";
   try {
     const series = JSON.parse(serJson) as number[][];
     labels.forEach((lb, i) => {
@@ -91,6 +94,7 @@ export function chartToMd(card: HTMLElement): string {
 
 /** inline `label | v | v` rows + dataset into a model (post-render replay) */
 export function chartFromCard(card: HTMLElement): ChartModel {
+  if (!card?.dataset) return emptyModel("chart");
   const m = emptyModel(card.dataset.topic ?? "chart");
   m.type = card.dataset.ctype ?? "bar";
   m.source = card.dataset.csrc ?? "";
@@ -411,7 +415,7 @@ export function chartInnerHtml(): string {
 }
 
 export function buildChartCard(title: string): HTMLElement {
-  title = String(title ?? "");
+  title = typeof title === "string" ? title : "";
   const card = document.createElement("div");
   card.className = "callout chart-card";
   card.dataset.kind = "chart";
@@ -517,6 +521,7 @@ export function wireChart(card: HTMLElement) {
       const labels: string[] = [];
       const series: number[][] = [];
       for (const r of rows) {
+        if (!Array.isArray(r)) continue;
         labels.push(r[0] ?? "");
         for (let i = 1; i < r.length; i++) {
           while (series.length < r.length - 1) series.push([]);
@@ -530,7 +535,7 @@ export function wireChart(card: HTMLElement) {
       onChange();
     },
     setSource: (t2, range) => {
-      card.dataset.csrc = `${t2} ${range}`.trim();
+      card.dataset.csrc = `${S(t2)} ${S(range)}`.trim();
       paint();
       onChange();
     },

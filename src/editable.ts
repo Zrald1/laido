@@ -10,7 +10,10 @@ import { graphToMd } from "./graph.js";
 import { canvasToMd } from "./canvas.js";
 import { baseToMd } from "./base.js";
 
+const DS = (v: string | undefined): string => { const s = v ?? ""; return /^(?:undefined|null|NaN|-?Infinity|\[object [^\]]*\])$/.test(s) ? "" : s; };
+
 export function serialize(root: HTMLElement): string {
+  if (!root?.childNodes) return "";
   const blocks: string[] = [];
   let pending: string[] = [];
   const flush = () => {
@@ -143,7 +146,7 @@ function blockToMd(el: HTMLElement): string {
 }
 
 export function normalizeCard(card: HTMLElement) {
-  const bodyEl = card.querySelector<HTMLElement>(".callout-body");
+  const bodyEl = card?.querySelector?.<HTMLElement>(".callout-body");
   if (!bodyEl) return;
   for (const node of Array.from(card.childNodes)) {
     if (node === bodyEl) continue;
@@ -181,65 +184,65 @@ export function focusBodyOnCardClick(card: HTMLElement) {
 export function cardToMd(card: HTMLElement): string {
   if (!card?.dataset) return "";
   // the sheet widget persists as a markdown table inside [!sheet]
-  if (card.dataset.kind === "sheet" || card.classList.contains("sheet-card"))
+  if (DS(card.dataset.kind) === "sheet" || card.classList.contains("sheet-card"))
     return sheetToMd(card);
   // the deck widget persists as [!slides] + [!slide] blocks
-  if (card.dataset.kind === "deck" || card.classList.contains("deck-card"))
+  if (DS(card.dataset.kind) === "deck" || card.classList.contains("deck-card"))
     return deckToMd(card);
   // the todo card persists as [!todo] + "- [ ] task @when" lines
-  if (card.dataset.kind === "todo" || card.classList.contains("todo-card"))
+  if (DS(card.dataset.kind) === "todo" || card.classList.contains("todo-card"))
     return todoToMd(card);
   // the browser card persists as [!browser] + url:
-  if (card.dataset.kind === "browser" || card.classList.contains("browser-card"))
+  if (DS(card.dataset.kind) === "browser" || card.classList.contains("browser-card"))
     return browserToMd(card);
   // the chart card persists as [!chart] + type:/data:/inline rows
-  if (card.dataset.kind === "chart" || card.classList.contains("chart-card"))
+  if (DS(card.dataset.kind) === "chart" || card.classList.contains("chart-card"))
     return chartToMd(card);
   // the flashcards card persists as [!cards] + front::back rows + sched: state
-  if (card.dataset.kind === "cards" || card.classList.contains("cards-card"))
+  if (DS(card.dataset.kind) === "cards" || card.classList.contains("cards-card"))
     return cardsToMd(card);
   // the mind-map card persists as [!map] + indented bullets
-  if (card.dataset.kind === "map" || card.classList.contains("map-card"))
+  if (DS(card.dataset.kind) === "map" || card.classList.contains("map-card"))
     return mapToMd(card);
   // the agenda card persists as just [!agenda] title — content is computed
-  if (card.dataset.kind === "agenda" || card.classList.contains("agenda-card"))
+  if (DS(card.dataset.kind) === "agenda" || card.classList.contains("agenda-card"))
     return agendaToMd(card);
-  if (card.dataset.kind === "graph" || card.classList.contains("graph-card"))
+  if (DS(card.dataset.kind) === "graph" || card.classList.contains("graph-card"))
     return graphToMd(card);
-  if (card.dataset.kind === "canvas" || card.classList.contains("canvas-card"))
+  if (DS(card.dataset.kind) === "canvas" || card.classList.contains("canvas-card"))
     return canvasToMd(card);
-  if (card.dataset.kind === "base" || card.classList.contains("base-card"))
+  if (DS(card.dataset.kind) === "base" || card.classList.contains("base-card"))
     return baseToMd(card);
   // a note embed persists as the `![[note#heading]]` line it was written as
-  if (card.dataset.kind === "embed" || card.classList.contains("note-embed")) {
-    const s = card.dataset.src ?? "";
-    const h = card.dataset.head;
+  if (DS(card.dataset.kind) === "embed" || card.classList.contains("note-embed")) {
+    const s = DS(card.dataset.src) ?? "";
+    const h = DS(card.dataset.head);
     return `![[${s}${h ? `#${h}` : ""}]]`;
   }
   // the terminal/chat widget persists: the session log as note lines, its
   // chat id in the title, its chosen model as a trailing |token
   if (card.classList.contains("term-card")) {
-    const id = card.dataset.chatId ? ` ${card.dataset.chatId}` : "";
+    const id = DS(card.dataset.chatId) ? ` ${DS(card.dataset.chatId)}` : "";
     const model =
-      card.dataset.model || card.dataset.persona
-        ? `|${card.dataset.model ?? ""}${card.dataset.persona ? `@${card.dataset.persona}` : ""}`
+      DS(card.dataset.model) || DS(card.dataset.persona)
+        ? `|${DS(card.dataset.model) ?? ""}${DS(card.dataset.persona) ? `@${DS(card.dataset.persona)}` : ""}`
         : "";
     const lines = Array.from(card.querySelectorAll<HTMLElement>(".term-line"))
       .filter((l) => !l.classList.contains("pending") && !l.classList.contains("confirm"))
       .map((l) => {
-        const raw = l.dataset.raw ?? l.textContent ?? "";
-        const t = l.dataset.t ?? "out";
+        const raw = DS(l.dataset.raw) ?? l.textContent ?? "";
+        const t = DS(l.dataset.t) ?? "out";
         return t === "ask" ? `› ${raw}` : t === "cmd" ? `! ${raw}` : t === "err" ? `✕ ${raw}` : raw;
       });
-    return `> [!terminal] ${card.dataset.topic ?? "terminal"}${id}${model}\n${lines
+    return `> [!terminal] ${DS(card.dataset.topic) ?? "terminal"}${id}${model}\n${lines
       .map((l) => `> ${l}`)
       .join("\n")}`;
   }
   normalizeCard(card);
-  const kind = card.dataset.kind ?? "ai";
-  const id = card.dataset.topic ?? "";
-  const color = card.dataset.color ?? "yellow";
-  const title = (card.dataset.title ?? card.querySelector(".sticky-title")?.textContent ?? "").trim();
+  const kind = DS(card.dataset.kind) ?? "ai";
+  const id = DS(card.dataset.topic) ?? "";
+  const color = DS(card.dataset.color) ?? "yellow";
+  const title = (DS(card.dataset.title) ?? card.querySelector(".sticky-title")?.textContent ?? "").trim();
   const head =
     kind === "sticky"
       ? `> [!sticky]${id ? " " + id : ""}${color !== "yellow" ? ` color=${color}` : ""}${title ? " " + title : ""}`
@@ -258,7 +261,7 @@ export function cardToMd(card: HTMLElement): string {
       const sources = chips
         .map((c) => {
           const title = c.querySelector(".src-title")?.textContent ?? "";
-          return `[${title}](${c.dataset.url ?? ""})`;
+          return `[${title}](${DS(c.dataset.url) ?? ""})`;
         })
         .join(" · ");
       lines.push(`> Sources: ${sources}`);

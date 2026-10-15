@@ -1,9 +1,11 @@
 import { $ } from "./ipc.js";
 
+const S = (v: unknown): string => typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : "";
+
 const activity: string[] = [];
 
 export function addActivity(text: string) {
-  activity.unshift(String(text ?? ""));
+  activity.unshift(S(text));
   if (activity.length > 12) activity.length = 12;
   renderActivity();
 }

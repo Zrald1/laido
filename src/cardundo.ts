@@ -26,6 +26,7 @@ export function cardUndoSize(card: HTMLElement): number {
  *  their own finer undo (sheets) as the fallback once that stack runs
  *  dry, and by the card keydown path. Returns whether it consumed. */
 export function tryCardUndo(card: HTMLElement, redo = false): boolean {
+  if (!card?.dataset) return false;
   const stx = stacks.get(card);
   if (!stx) return false;
   const from = redo ? stx.redo : stx.undo;
@@ -48,6 +49,7 @@ export function tryCardUndo(card: HTMLElement, redo = false): boolean {
 const hosts = new WeakMap<HTMLElement, CardUndoHost>();
 
 export function armCardUndo(card: HTMLElement, host: CardUndoHost) {
+  if (!card?.dataset) return;
   if (card.dataset.undoWired) return;
   card.dataset.undoWired = "1";
   const st = { undo: [] as string[], redo: [] as string[], last: "", restoring: false };

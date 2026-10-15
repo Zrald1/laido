@@ -22,6 +22,8 @@ import { refreshIndex, paintLinkStrip, initPalette, openToday, initOutline, refr
 import { initFind } from "./find.js";
 import { stem } from "./match.js";
 
+const S = (v: unknown): string => typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : "";
+
 let current = "";
 /** the toolbar shows just the name — the extension lives in the file itself */
 const titleName = (n: string) => n.replace(/\.(laido|md)$/, "");
@@ -2119,7 +2121,7 @@ export function insertCallout(
 /** pin a card in place without the toggle semantics — used for research-loop
  *  cards so every successful loop stays put (cascade keeps them readable) */
 export function pinCard(card: HTMLElement, cascade = 0) {
-  if (card.classList.contains("pinned")) return;
+  if (!card?.classList || card.classList.contains("pinned")) return;
   const editor = body();
   const er = editor.getBoundingClientRect();
   const cr = card.getBoundingClientRect();
@@ -2147,9 +2149,9 @@ export function pinCard(card: HTMLElement, cascade = 0) {
 export function insertClip(title: string, url: string, text: string): void {
   const b = body();
   if (!b) return;
-  title = String(title ?? "");
-  url = String(url ?? "");
-  text = String(text ?? "");
+  title = S(title);
+  url = S(url);
+  text = S(text);
   // a `tpl-clip` / `clip-template` note takes over the clip's landing
   // format — same {{var}} grammar as @tpl, plus {{content}} and {{url}}
   void (async () => {
@@ -2342,6 +2344,9 @@ export { sliceBlock };
 /** `{{date:fmt}}`/`{{time:fmt}}` — tiny token formatter (YYYY YY MM DD
  *  HH mm ss + MMM) — Obsidian Templates-compatible for the common cases */
 export function fillTemplateVars(md: string, title: string, now = new Date()): string {
+  md = typeof md === "string" ? md : "";
+  title = typeof title === "string" ? title : "";
+  if (!(now instanceof Date) || !Number.isFinite(+now)) now = new Date();
   const fmtDate = (fmt: string) =>
     fmt
       .replace(/YYYY/g, String(now.getFullYear()))
@@ -5747,7 +5752,7 @@ export function initEditor() {
     )?.closest("p, li, h1, h2, h3, blockquote") as HTMLElement | null;
     const fr = new FileReader();
     fr.onload = async () => {
-      const b64 = String(fr.result ?? "");
+      const b64 = S(fr.result);
       try {
         const rel = await invoke<string>("asset_save", { b64 });
         insertImageAsset(rel, anchorBlock);
@@ -5777,7 +5782,7 @@ export function initEditor() {
       const fr = new FileReader();
       fr.onload = async () => {
         try {
-          const rel = await invoke<string>("asset_save", { b64: String(fr.result ?? "") });
+          const rel = await invoke<string>("asset_save", { b64: S(fr.result) });
           insertImageAsset(rel, under);
           addActivity(`img → ${rel}`);
         } catch (err) {
