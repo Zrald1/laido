@@ -1,5 +1,6 @@
 import { $, invoke } from "./ipc.js";
 import { addActivity } from "./log.js";
+import { currentNote } from "./editor.js";
 
 interface RagInfo {
   slug: string;
@@ -34,7 +35,7 @@ export async function refreshLibrary() {
       const name = document.createElement("span");
       name.className = "lib-name";
       name.textContent = d.name;
-      name.title = `ask it with: @document ${d.slug} <question> — or @ask <question> for library + notes + web`;
+      name.title = "click to ask this file";
       const meta = document.createElement("span");
       meta.className = "lib-meta";
       meta.textContent = `${d.chunks} chunks`;
@@ -48,7 +49,35 @@ export async function refreshLibrary() {
           void refreshLibrary();
         });
       });
-      row.append(name, meta, del);
+      // click a row → an inline ask box; the answer card lands in the note
+      const ask = document.createElement("div");
+      ask.className = "lib-ask hidden";
+      const input = document.createElement("input");
+      input.placeholder = "Ask this file…";
+      input.spellcheck = false;
+      ask.append(input);
+      row.addEventListener("click", (e) => {
+        const t = e.target as HTMLElement;
+        if (t.closest(".lib-del") || t.closest(".lib-ask")) return;
+        el.querySelectorAll(".lib-ask").forEach((n) => n.classList.add("hidden"));
+        ask.classList.remove("hidden");
+        input.focus();
+      });
+      input.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.key === "Escape") {
+          input.value = "";
+          ask.classList.add("hidden");
+          return;
+        }
+        if (e.key !== "Enter") return;
+        const q = input.value.trim();
+        if (!q) return;
+        input.value = "";
+        ask.classList.add("hidden");
+        void askLibrary(d.slug, d.name, q);
+      });
+      row.append(name, meta, del, ask);
       el.append(row);
     }
     const chunks = list.reduce((a, b) => a + b.chunks, 0);
@@ -57,6 +86,42 @@ export async function refreshLibrary() {
       list.length === 0 ? "" : `${list.length} files · ${chunks} chunks · ${dims} dims`;
   } catch {
     /* ignore */
+  }
+}
+
+/** a library ask: make sure a note is open (library.laido if none), then run
+ *  the normal rag ask scoped to the file — the answer card lands in the note */
+async function askLibrary(slug: string, label: string, query: string) {
+  let note = currentNote();
+  if (!note) {
+    note = "library.laido";
+    try {
+      const list = await invoke<Array<{ name: string }>>("vault_list").catch(() => []);
+      if (!list.some((n) => n.name === note))
+        await invoke("vault_write", { name: note, content: "" });
+    } catch {
+      /* the write races the open — ignore */
+    }
+    void window.__TAURI__.event.emit("open-note", { name: note });
+    for (let i = 0; i < 40 && currentNote() !== note; i++) {
+      await new Promise((r) => window.setTimeout(r, 50));
+    }
+  }
+  addActivity(`🔎 asking ${label}…`);
+  try {
+    await invoke("rag_ask", {
+      note,
+      target: slug,
+      query,
+      quiet: true,
+      anchor: null,
+      parent: null,
+      question: query,
+      web: false,
+    });
+    addActivity(`✓ answered from ${label}`);
+  } catch (e) {
+    addActivity(`✕ ${String(e)}`);
   }
 }
 

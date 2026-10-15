@@ -7,9 +7,11 @@ mod rag;
 mod scheduler;
 mod skills;
 mod state;
+mod term;
 mod tools;
 mod vault;
 mod voice;
+mod xfer;
 
 #[cfg(test)]
 mod sim_tests;
@@ -106,6 +108,14 @@ fn main() {
             vault::vault_list,
             vault::vault_dir,
             vault::reveal_note,
+            vault::vault_index,
+            vault::vault_find,
+            vault::vault_agenda,
+            vault::vault_history,
+            vault::vault_snapshot_read,
+            vault::asset_save,
+            vault::asset_list,
+            vault::asset_data_url,
             vault::vault_update_callout,
             vault::import_note,
             vault::vault_read,
@@ -113,6 +123,8 @@ fn main() {
             vault::vault_create,
             vault::vault_rename,
             vault::vault_insert,
+            vault::vault_prop_set,
+            vault::vault_prop_rename,
             vault::vault_stickies,
             vault::sticky_save,
             vault::sticky_read,
@@ -137,6 +149,7 @@ fn main() {
             rag::related_notes,
             voice::voice_start,
             voice::voice_stop,
+            voice::voice_level,
             voice::voice_live_start,
             voice::voice_live_stop,
             state::settings_get,
@@ -148,9 +161,22 @@ fn main() {
             tools::open_url,
             agent::agent_run,
             agent::note_summary,
+            term::term_run,
+            term::term_ai,
+            term::term_web,
+            term::term_notes,
             pending_open,
             looprun::loop_run,
             looprun::loop_stop,
+            xfer::file_write_text,
+            xfer::file_write_b64,
+            xfer::file_read_text,
+            xfer::sheet_xlsx_export,
+            xfer::sheet_xlsx_import,
+            xfer::sheet_xlsx_sheets,
+            xfer::deck_pptx_export,
+            xfer::deck_pptx_import,
+            tools::page_fetch,
         ])
         .run(tauri::generate_context!())
         .expect("error while running laido");

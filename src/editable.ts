@@ -1,3 +1,15 @@
+import { sheetToMd } from "./sheet.js";
+import { deckToMd } from "./slides.js";
+import { todoToMd } from "./todo.js";
+import { browserToMd } from "./browser.js";
+import { chartToMd } from "./chart.js";
+import { cardsToMd } from "./cards.js";
+import { mapToMd } from "./map.js";
+import { agendaToMd } from "./agenda.js";
+import { graphToMd } from "./graph.js";
+import { canvasToMd } from "./canvas.js";
+import { baseToMd } from "./base.js";
+
 export function serialize(root: HTMLElement): string {
   const blocks: string[] = [];
   let pending: string[] = [];
@@ -17,7 +29,9 @@ export function serialize(root: HTMLElement): string {
     const el = node as HTMLElement;
     if (el.classList.contains("proposal")) continue;
     flush();
-    blocks.push(blockToMd(el));
+    const md = blockToMd(el);
+    // live widgets (chat) serialize to nothing — never stored
+    if (md !== "") blocks.push(md);
   }
   flush();
   const md = blocks.join("\n\n").replace(/\n{3,}/g, "\n\n");
@@ -46,16 +60,79 @@ function bodyLines(el: HTMLElement): string[] {
 function blockToMd(el: HTMLElement): string {
   const tag = el.tagName.toLowerCase();
   if (el.classList.contains("callout")) return cardToMd(el);
+  if (el.classList.contains("fm-props")) {
+    // properties panel → YAML frontmatter; list rows emit `- item` lines
+    const rows = Array.from(el.querySelectorAll<HTMLElement>(".fm-row"))
+      .map((r) => {
+        const vi = r.querySelector<HTMLInputElement>(".fm-v");
+        // a checkbox row persists as bare `key: true|false`; date/datetime
+        // inputs keep their ISO value; text/list rows read raw
+        const v =
+          vi?.type === "checkbox"
+            ? vi.checked
+              ? "true"
+              : "false"
+            : (vi?.value ?? "").trim();
+        return {
+          k: (r.querySelector<HTMLInputElement>(".fm-k")?.value ?? "").trim(),
+          v,
+          list: r.dataset.list === "1",
+        };
+      })
+      .filter((r) => r.k);
+    if (!rows.length) return "";
+    const lines = ["---"];
+    for (const r of rows) {
+      if (r.list) {
+        lines.push(`${r.k}:`);
+        for (const item of r.v.split(",").map((s) => s.trim()).filter(Boolean))
+          lines.push(`  - ${item}`);
+      } else {
+        lines.push(`${r.k}: ${r.v}`);
+      }
+    }
+    lines.push("---");
+    return lines.join("\n");
+  }
   if (tag === "h1" || tag === "h2" || tag === "h3") {
     return `${"#".repeat(Number(tag[1]))} ${inlineToMd(el)}`.trimEnd();
   }
   if (tag === "ul" || tag === "ol") {
     return Array.from(el.children)
-      .map((li, i) => (tag === "ul" ? "- " : `${i + 1}. `) + inlineToMd(li))
+      .map((li, i) => {
+        const l = li as HTMLElement;
+        if (l.classList.contains("todo")) {
+          // task lines keep their box + due date: "- [x] text @2026-02-10"
+          const done = l.classList.contains("done");
+          const box = l.querySelector(".todo-box");
+          box?.remove();
+          // the box is followed by a separating space — dropping the element
+          // leaves it behind, so trim what the checkbox itself contributed
+          const text = inlineToMd(l).replace(/^\s+/, "");
+          if (box) l.prepend(box, document.createTextNode(" "));
+          const when = l.dataset.when ? ` @${l.dataset.when}` : "";
+          return `- [${done ? "x" : " "}] ${text}${when}`;
+        }
+        return (tag === "ul" ? "- " : `${i + 1}. `) + inlineToMd(li);
+      })
       .join("\n");
   }
   if (tag === "blockquote") return `> ${inlineToMd(el)}`;
   if (tag === "hr") return "---";
+  // `![[x.png]]` / sized image embeds render as top-level <img> blocks —
+  // without this branch the inlineToMd fallback walks the img's (empty)
+  // children and the line silently drops out of the file
+  if (tag === "img") {
+    const img = el as HTMLImageElement;
+    const p = img.dataset.asset || img.getAttribute("src") || "";
+    if (!p) return "";
+    const w = img.getAttribute("width");
+    const ht = img.getAttribute("height");
+    const dims = w ? `|${w}${ht ? `x${ht}` : ""}` : "";
+    return img.dataset.wiki
+      ? `![[${p}${dims}]]`
+      : `![${(img.alt ?? "") + dims}](${p})`;
+  }
   // zero-width markers only belong on empty lines — strip them from lines
   // that carry real content so saved notes stay clean
   const txt = inlineToMd(el).replace(/\u200b/g, "").replace(/\n+$/, "");
@@ -102,6 +179,62 @@ export function focusBodyOnCardClick(card: HTMLElement) {
 }
 
 export function cardToMd(card: HTMLElement): string {
+  if (!card?.dataset) return "";
+  // the sheet widget persists as a markdown table inside [!sheet]
+  if (card.dataset.kind === "sheet" || card.classList.contains("sheet-card"))
+    return sheetToMd(card);
+  // the deck widget persists as [!slides] + [!slide] blocks
+  if (card.dataset.kind === "deck" || card.classList.contains("deck-card"))
+    return deckToMd(card);
+  // the todo card persists as [!todo] + "- [ ] task @when" lines
+  if (card.dataset.kind === "todo" || card.classList.contains("todo-card"))
+    return todoToMd(card);
+  // the browser card persists as [!browser] + url:
+  if (card.dataset.kind === "browser" || card.classList.contains("browser-card"))
+    return browserToMd(card);
+  // the chart card persists as [!chart] + type:/data:/inline rows
+  if (card.dataset.kind === "chart" || card.classList.contains("chart-card"))
+    return chartToMd(card);
+  // the flashcards card persists as [!cards] + front::back rows + sched: state
+  if (card.dataset.kind === "cards" || card.classList.contains("cards-card"))
+    return cardsToMd(card);
+  // the mind-map card persists as [!map] + indented bullets
+  if (card.dataset.kind === "map" || card.classList.contains("map-card"))
+    return mapToMd(card);
+  // the agenda card persists as just [!agenda] title — content is computed
+  if (card.dataset.kind === "agenda" || card.classList.contains("agenda-card"))
+    return agendaToMd(card);
+  if (card.dataset.kind === "graph" || card.classList.contains("graph-card"))
+    return graphToMd(card);
+  if (card.dataset.kind === "canvas" || card.classList.contains("canvas-card"))
+    return canvasToMd(card);
+  if (card.dataset.kind === "base" || card.classList.contains("base-card"))
+    return baseToMd(card);
+  // a note embed persists as the `![[note#heading]]` line it was written as
+  if (card.dataset.kind === "embed" || card.classList.contains("note-embed")) {
+    const s = card.dataset.src ?? "";
+    const h = card.dataset.head;
+    return `![[${s}${h ? `#${h}` : ""}]]`;
+  }
+  // the terminal/chat widget persists: the session log as note lines, its
+  // chat id in the title, its chosen model as a trailing |token
+  if (card.classList.contains("term-card")) {
+    const id = card.dataset.chatId ? ` ${card.dataset.chatId}` : "";
+    const model =
+      card.dataset.model || card.dataset.persona
+        ? `|${card.dataset.model ?? ""}${card.dataset.persona ? `@${card.dataset.persona}` : ""}`
+        : "";
+    const lines = Array.from(card.querySelectorAll<HTMLElement>(".term-line"))
+      .filter((l) => !l.classList.contains("pending") && !l.classList.contains("confirm"))
+      .map((l) => {
+        const raw = l.dataset.raw ?? l.textContent ?? "";
+        const t = l.dataset.t ?? "out";
+        return t === "ask" ? `› ${raw}` : t === "cmd" ? `! ${raw}` : t === "err" ? `✕ ${raw}` : raw;
+      });
+    return `> [!terminal] ${card.dataset.topic ?? "terminal"}${id}${model}\n${lines
+      .map((l) => `> ${l}`)
+      .join("\n")}`;
+  }
   normalizeCard(card);
   const kind = card.dataset.kind ?? "ai";
   const id = card.dataset.topic ?? "";
@@ -163,6 +296,25 @@ function inlineToMd(node: Node): string {
       out += el.classList.contains("wikilink")
         ? `[[${el.dataset.note ?? el.textContent ?? ""}]]`
         : `[${el.textContent ?? ""}](${el.dataset.url ?? ""})`;
+    // pasted/dropped images persist as `![alt](attachments/x.png)` — the
+    // vault-relative path lives on data-asset, remote ones keep src
+    else if (tag === "img") {
+      const img = el as HTMLImageElement;
+      const p = img.dataset.asset || img.getAttribute("src") || "";
+      const w = img.getAttribute("width");
+      const ht = img.getAttribute("height");
+      const dims = w ? `|${w}${ht ? `x${ht}` : ""}` : "";
+      if (p) {
+        // wiki-embed form survives as ![[x.png|300]]; md form as ![alt|300](p)
+        out += img.dataset.wiki
+          ? `![[${p}${dims}]]`
+          : `![${(img.alt ?? "") + dims}](${p})`;
+      }
+    }
+    // command chips are the visible form of stored @commands — the disk keeps
+    // the @ so the legacy parsers (scheduler, agent) still read the file
+    else if (el.classList.contains("cmd-chip"))
+      out += `@${el.dataset.cmd ?? el.dataset.arg ?? el.textContent ?? ""}`;
     else out += inlineToMd(el);
   });
   return out;

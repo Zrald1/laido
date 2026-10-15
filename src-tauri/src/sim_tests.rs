@@ -90,6 +90,32 @@ fn sim_feature5_action_items() {
     });
 }
 
+#[test]
+#[ignore = "hits the real vault + live APIs — run with: cargo test --bin laido sim_term_ai -- --ignored --nocapture"]
+fn sim_term_ai_fences() {
+    header("TERMINAL AI — does the model emit executable fences?");
+    tauri::async_runtime::block_on(async {
+        for prompt in [
+            "create a todo list called shopping with milk and eggs",
+            "please create a sheet with a monthly budget",
+            "make a chart of sales by month",
+            "tell me about my files",
+            "make me flashcards for spanish verbs",
+        ] {
+            let r = crate::term::term_ai(prompt.into(), vec![], None, None, None)
+                .await
+                .expect("term_ai");
+            println!("--- {prompt}");
+            println!("text: {}", r.text.chars().take(200).collect::<String>());
+            println!(
+                "todo={} sheet={} slides={} chart={} cards={} laido={} notes={} run={}",
+                r.todo.len(), r.sheet.len(), r.slides.len(), r.chart.len(),
+                r.cards.len(), r.laido.len(), r.notes.len(), r.commands.len()
+            );
+        }
+    });
+}
+
 /// read a WAV of any rate/channels → mono 16k s16le for the live path
 fn read_wav_16k(path: &str) -> Vec<i16> {
     let mut r = hound::WavReader::open(path).expect("open wav");

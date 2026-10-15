@@ -290,8 +290,16 @@ pub async fn run_prompt(
         settings.model_main
     };
     let system = if is_ask { ASK_SYSTEM } else { PROMPT_SYSTEM };
+    // user-taught skills apply here too — a "how much cement for…" prompt
+    // should use the recipe they saved, not a generic guess
+    let mut sys = system.to_string();
+    let skills = crate::skills::skills_digest();
+    if !skills.is_empty() {
+        sys.push_str("\n\nUSER'S SAVED SKILLS — knowledge the user taught you. When the instruction matches a skill's \"use when\", APPLY its knowledge and examples directly:\n");
+        sys.push_str(&skills);
+    }
     let prompt = format!("Instruction: {text}\n\nRecent notes:\n{ctx}");
-    let answer = match llm::chat_retry(&model, Some(system), &prompt, llm::MAX_REPLY).await {
+    let answer = match llm::chat_retry(&model, Some(&sys), &prompt, llm::MAX_REPLY).await {
         Ok(a) => a,
         Err(e) => {
             let _ = app.emit(

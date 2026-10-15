@@ -72,6 +72,7 @@
           <button id="btn-bigger" title="Bigger text">A+</button>
           <button id="btn-smaller" title="Smaller text">A-</button>
           <button id="btn-align" title="Align AI widgets into a grid">⊞</button>
+          <button id="btn-outline" title="Note outline — heading tree">≡</button>
           <button id="btn-mic" title="Voice note — click to record, click again to transcribe">🎙</button>
           <div id="voice-pop" class="marker-pop hidden">
             <button id="voice-live-opt" class="voice-opt">Live transcription</button>
@@ -91,6 +92,8 @@
         <span id="save-state">saved</span>
       </div>
       <div id="note-body" contenteditable="true" spellcheck="false"></div>
+      <div id="linkstrip" class="empty" title="notes that link here / mention this note"></div>
+      <div id="outline-rail" class="hidden" title="note outline"></div>
     </section>
 
     <aside id="rail">
@@ -140,7 +143,6 @@
   </div>
 
   <div id="reminders"></div>
-  <div id="skill-pop" class="skill-pop hidden"></div>
   <div id="mention-pop" class="skill-pop hidden"></div>
   <div id="voice-live" class="hidden"></div>
 
@@ -164,9 +166,14 @@
       <label data-i18n="skill.name">Name</label>
       <input id="skill-name" placeholder="weekly-sync" autocomplete="off" />
       <label data-i18n="skill.description">Description</label>
-      <input id="skill-desc" placeholder="Prepare the weekly project sync" autocomplete="off" />
-      <label data-i18n="skill.steps">Steps — one per line</label>
-      <textarea id="skill-steps" rows="7" spellcheck="false"></textarea>
+      <input id="skill-desc" placeholder="Estimate cement, sand, gravel for concrete work" autocomplete="off" />
+      <label data-i18n="skill.triggers">Use when — words or requests that should trigger it</label>
+      <input id="skill-triggers" placeholder="concrete, slab, footing, cement, gravel, sand" autocomplete="off" />
+      <label data-i18n="skill.knowledge">Knowledge & examples the AI applies — ratios, rules, Q→A pairs</label>
+      <textarea id="skill-know" rows="8" spellcheck="false"
+        placeholder="## Knowledge&#10;- concrete volume V = L × W × thickness (m³)&#10;- dry volume = V × 1.54&#10;- mix 1:2:4 → cement = dry/7, sand = 2·dry/7, gravel = 4·dry/7&#10;- cement bags = cement m³ × 1440 kg/m³ ÷ 50 kg&#10;&#10;## Examples&#10;Q: &quot;concrete for a 4×5 slab 0.1 thick&quot; → make a sheet: V=2 m³, dry=3.08, cement≈12.7 bags, sand=0.88 m³, gravel=1.76 m³"></textarea>
+      <label data-i18n="skill.steps">Steps — one per line (optional actions to run)</label>
+      <textarea id="skill-steps" rows="4" spellcheck="false"></textarea>
       <p class="muted" data-i18n="skill.help"></p>
       <div class="modal-actions">
         <span id="skill-status" class="muted"></span>
@@ -265,6 +272,14 @@
         <button id="settings-save" class="primary" data-i18n="file.save">Save</button>
         <button id="settings-close" class="ghost" data-i18n="set.close">Close</button>
       </div>
+    </div>
+  </div>
+
+  <div id="palette" class="hidden">
+    <div class="palette-box">
+      <input id="palette-in" placeholder="note name, heading, >command, #tag — Enter opens, Shift+Enter creates" spellcheck="false" autocomplete="off" />
+      <div id="palette-list"></div>
+      <div class="palette-hint">↑↓ move · Enter open · Ctrl+Enter new tab · Shift+Enter create · `&gt;` commands · `#` tags</div>
     </div>
   </div>
 

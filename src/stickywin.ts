@@ -1,7 +1,8 @@
 import { $, invoke } from "./ipc.js";
-import { renderMarkdown } from "./render.js";
+import { renderMarkdown, renderCalloutMd } from "./render.js";
 import { cardToMd, toggleMark, focusBodyOnCardClick, insertTabIndent } from "./editable.js";
 import { STICKY_COLORS } from "./editor.js";
+import { wireTerminal } from "./term.js";
 
 export async function initStickyWindow(spec: string) {
   const id = spec.replace(/^~/, "");
@@ -28,7 +29,10 @@ export async function initStickyWindow(spec: string) {
 
   let timer: number | undefined;
   const save = () => {
-    void invoke("sticky_save", { id, md: cardToMd(card) });
+    // the chat widget (a sibling card) rides along in the same sticky file
+    const term = document.querySelector<HTMLElement>("#note-body > .term-card");
+    const termMd = term ? cardToMd(term) : "";
+    void invoke("sticky_save", { id, md: cardToMd(card) + (termMd ? `\n\n${termMd}` : "") });
   };
   const saveSoon = () => {
     clearTimeout(timer);
@@ -122,6 +126,49 @@ export async function initStickyWindow(spec: string) {
     ) as HTMLElement | null;
     insertTabIndent(range, block);
     saveSoon();
+  });
+  // typing chat / terminal alone on a line + Enter spawns the AI chat widget
+  // inside the sticky — same widget, same history, same tools
+  card.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) return;
+    const node = sel.getRangeAt(0).startContainer;
+    const start = node instanceof HTMLElement ? node : node.parentElement;
+    const block = start?.closest("p, li, h1, h2, h3, blockquote") as HTMLElement | null;
+    const text = (block?.textContent ?? "").trim().toLowerCase();
+    if (text !== "chat" && text !== "terminal") return;
+    e.preventDefault();
+    block?.remove();
+    const widget = document.createElement("div");
+    widget.className = "callout term-card";
+    widget.dataset.kind = "terminal";
+    widget.dataset.topic = text === "chat" ? "chat" : "terminal";
+    widget.innerHTML =
+      `<div class="callout-head"><span class="callout-title">${widget.dataset.topic}</span></div>` +
+      `<div class="term-log"></div>` +
+      `<div class="term-input-row"><span class="term-prompt">›</span><input class="term-input" placeholder="ask anything — or ! command" spellcheck="false" autocomplete="off"/><button class="term-mic" title="Voice — click to record, click again to stop and transcribe">🎙</button></div>`;
+    // a sibling of the sticky card — its [!terminal] block then survives the
+    // save/reload round-trip as its own card
+    el.append(widget);
+    wireTerminal(widget);
+    const lg = widget.querySelector<HTMLElement>(".term-log");
+    if (lg) lg.contentEditable = "false";
+    widget.querySelector<HTMLInputElement>(".term-input")?.focus();
+    save();
+  });
+  // Laido commands fired from the sticky's chat land their cards right here
+  void window.__TAURI__.event.listen("research:done", (e) => {
+    const p = (e as unknown as { payload: { callout: string } }).payload;
+    if (!p?.callout) return;
+    const bodyEl = card.querySelector<HTMLElement>(".callout-body");
+    if (!bodyEl) return;
+    const holder = document.createElement("div");
+    holder.innerHTML = renderCalloutMd(p.callout);
+    const c = holder.firstElementChild as HTMLElement | null;
+    if (!c) return;
+    bodyEl.append(c);
+    save();
   });
   el.addEventListener("input", saveSoon);
   window.addEventListener("blur", save);

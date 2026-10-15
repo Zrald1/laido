@@ -223,6 +223,10 @@ export interface Notice {
 const NOTICE_KEY = "laido.notices";
 
 export function noticeKey(kind: string, note: string, text: string, ts: number): string {
+  kind = String(kind ?? "");
+  note = String(note ?? "");
+  text = String(text ?? "");
+  ts = Number.isFinite(ts) ? ts : 0;
   if (kind === "remind") return `${kind}|${note}|${text}|${ts}`;
   if (kind === "brief" || kind === "review") {
     return `${kind}|${note}|${new Date(ts * 1000).toISOString().slice(0, 10)}`;
@@ -261,7 +265,7 @@ export function saveNotices(list: Notice[]) {
 }
 
 export function dismissNotice(n: Notice) {
-  saveNotices(loadNotices().filter((x) => x.key !== n.key));
+  saveNotices(loadNotices().filter((x) => x.key !== n?.key));
 }
 
 function addNotice(n: Notice) {
@@ -306,6 +310,9 @@ export function renderNoticeCard(
   onOpen: (n: Notice) => void,
   onDismiss?: () => void,
 ): HTMLElement {
+  n = n && typeof n === "object" ? n : ({} as Notice);
+  n.kind = String(n.kind ?? "");
+  n.ts = Number.isFinite(n.ts) ? n.ts : 0;
   const card = document.createElement("div");
   card.className = `reminder notice-${n.kind}`;
   const head = document.createElement("div");
@@ -359,6 +366,8 @@ interface SkillRow {
   description: string;
   runs: number;
   steps: string[];
+  triggers?: string[];
+  body?: string;
 }
 
 function insertSkillProposal(p: SkillProposal) {
@@ -387,7 +396,7 @@ function insertSkillProposal(p: SkillProposal) {
   accept.className = "primary mini";
   accept.textContent = "Accept";
   accept.addEventListener("click", () => {
-    void invoke("skill_save", { name: p.name, description: p.description, steps: p.steps }).then(
+    void invoke("skill_save", { name: p.name, description: p.description, triggers: "", body: "", steps: p.steps }).then(
       () => {
         card.remove();
         addActivity(`✓ skill saved: ${p.name} — run it with @skill ${p.name}`);
@@ -429,8 +438,11 @@ export async function refreshSkills() {
       row.className = "act-line skill-row";
       const label = document.createElement("span");
       label.className = "skill-row-label";
-      label.textContent = `${s.name} · ${s.runs}×`;
-      label.title = `${s.description} — click to run in the current note`;
+      const knows = (s.body ?? "").trim() !== "";
+      label.textContent = `${knows ? "📚 " : ""}${s.name} · ${s.runs}×`;
+      label.title = knows
+        ? `${s.description} — knowledge the AI recalls in chat${s.triggers?.length ? ` (when: ${s.triggers.join(", ")})` : ""} — click to run`
+        : `${s.description} — click to run in the current note`;
       label.addEventListener("click", () => {
         const note = currentNote();
         if (!note) {
@@ -459,11 +471,15 @@ async function openSkillEditor(name?: string) {
   const modal = $("#skill-modal");
   const nameEl = $<HTMLInputElement>("#skill-name");
   const descEl = $<HTMLInputElement>("#skill-desc");
+  const trigEl = $<HTMLInputElement>("#skill-triggers");
+  const knowEl = $<HTMLTextAreaElement>("#skill-know");
   const stepsEl = $<HTMLTextAreaElement>("#skill-steps");
   $("#skill-modal-title").textContent = name ? t("skill.edit") : t("skill.new");
   nameEl.value = name ?? "";
   nameEl.disabled = !!name;
   descEl.value = "";
+  trigEl.value = "";
+  knowEl.value = "";
   stepsEl.value = "";
   $("#skill-status").textContent = "";
   if (name) {
@@ -471,11 +487,37 @@ async function openSkillEditor(name?: string) {
       const md = await invoke<string>("skill_read", { name });
       const fm = md.split("---")[1] ?? "";
       descEl.value = (fm.match(/description:\s*(.*)/)?.[1] ?? "").trim();
-      stepsEl.value = md
-        .split("\n")
-        .filter((l) => l.trim().startsWith("- "))
-        .map((l) => l.trim().slice(2))
-        .join("\n");
+      trigEl.value = (fm.match(/triggers:\s*(.*)/)?.[1] ?? "").trim();
+      // body = everything after the frontmatter, minus the trailing
+      // "## Steps" block (those bullets load into the steps field);
+      // legacy skills have no Steps heading — their bullets are steps
+      const rest = md.split("---").slice(2).join("---");
+      const [bodyPart, stepsPart] = rest.split(/^##\s*Steps\s*$/m);
+      if (stepsPart !== undefined) {
+        knowEl.value = bodyPart.trim();
+        stepsEl.value = stepsPart
+          .split("\n")
+          .filter((l) => l.trim().startsWith("- "))
+          .map((l) => l.trim().slice(2))
+          .join("\n");
+      } else {
+        const KNOWN = /^(loop:|@research|! |prompt:|\?|remind:|summary|brief|review)/;
+        const bullets = rest
+          .split("\n")
+          .filter((l) => KNOWN.test(l.trim().replace(/^[-*]\s+/, "")));
+        if (bullets.length) {
+          stepsEl.value = bullets
+            .map((l) => l.trim().replace(/^[-*]\s+/, ""))
+            .join("\n");
+          knowEl.value = rest
+            .split("\n")
+            .filter((l) => !bullets.includes(l))
+            .join("\n")
+            .trim();
+        } else {
+          knowEl.value = rest.trim();
+        }
+      }
     } catch {
       /* ignore */
     }
@@ -493,8 +535,25 @@ export function initSkillTools() {
   });
   $("#skill-new").addEventListener("click", () => void openSkillEditor());
   $("#skill-sample").addEventListener("click", () => {
-    $<HTMLTextAreaElement>("#skill-steps").value =
-      "@research AI industry news\nprompt: summarize what changed and what matters this week\nremind: review the brief";
+    // a knowledge skill — teaches the AI a recipe it recalls in chat
+    $<HTMLInputElement>("#skill-name").value = "concrete-estimate";
+    $<HTMLInputElement>("#skill-desc").value =
+      "Estimate cement, sand and gravel for concrete work";
+    $<HTMLInputElement>("#skill-triggers").value =
+      "concrete, slab, footing, cement, sand, gravel, estimate, materials";
+    $<HTMLTextAreaElement>("#skill-know").value =
+      "## When to use\nThe user asks for material quantities for concrete work — slabs, footings, posts, walls.\n\n" +
+      "## Knowledge\n- concrete volume V = L × W × thickness (m³)\n" +
+      "- dry volume = V × 1.54 (accounts for voids & waste)\n" +
+      "- mix 1:2:4 (cement:sand:gravel) → cement = dry/7, sand = 2·dry/7, gravel = 4·dry/7\n" +
+      "- cement bags = cement m³ × 1440 kg/m³ ÷ 50 kg per bag\n" +
+      "- always show the working: put formulas in the sheet cells, not just numbers\n\n" +
+      "## Examples\n" +
+      "Q: \"concrete for a 4×5 slab 0.1 thick\" → build a sheet titled concrete-estimate: " +
+      "L=4, W=5, t=0.1, V=L*W*t=2 m³, dry=V*1.54=3.08, cement=dry/7=0.44 m³, " +
+      "bags=0.44*1440/50≈12.7, sand=2·dry/7=0.88 m³, gravel=4·dry/7=1.76 m³ — " +
+      "use ```sheet fences so every cell is a live formula";
+    $<HTMLTextAreaElement>("#skill-steps").value = "";
   });
   $("#skill-cancel").addEventListener("click", () => $("#skill-modal").classList.add("hidden"));
   $("#skill-save").addEventListener("click", () => {
@@ -503,15 +562,17 @@ export function initSkillTools() {
       .toLowerCase()
       .replace(/\s+/g, "-");
     const description = $<HTMLInputElement>("#skill-desc").value.trim();
+    const triggers = $<HTMLInputElement>("#skill-triggers").value.trim();
+    const body = $<HTMLTextAreaElement>("#skill-know").value;
     const steps = $<HTMLTextAreaElement>("#skill-steps")
       .value.split("\n")
       .map((x) => x.trim())
       .filter(Boolean);
-    if (!name || steps.length === 0) {
-      $("#skill-status").textContent = "name and at least one step required";
+    if (!name || (!steps.length && !body.trim())) {
+      $("#skill-status").textContent = "name plus knowledge or at least one step required";
       return;
     }
-    void invoke("skill_save", { name, description, steps }).then(() => {
+    void invoke("skill_save", { name, description, triggers, body, steps }).then(() => {
       $("#skill-modal").classList.add("hidden");
       addActivity(`✓ skill saved: ${name}`);
       void refreshSkills();

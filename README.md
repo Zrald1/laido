@@ -76,19 +76,30 @@ infrastructure.
 
 ## Commands
 
+Type a command word — `ask`, `document`, `research`, … — then press **Space** and pick
+from the dropdown (Tab or arrows to move, Enter or a click to choose). Or just start
+typing: `r` offers research, recall, related; `a` offers ask. No `@` to remember: a
+hand-typed word becomes a chip, you type your message, and the command runs when you
+press Enter. Pasted text never becomes a command, and **Escape** cancels one back to
+plain text.
+
 | Command | What it does |
 |---|---|
-| `@ask <question>` | Library + your notes + web, fused into one cited answer |
-| `@document <file?> <question>` | Ask a specific library file (or all files) |
-| `@research <topic>` | Deep research — your files + the web |
-| `@loop [n] [@target] <query>` | Iterative research with per-loop simulations (`@loop stop` ends early) |
-| `@summary [instruction]` | Summarize the current note (including its widgets) |
-| `@recall [target] [n]` | Quiz yourself from your corpus; schedules spaced reviews |
-| `@tasks [target]` | Extract action items from files or notes |
-| `@related` | The notes closest to this one, as `[[links]]` |
-| `@skill <name>` | Run a saved skill |
-| `@schedule <spec> <action>` | Recurring agent work (`daily 08:00 brief`, `every 6h`, `mon-fri 09:00 …`) |
-| `@sticky` / `@schedule` / … | Sticky notes, calendar entries, and more in the pickers |
+| `ask <question>` | Library + your notes + web, fused into one cited answer |
+| `document <file?> <question>` | Ask a specific library file (or all files) |
+| `research <topic>` | Deep research — your files + the web |
+| `loop [n] [target] <query>` | Iterative research with per-loop simulations (`loop stop` ends early) |
+| `summary [instruction]` | Summarize the current note (including its widgets) |
+| `recall [target] [n]` | Quiz yourself from your corpus; schedules spaced reviews |
+| `tasks [target]` | Extract action items from files or notes |
+| `related` | The notes closest to this one, as `[[links]]` |
+| `skill <name>` | Run a saved skill |
+| `schedule <spec> <action>` | Recurring agent work (`daily 08:00 brief`, `every 6h`, `mon-fri 09:00 …`) |
+| `terminal` / `chat` | An AI terminal widget on the note — ask in plain words, run `! shell commands` (safe ones instantly, the rest behind a Run/Skip confirm), save the session as a skill |
+| `sticky` / `schedule` / … | Sticky notes, calendar entries, and more in the pickers |
+
+Click any file in the **Library** to ask it a question directly — the cited answer
+lands in your note as a card.
 
 Commands run only when you press Enter on their line — pasting text is safe.
 

@@ -18,6 +18,11 @@ pub struct SkillInfo {
     pub description: String,
     pub runs: u32,
     pub steps: Vec<String>,
+    /// words/questions that should make the AI reach for this skill
+    pub triggers: Vec<String>,
+    /// free-form knowledge + examples the AI recalls verbatim — ratios,
+    /// rules, Q→A pairs (the "## Knowledge" / "## Examples" body)
+    pub body: String,
 }
 
 fn now() -> i64 {
@@ -135,13 +140,31 @@ pub fn seed_defaults() {
     }
 }
 
-fn parse_skill(content: &str) -> (String, String, u32, Vec<String>) {
+/// a bullet is a runnable step only when it begins with a verb dispatch()
+/// knows — knowledge/example bullets in the body stay knowledge, not steps
+fn is_step_line(s: &str) -> bool {
+    s.starts_with("loop:")
+        || s.starts_with("@research")
+        || s.starts_with("! ")
+        || s.starts_with("prompt:")
+        || s.starts_with('?')
+        || s.starts_with("remind:")
+        || s == "summary"
+        || s.starts_with("summary:")
+        || s == "brief"
+        || s == "review"
+}
+
+fn parse_skill(content: &str) -> (String, String, u32, Vec<String>, Vec<String>, String) {
     let mut name = String::new();
     let mut description = String::new();
     let mut runs = 0u32;
+    let mut triggers: Vec<String> = Vec::new();
     let mut steps = Vec::new();
     let mut in_front = false;
     let mut front_done = false;
+    let mut in_steps = false;
+    let mut body_lines: Vec<String> = Vec::new();
     for line in content.lines() {
         let t = line.trim();
         if t == "---" {
@@ -160,25 +183,45 @@ fn parse_skill(content: &str) -> (String, String, u32, Vec<String>) {
                 description = v.trim().to_string();
             } else if let Some(v) = t.strip_prefix("runs:") {
                 runs = v.trim().parse().unwrap_or(0);
+            } else if let Some(v) = t.strip_prefix("triggers:") {
+                triggers = v
+                    .split(',')
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty())
+                    .collect();
             }
             continue;
         }
-        let first = t.chars().next();
-        let is_step = t.starts_with("- ")
-            || t.starts_with("* ")
-            || first.map(|c| c.is_ascii_digit()).unwrap_or(false);
-        if is_step && !t.starts_with('#') {
-            let s = t
-                .trim_start_matches(|c: char| {
-                    c.is_ascii_digit() || c == '.' || c == '-' || c == '*' || c == ')'
-                })
-                .trim();
-            if !s.is_empty() {
-                steps.push(s.to_string());
+        // a "## Steps" (or "## Run"/"## Actions") heading starts the runnable
+        // section — its lines are steps, never part of the knowledge body
+        if let Some(h) = t.strip_prefix("## ") {
+            let h = h.trim().to_lowercase();
+            in_steps = h == "steps" || h == "run" || h == "actions";
+            if in_steps {
+                continue;
             }
         }
+        let stripped = t
+            .trim_start_matches(|c: char| {
+                c.is_ascii_digit() || c == '.' || c == '-' || c == '*' || c == ')' || c == ' '
+            })
+            .trim();
+        if in_steps {
+            if !stripped.is_empty() {
+                steps.push(stripped.to_string());
+            }
+            continue;
+        }
+        // outside a steps section a known-verb line is still a step (legacy
+        // files have bare `- prompt:` bullets with no heading)
+        if is_step_line(stripped) {
+            steps.push(stripped.to_string());
+            continue;
+        }
+        body_lines.push(line.to_string());
     }
-    (name, description, runs, steps)
+    let body = body_lines.join("\n").trim().to_string();
+    (name, description, runs, triggers, steps, body)
 }
 
 #[tauri::command]
@@ -192,7 +235,7 @@ pub fn skills_list() -> Vec<SkillInfo> {
         let Ok(content) = fs::read_to_string(&path) else {
             continue;
         };
-        let (mut name, description, runs, steps) = parse_skill(&content);
+        let (mut name, description, runs, triggers, steps, body) = parse_skill(&content);
         if name.is_empty() {
             name = entry.file_name().to_string_lossy().into_owned();
         }
@@ -201,6 +244,8 @@ pub fn skills_list() -> Vec<SkillInfo> {
             description,
             runs,
             steps,
+            triggers,
+            body,
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -215,17 +260,71 @@ pub fn skill_read(name: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn skill_save(name: String, description: String, steps: Vec<String>) -> Result<(), String> {
+pub fn skill_save(
+    name: String,
+    description: String,
+    triggers: String,
+    body: String,
+    steps: Vec<String>,
+) -> Result<(), String> {
     let name = crate::vault::safe_name(&name).map_err(|_| "invalid skill name".to_string())?;
     let dir = skills_dir().join(name);
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let body = steps
-        .iter()
-        .map(|s| format!("- {s}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let md = format!("---\nname: {name}\ndescription: {description}\nruns: 0\n---\n\n{body}\n");
+    // keep the file human-readable: frontmatter, the knowledge the user
+    // wrote verbatim (## When to use / ## Knowledge / ## Examples…), then
+    // runnable steps under a ## Steps heading
+    let mut md = format!(
+        "---\nname: {name}\ndescription: {description}\nruns: 0\ntriggers: {}\n---\n",
+        triggers.trim()
+    );
+    let know = body.trim();
+    if !know.is_empty() {
+        md.push_str(&format!("\n{know}\n"));
+    }
+    if !steps.is_empty() {
+        let list = steps
+            .iter()
+            .map(|s| format!("- {s}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        md.push_str(&format!("\n## Steps\n{list}\n"));
+    }
     fs::write(dir.join("SKILL.md"), md).map_err(|e| e.to_string())
+}
+
+/// the skills block injected into the chat system prompt — name + when-to-use
+/// + the knowledge body, so the AI recalls and applies what the user taught it
+/// instead of re-deriving it (e.g. a concrete-mix recipe becomes quantities
+/// on a sheet). Capped so a big skill library can't swamp the context.
+pub fn skills_digest() -> String {
+    const TOTAL_CAP: usize = 6000;
+    const BODY_CAP: usize = 1600;
+    let mut out: Vec<String> = Vec::new();
+    let mut used = 0usize;
+    for s in skills_list() {
+        let mut line = format!("• {}", s.name);
+        if !s.description.is_empty() {
+            line.push_str(&format!(" — {}", s.description));
+        }
+        if !s.triggers.is_empty() {
+            line.push_str(&format!(" — use when: {}", s.triggers.join(", ")));
+        }
+        let body = s.body.trim();
+        if !body.is_empty() {
+            let clipped: String = body.chars().take(BODY_CAP).collect();
+            line.push_str(&format!(
+                "\n{}{}",
+                clipped,
+                if body.chars().count() > BODY_CAP { " …" } else { "" }
+            ));
+        }
+        if used + line.len() > TOTAL_CAP {
+            break;
+        }
+        used += line.len();
+        out.push(line);
+    }
+    out.join("\n")
 }
 
 fn bump_runs(name: &str) {
@@ -285,6 +384,10 @@ fn dispatch(app: &AppHandle, note: &str, step: &str, quiet: bool, anchor: &str) 
             quiet,
             Some(anchor.to_string()),
         );
+    } else if let Some(cmd) = step.strip_prefix("! ") {
+        // a shell step saved from the terminal widget — runs confirm-gated
+        // (the author chose it) and leaves the output tail as a card
+        crate::term::run_skill_step(app.clone(), note.to_string(), cmd.trim().to_string(), anchor.to_string());
     } else if step.starts_with("prompt:") || step.starts_with('?') {
         let app2 = app.clone();
         let n = note.to_string();
@@ -452,5 +555,69 @@ pub fn habit_track(app: AppHandle, note: String, signature: String) {
     }
     if let Ok(t) = serde_json::to_string_pretty(&map) {
         let _ = fs::write(habits_path(), t);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// LAIDO_VAULT is process-global — tests that set it must serialize
+    static VAULT_LOCK: Mutex<()> = Mutex::new(());
+
+    /// a knowledge skill — triggers + a Knowledge/Examples body — round-trips
+    /// through save/parse and lands in the prompt digest with its knowledge
+    #[test]
+    fn knowledge_skill_roundtrip() {
+        let _g = VAULT_LOCK.lock().unwrap();
+        let tmp = std::env::temp_dir().join(format!("laido-skill-{}", now()));
+        std::env::set_var("LAIDO_VAULT", &tmp);
+        let body = "## When to use\nUser asks for material quantities — slabs, footings, posts.\n\n## Knowledge\n- V = L × W × thickness (m³)\n- dry = V × 1.54\n- mix 1:2:4 → cement = dry/7, sand = 2·dry/7, gravel = 4·dry/7\n- bags = cement m³ × 1440 kg/m³ ÷ 50\n\n## Examples\nQ: \"concrete for a 4×5 slab 0.1 thick\" → make a sheet: V=2 m³, dry=3.08, cement≈12.7 bags".to_string();
+        skill_save(
+            "concrete-estimate".into(),
+            "Estimate cement, sand, gravel for concrete".into(),
+            "concrete, slab, footing, cement, gravel, sand".into(),
+            body.clone(),
+            vec![],
+        )
+        .unwrap();
+        let md = fs::read_to_string(tmp.join("skills/concrete-estimate/SKILL.md")).unwrap();
+        let (name, desc, _runs, triggers, steps, parsed_body) = parse_skill(&md);
+        assert_eq!(name, "concrete-estimate");
+        assert_eq!(desc, "Estimate cement, sand, gravel for concrete");
+        assert_eq!(triggers.len(), 6);
+        assert!(steps.is_empty(), "knowledge bullets must not become steps");
+        assert!(parsed_body.contains("dry = V × 1.54"));
+        assert!(parsed_body.contains("## Examples"));
+
+        let digest = skills_digest();
+        assert!(digest.contains("concrete-estimate"));
+        assert!(digest.contains("use when: concrete, slab"));
+        assert!(digest.contains("1440"), "knowledge must reach the prompt");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// a classic action skill still parses its steps — and stays a one-liner
+    /// in the digest (no knowledge body)
+    #[test]
+    fn action_skill_roundtrip() {
+        let _g = VAULT_LOCK.lock().unwrap();
+        let tmp = std::env::temp_dir().join(format!("laido-skill-a-{}", now()));
+        std::env::set_var("LAIDO_VAULT", &tmp);
+        skill_save(
+            "morning".into(),
+            "Morning brief".into(),
+            "".into(),
+            "".into(),
+            vec!["brief".into(), "remind: start the day".into()],
+        )
+        .unwrap();
+        let info = skills_list().into_iter().find(|s| s.name == "morning").unwrap();
+        assert_eq!(info.steps, vec!["brief", "remind: start the day"]);
+        assert!(info.body.is_empty());
+        let digest = skills_digest();
+        assert!(digest.contains("• morning — Morning brief"));
+        let _ = fs::remove_dir_all(&tmp);
     }
 }

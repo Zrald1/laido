@@ -10,12 +10,20 @@ pub struct PingResult {
 
 fn strip_thinking(s: &str) -> String {
     let mut t = s.to_string();
-    while let (Some(a), Some(b)) = (t.find(" thinking"), t.find("</think>")) {
+    // <think>…</think> blocks — reasoning models leak them into content
+    // when the thinking-disable kwarg isn't honored (400-retry path, or a
+    // model that ignores it). Left in, the reasoning shows as the reply.
+    while let (Some(a), Some(b)) = (t.find("<think>"), t.find("</think>")) {
         if a < b {
-            t.replace_range(a..b + " response".len(), "");
+            t.replace_range(a..b + "</think>".len(), "");
         } else {
             break;
         }
+    }
+    // an unclosed <think> means the reply was cut mid-reasoning —
+    // everything from the tag onward is thinking, not the answer
+    if let Some(a) = t.find("<think>") {
+        t.truncate(a);
     }
     let lower = t.to_lowercase();
     if lower.contains("thinking process") || lower.contains("analyze user input") {
@@ -64,6 +72,22 @@ pub async fn chat(
     }
     messages.push(json!({ "role": "user", "content": user }));
     send(model, messages, max_tokens).await
+}
+
+/// real multi-turn chat — the terminal widget's session history rides as
+/// proper role/content messages so the model actually remembers the thread
+pub async fn chat_messages(
+    model: &str,
+    system: Option<&str>,
+    messages: Vec<serde_json::Value>,
+    max_tokens: u32,
+) -> Result<String, String> {
+    let mut all = Vec::new();
+    if let Some(sys) = system {
+        all.push(json!({ "role": "system", "content": sys }));
+    }
+    all.extend(messages);
+    send(model, all, max_tokens).await
 }
 
 /// vision-model call: one text prompt + one base64 image (OpenAI-compatible

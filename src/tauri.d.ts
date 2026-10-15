@@ -28,6 +28,7 @@ declare global {
       };
       dialog?: {
         open(options: Record<string, unknown>): Promise<string | string[] | null>;
+        save(options: Record<string, unknown>): Promise<string | null>;
       };
     };
   }

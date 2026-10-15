@@ -89,6 +89,23 @@ pub fn voice_start() -> Result<(), String> {
     Ok(())
 }
 
+/// current mic loudness (RMS of the last ~46ms of capture) — the widget's
+/// VU meter polls this while recording; 0 when not recording
+#[tauri::command]
+pub fn voice_level() -> f32 {
+    let guard = slot().lock().unwrap();
+    let Some(rec) = guard.as_ref() else {
+        return 0.0;
+    };
+    let buf = rec.buf.lock().unwrap();
+    let n = buf.len().min(2048);
+    if n == 0 {
+        return 0.0;
+    }
+    let tail = &buf[buf.len() - n..];
+    (tail.iter().map(|s| s * s).sum::<f32>() / n as f32).sqrt()
+}
+
 #[tauri::command]
 pub async fn voice_stop() -> Result<String, String> {
     let Rec {

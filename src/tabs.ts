@@ -12,6 +12,44 @@ import { addActivity } from "./log.js";
 
 const KEY = "laido.tabs";
 
+/** the built-in guide — created once in the vault and opened on every launch
+ *  so new users can always read how Laido works */
+const GUIDE = "Instructions.laido";
+const GUIDE_MD = `# Welcome to Laido
+
+Your notes are the interface. Write anything; Laido reads it, answers from it, researches the web, and leaves every result on the page as a card — never hidden in a chat log.
+
+## Commands — no symbols to remember
+
+Type a command word, press **Space** and pick from the dropdown — or just start typing: r offers research, recall, related. Tab or the arrow keys move the highlight, Space, Enter or a click chooses — then type your message and press Enter.
+
+- **ask** — your notes + your library + the web, fused into one cited answer
+- **document** — ask one library file (or all of them)
+- **research** — deep research on a topic
+- **loop** — iterative research with a simulation each round
+- **summary** — summarize this note
+- **recall** — quiz yourself from your notes
+- **tasks** — pull action items out of your notes or files
+- **related** — the notes closest to this one
+- **skill** — run a saved skill
+- **schedule** — recurring work while you sleep, like: schedule daily 08:00 brief
+- **terminal** — an AI terminal on this note: ask in plain words, run ! commands, save skills
+
+## Your library
+
+Click any file in the **Library** panel to ask it a question — the cited answer lands here as a card. Drop PDFs, slides, images, and text files there to make them searchable.
+
+## Good to know
+
+- Commands run only when you press **Enter** on their line — pasting text is always safe.
+- Press **Escape** to cancel a command — the line goes back to plain text.
+- Every card is editable; drag, resize, or pin it wherever it helps.
+- Your notes live as plain files in your Documents folder — they are yours.
+- Add your keys (Nebius, Tavily, AssemblyAI) in **Settings**.
+
+You can edit this note or close its tab — it comes back the next time you open Laido.
+`;
+
 let tabs: string[] = [];
 let active = "";
 
@@ -118,6 +156,13 @@ function repairNames(names: string[], all: string[]): string[] {
   return out;
 }
 
+// decoupled navigation — any module can ask for a note to open without
+// importing the editor graph (agenda cards, link lists, …)
+document.addEventListener("nav:open", (e) => {
+  const name = (e as CustomEvent<string>).detail;
+  if (name) void openTab(name);
+});
+
 export async function initTabs() {
   const qp = new URLSearchParams(location.search).get("note");
   if (qp) {
@@ -139,8 +184,23 @@ export async function initTabs() {
   }
   const notes = await invoke<Array<{ name: string }>>("vault_list").catch(() => []);
   const allNames = notes.map((n) => n.name);
+  // the instructions note is always there — created if missing, never
+  // overwritten, so user edits to it persist
+  if (!allNames.includes(GUIDE)) {
+    try {
+      await invoke("vault_write", { name: GUIDE, content: GUIDE_MD });
+      allNames.push(GUIDE);
+    } catch {
+      /* vault not ready — try again next launch */
+    }
+  }
   tabs = repairNames(tabs, allNames);
   active = repairNames(active ? [active] : [], allNames)[0] ?? "";
+  if (!qp) {
+    // every launch opens on the instructions — close the tab and it returns
+    if (!tabs.includes(GUIDE)) tabs.unshift(GUIDE);
+    active = GUIDE;
+  }
   if (tabs.length === 0 && allNames.length > 0) tabs = [allNames[0]];
   if (active === "" && tabs.length > 0) active = tabs[0];
   persist();

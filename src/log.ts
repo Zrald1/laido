@@ -3,7 +3,7 @@ import { $ } from "./ipc.js";
 const activity: string[] = [];
 
 export function addActivity(text: string) {
-  activity.unshift(text);
+  activity.unshift(String(text ?? ""));
   if (activity.length > 12) activity.length = 12;
   renderActivity();
 }

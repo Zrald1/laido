@@ -3,6 +3,24 @@ import { renderMarkdown, renderCalloutMd } from "./render.js";
 import { addActivity } from "./log.js";
 import { serialize, toggleMark, clearFormatting, cardToMd, focusBodyOnCardClick, normalizeCard, nbspWidth, insertTabIndent } from "./editable.js";
 import { t } from "./i18n.js";
+import { wireTerminal } from "./term.js";
+import { buildSheetCard, wireSheet } from "./sheet.js";
+import { buildDeckCard, wireDeck } from "./slides.js";
+import { buildTodoCard, wireTodo } from "./todo.js";
+import { buildBrowserCard, wireBrowser, toUrl } from "./browser.js";
+import { buildCardsCard, wireCards } from "./cards.js";
+import { buildMapCard, wireMap } from "./map.js";
+import { buildAgendaCard, wireAgenda, speakDigest } from "./agenda.js";
+import { buildGraphCard, wireGraph } from "./graph.js";
+import { buildCanvasCard, wireCanvas } from "./canvas.js";
+import { buildBaseCard, wireBase } from "./base.js";
+import { buildChartCard, wireChart } from "./chart.js";
+import { armCardUndo } from "./cardundo.js";
+import { sliceBlock, sliceSection, spliceSection, spliceBlock } from "./slices.js";
+import { matchWikiCtx, splitWikiQuery } from "./wikictx.js";
+import { refreshIndex, paintLinkStrip, initPalette, openToday, initOutline, refreshOutline, vaultIndex } from "./links.js";
+import { initFind } from "./find.js";
+import { stem } from "./match.js";
 
 let current = "";
 /** the toolbar shows just the name — the extension lives in the file itself */
@@ -94,12 +112,57 @@ function avoidOverlap(card: HTMLElement) {
   }
 }
 
-function markEdited() {
+export function markEdited() {
   dirty = true;
   setState(t("ed.saving"));
   clearTimeout(timer);
   timer = window.setTimeout(() => void save(), 800);
   scheduleFlow();
+}
+
+/* ---------- card undo host — snapshot/restore widget cards ----------
+ * restore = re-render the card's markdown in place and re-wire its
+ * widget (each wire fn is flag-guarded, so the flag is cleared first).
+ * Sheets keep their own finer undo; everything else rides this stack. */
+const KIND_WIRE: Record<string, [string, (c: HTMLElement) => void]> = {
+  sheet: ["sheetWired", (c) => wireSheet(c)],
+  terminal: ["wired", wireTerminal],
+  deck: ["deckWired", wireDeck],
+  todo: ["todoWired", wireTodo],
+  browser: ["browserWired", wireBrowser],
+  cards: ["cardsWired", wireCards],
+  map: ["mapWired", wireMap],
+  agenda: ["agendaWired", wireAgenda],
+  graph: ["graphWired", wireGraph],
+  canvas: ["canvasWired", wireCanvas],
+  base: ["baseWired", wireBase],
+  chart: ["chartWired", wireChart],
+};
+
+function restoreCardMd(card: HTMLElement, md: string) {
+  const tmp = document.createElement("div");
+  tmp.innerHTML = renderMarkdown(md);
+  const fresh = tmp.firstElementChild as HTMLElement | null;
+  if (!fresh || !fresh.classList.contains("callout")) return;
+  card.innerHTML = fresh.innerHTML;
+  for (const k of Object.keys(fresh.dataset)) {
+    if (["state", "enhanced", "undoWired", "slot"].includes(k)) continue;
+    card.dataset[k] = fresh.dataset[k];
+  }
+  // inner elements may carry their own wired flags from the render
+  const w = KIND_WIRE[card.dataset.kind ?? ""];
+  if (w) {
+    delete card.dataset[w[0]];
+    w[1](card);
+  }
+  markEdited();
+}
+
+export function cardUndoHost() {
+  return {
+    serialize: (c: HTMLElement) => cardToMd(c),
+    restore: restoreCardMd,
+  };
 }
 
 /* ---------- text wraps beside floating cards ---------- */
@@ -276,11 +339,175 @@ function clickAndType(e: MouseEvent) {
 
 /* ---------- pencil ---------- */
 
-/* ---------- command-line loader: 4 wandering dots + a pulsing center
-   replace the line's text while a command runs (from loader.html) ------- */
+/* ---------- command-line loader: the red pencil looping and writing while
+   a command runs (Red Pencil: Loop and Write) ---------------------------- */
 
-const CL_SIZE = 34;
-const CL_DOT = 5;
+let plSeq = 0;
+
+type PlSeg = {
+  k: "circle" | "write" | "travel";
+  d: number;
+  fn?: (u: number) => [number, number];
+  sc?: [number, number, number];
+  lean?: number;
+};
+
+/** the pencil svg — the sheen gradient id is suffixed per instance so
+ *  several loaders on one page never share it */
+const LOOP_SVG = (uid: number) => `<svg viewBox="0 0 400 400" aria-hidden="true">
+  <defs>
+    <linearGradient id="pl-sheen-${uid}" x1="0" x2="1"><stop offset="0" stop-color="#fff" stop-opacity=".4"/><stop offset=".5" stop-color="#fff" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".25"/></linearGradient>
+  </defs>
+  <circle class="pl-ring" cx="200" cy="255" r="70" fill="none" stroke-width="2" stroke-dasharray="2 6" stroke-linecap="round"/>
+  <path class="pl-trail" stroke-width="3"/>
+  <path class="pl-ink" stroke-width="3.2"/>
+  <g class="pl-pencil">
+    <rect x="-9" y="-152" width="18" height="20" rx="6" fill="hsl(350,85%,82%)"/>
+    <rect x="-9" y="-138" width="18" height="18" fill="hsl(220,8%,86%)"/>
+    <rect x="-9" y="-138" width="18" height="18" fill="url(#pl-sheen-${uid})"/>
+    <rect x="-9" y="-133" width="18" height="1.5" fill="rgba(0,0,0,.22)"/>
+    <rect x="-9" y="-126" width="18" height="1.5" fill="rgba(0,0,0,.22)"/>
+    <rect x="-9" y="-120" width="18" height="90" fill="hsl(352,88%,45%)"/>
+    <rect x="-9" y="-120" width="6" height="90" fill="hsl(352,85%,30%)"/>
+    <rect x="3" y="-120" width="4" height="90" fill="hsl(352,90%,62%)"/>
+    <rect class="pl-spin" x="0" y="-120" width="2" height="90" fill="#fff" opacity=".28"/>
+    <polygon points="0,0 -9,-30 9,-30" fill="hsl(34,85%,76%)"/>
+    <polygon points="0,0 -9,-30 -3,-30" fill="hsl(30,80%,58%)"/>
+    <polygon points="0,0 -3.4,-11 3.4,-11" fill="hsl(352,60%,12%)"/>
+  </g>
+</svg>`;
+
+/** the loop-and-write engine — a 3d-tilted pencil draws a circle, travels,
+ *  writes cursive loops, and repeats; returns a stop function */
+function startPencilScene(stage: HTMLElement): () => void {
+  const pencil = stage.querySelector<SVGGElement>(".pl-pencil");
+  const spin = stage.querySelector<SVGRectElement>(".pl-spin");
+  const inkEl = stage.querySelector<SVGPathElement>(".pl-ink");
+  const trailEl = stage.querySelector<SVGPathElement>(".pl-trail");
+  const ring = stage.querySelector<SVGCircleElement>(".pl-ring");
+  if (!pencil || !spin || !inkEl || !trailEl || !ring) return () => {};
+  const slow = matchMedia("(prefers-reduced-motion: reduce)").matches ? 0.35 : 1;
+  const PI2 = Math.PI * 2;
+  const circle = (u: number): [number, number] => {
+    const a = (-113 * Math.PI) / 180 + PI2 * 2 * u;
+    return [200 + 70 * Math.cos(a), 255 + 70 * Math.sin(a)];
+  };
+  // cursive loops along a line from S to E
+  const line = (S: [number, number], E: [number, number], n: number, r: number) => {
+    const dx = E[0] - S[0];
+    const dy = E[1] - S[1];
+    const L = Math.hypot(dx, dy);
+    const ux = dx / L, uy = dy / L, nx = -uy, ny = ux;
+    return (u: number): [number, number] => {
+      const th = PI2 * n * u;
+      const al = L * u - r * Math.sin(th);
+      const pe = r * (Math.cos(th) - 1);
+      return [S[0] + ux * al + nx * pe, S[1] + uy * al + ny * pe];
+    };
+  };
+  const segs: PlSeg[] = [
+    { k: "circle", d: 3.2, fn: circle, sc: [24, -14, 0], lean: 28 },
+    { k: "travel", d: 0.9 },
+    { k: "write", d: 3.8, fn: line([90, 335], [310, 205], 5, 14), sc: [56, 6, -28], lean: 40 },
+    { k: "travel", d: 0.9 },
+    { k: "circle", d: 2.8, fn: circle, sc: [24, -14, 0], lean: 28 },
+    { k: "travel", d: 0.9 },
+    { k: "write", d: 3.8, fn: line([205, 180], [205, 350], 5, 14), sc: [16, 48, 8], lean: 20 },
+    { k: "travel", d: 0.9 },
+  ];
+  const total = segs.reduce((s, g) => s + g.d, 0);
+  const cur: [number, number, number] = [24, -14, 0];
+  let lean = 28;
+  let idx = -1;
+  let pts: Array<[number, number]> = [];
+  let trail: Array<[number, number, number]> = [];
+  let inkFade = 1;
+  let last = 0;
+  let T = 0;
+  let raf = 0;
+  const ease = (u: number) => (u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2);
+  const pathOf = (a: Array<[number, number, number?]>) => {
+    if (!a.length) return "";
+    let d = `M${a[0][0].toFixed(1)} ${a[0][1].toFixed(1)}`;
+    for (let i = 1; i < a.length; i++) d += `L${a[i][0].toFixed(1)} ${a[i][1].toFixed(1)}`;
+    return d;
+  };
+  const frame = (now: number) => {
+    const dt = Math.min(0.05, (now - last) / 1000 || 0);
+    last = now;
+    T = (T + dt * slow) % total;
+    let acc = 0;
+    let i = 0;
+    while (i < segs.length - 1 && T >= acc + segs[i].d) {
+      acc += segs[i].d;
+      i++;
+    }
+    const s = segs[i];
+    const u = (T - acc) / s.d;
+    const nextSolid = segs[(i + 1) % segs.length];
+    const prev = segs[(i + segs.length - 1) % segs.length];
+    if (i !== idx) {
+      idx = i;
+      if (s.k === "write") {
+        pts = [];
+        inkFade = 1;
+      }
+      if (s.k === "circle") trail = [];
+    }
+    let p: [number, number];
+    let lift = 0;
+    let target: [number, number, number];
+    let tl: number;
+    if (s.k === "travel") {
+      // a travel segment always sits between two solid ones
+      const A = prev.fn!(1);
+      const B = nextSolid.fn!(0);
+      const e = ease(u);
+      p = [A[0] + (B[0] - A[0]) * e, A[1] + (B[1] - A[1]) * e];
+      lift = Math.sin(Math.PI * u);
+      target = nextSolid.sc!;
+      tl = nextSolid.lean!;
+      if (prev.k === "write") inkFade = 1 - e;
+    } else {
+      p = s.fn!(u);
+      target = s.sc!;
+      tl = s.lean!;
+      if (s.k === "write") pts.push(p);
+      else trail.push([p[0], p[1], T]);
+    }
+    const k = 1 - Math.exp(-dt * 4.5);
+    for (let j = 0; j < 3; j++) cur[j] += (target[j] - cur[j]) * k;
+    lean += (tl - lean) * k;
+    stage.style.transform = `rotateX(${cur[0].toFixed(2)}deg) rotateY(${cur[1].toFixed(2)}deg) rotateZ(${cur[2].toFixed(2)}deg)`;
+    const wob = s.k === "write" ? 2.2 * Math.sin(now / 70) : 0;
+    pencil.setAttribute(
+      "transform",
+      `translate(${p[0].toFixed(1)} ${(p[1] - lift * 34).toFixed(1)}) rotate(${(lean + wob + lift * -8).toFixed(1)}) scale(${(1 + lift * 0.08).toFixed(3)})`,
+    );
+    spin.setAttribute("x", (5 * Math.cos(now / 260)).toFixed(2));
+    // circle trail: keep only the last ~1.1 s of motion
+    const keep = 1.1;
+    trail = trail.filter((q) => {
+      const age = (T - q[2] + total) % total;
+      return age < keep;
+    });
+    trailEl.setAttribute("d", s.k === "write" ? "" : pathOf(trail));
+    trailEl.style.opacity = s.k === "circle" ? "1" : String(Math.max(0, 1 - u * 1.6));
+    inkEl.setAttribute("d", pathOf(pts));
+    inkEl.style.opacity = s.k === "travel" && prev.k !== "write" ? "0" : String(inkFade);
+    ring.style.opacity =
+      s.k === "write"
+        ? "0"
+        : s.k === "travel"
+          ? nextSolid.k === "circle"
+            ? String(u)
+            : String(1 - u)
+          : "1";
+    raf = requestAnimationFrame(frame);
+  };
+  raf = requestAnimationFrame(frame);
+  return () => cancelAnimationFrame(raf);
+}
 
 function startCmdLoader(block: HTMLElement) {
   stopCmdLoader(block);
@@ -288,46 +515,16 @@ function startCmdLoader(block: HTMLElement) {
   const stage = document.createElement("span");
   stage.className = "cmd-loader";
   stage.contentEditable = "false";
-  const max = CL_SIZE - CL_DOT;
-  const rand = (a: number, b: number) => a + Math.random() * (b - a);
-  const eases = [
-    "cubic-bezier(.68,-0.55,.27,1.55)",
-    "cubic-bezier(.22,1,.36,1)",
-    "cubic-bezier(.45,0,.55,1)",
-    "cubic-bezier(.34,1.56,.64,1)",
-    "ease-in-out",
-    "ease-out",
-  ];
-  const pick = (arr: string[]) => arr[Math.floor(Math.random() * arr.length)];
-  const timers: number[] = [];
-  const wander = (d: HTMLElement) => {
-    const dur = rand(0.5, 1.8);
-    d.style.transition = `transform ${dur}s ${pick(eases)}`;
-    d.style.transform = `translate(${rand(0, max)}px, ${rand(0, max)}px) scale(${rand(0.6, 1.5)})`;
-    timers.push(window.setTimeout(() => wander(d), dur * 1000 * rand(0.7, 1)));
-  };
-  const pulse = (c: HTMLElement) => {
-    const dur = rand(0.4, 1.4);
-    c.style.transition = `transform ${dur}s ${pick(eases)}`;
-    c.style.transform = `scale(${rand(0.2, 1.15)})`;
-    timers.push(window.setTimeout(() => pulse(c), dur * 1000));
-  };
-  for (let i = 0; i < 4; i++) {
-    const d = document.createElement("span");
-    d.className = "cl-dot";
-    const sx = i % 2 ? max : 0;
-    const sy = i > 1 ? max : 0;
-    d.style.transform = `translate(${sx}px, ${sy}px)`;
-    stage.append(d);
-    timers.push(window.setTimeout(() => wander(d), 50 + i * 120));
-  }
-  const c = document.createElement("span");
-  c.className = "cl-center";
-  stage.append(c);
-  pulse(c);
-  (stage as unknown as { _stop: () => void })._stop = () => timers.forEach(clearTimeout);
+  const scene = document.createElement("div");
+  scene.className = "pl-scene";
+  const inner = document.createElement("div");
+  inner.className = "pl-stage";
+  inner.innerHTML = LOOP_SVG(++plSeq);
+  scene.append(inner);
+  stage.append(scene);
+  (stage as unknown as { _stop: () => void })._stop = startPencilScene(inner);
   if (inCard) {
-    // a card anchor would go blank if we hid its text — the dots just overlay it
+    // a card anchor would go blank if we hid its text — the pencil just overlays it
     block.append(stage);
     return;
   }
@@ -425,14 +622,18 @@ export function showPencilAt(block: HTMLElement) {
 
 export function hidePencil() {
   clearTimeout(pencilTimer);
-  if (!pencilBlock) return;
-  stopCmdLoader(pencilBlock);
-  const cmd = pencilBlock.querySelector(".cmd-word");
-  const word = cmd?.textContent ?? "@research";
-  pencilBlock.querySelector(".pencil")?.remove();
-  if (cmd) cmd.replaceWith(document.createTextNode(word));
-  pencilBlock.normalize();
+  // document-wide sweep — the pencil must exit the moment any card lands,
+  // even if the tracked block moved, was stripped, or a background job
+  // (scheduled brief, loop) finished out of band
+  stopCmdLoader();
+  const block = pencilBlock;
   pencilBlock = null;
+  if (!block) return;
+  const cmd = block.querySelector(".cmd-word");
+  const word = cmd?.textContent ?? "@research";
+  block.querySelector(".pencil")?.remove();
+  if (cmd) cmd.replaceWith(document.createTextNode(word));
+  block.normalize();
 }
 
 /* ---------- card state ---------- */
@@ -504,6 +705,12 @@ function restoreCardState(card: HTMLElement) {
     card.style.overflow = "visible";
     pinMark(card);
     applyPinColor(card, PIN_COLORS[s.pinc ?? 0] ?? "red");
+  }
+  // a floating-pinned chat comes back floating-pinned (clamped to the screen)
+  if (s.fixed) {
+    card.classList.add("viewport-pin");
+    card.style.left = `${Math.max(0, Math.min(s.x, window.innerWidth - 80))}px`;
+    card.style.top = `${Math.max(0, Math.min(s.y, window.innerHeight - 40))}px`;
   }
 }
 
@@ -844,6 +1051,20 @@ function makeDraggable(card: HTMLElement) {
 
     gap?.remove();
     gap = null;
+    // a viewport-pinned card stays fixed after the drag — clamp to the
+    // screen, never reflow back onto the sheet
+    if (card.classList.contains("viewport-pin")) {
+      const x = Math.round(
+        Math.max(0, Math.min(parseFloat(card.style.left) || 0, window.innerWidth - 80)),
+      );
+      const y = Math.round(
+        Math.max(0, Math.min(parseFloat(card.style.top) || 0, window.innerHeight - 40)),
+      );
+      card.style.left = `${x}px`;
+      card.style.top = `${y}px`;
+      writeState(card, { fixed: 1, x, y, pinned: 0 });
+      return;
+    }
     const editor = body();
     let x = parseFloat(card.style.left) || 0;
     let y = parseFloat(card.style.top) || 0;
@@ -878,7 +1099,15 @@ function makeDraggable(card: HTMLElement) {
     // editable text is for selecting, not dragging — the hold timer would
     // otherwise fire mid-selection and wipe it
     if (t.closest(".callout-body, .callout-src, .sticky-title")) return;
+    // controls never start a drag — setPointerCapture would swallow their
+    // click. Head-mounted widget tools (canvas/base/graph toolbars, map
+    // add, agenda buttons, the chat model select) live here
+    if (t.closest("button, input, select, textarea, a")) return;
     const immediate = !isSticky() && !!t.closest(".callout-head");
+    // outside the head, non-editable widget surfaces (map canvas, browser
+    // chrome, sheet/deck/todo/chart bodies, the terminal log) belong to
+    // the widget — a long gesture there is widget work, not a card drag
+    if (!immediate && t.closest('[contenteditable="false"]')) return;
     sx = e.clientX;
     sy = e.clientY;
     const startDrag = () => {
@@ -888,8 +1117,14 @@ function makeDraggable(card: HTMLElement) {
       const r = card.getBoundingClientRect();
       const editor = body();
       const er = editor.getBoundingClientRect();
-      fx = (r.left - er.left) / Z() + editor.scrollLeft;
-      fy = (r.top - er.top) / Z() + editor.scrollTop;
+      if (card.classList.contains("viewport-pin")) {
+        // a viewport-fixed card's left/top live in screen units (zoom-divided)
+        fx = r.left / Z();
+        fy = r.top / Z();
+      } else {
+        fx = (r.left - er.left) / Z() + editor.scrollLeft;
+        fy = (r.top - er.top) / Z() + editor.scrollTop;
+      }
       if (!card.classList.contains("floating") && !gap) {
         gap = document.createElement("div");
         gap.className = "drag-gap";
@@ -957,9 +1192,17 @@ function toggleCardSpeech(card: HTMLElement, btn: HTMLElement) {
   }
   window.speechSynthesis.cancel();
   document.querySelectorAll(".card-tts.speaking").forEach((b) => b.classList.remove("speaking"));
+  // a live selection inside the card wins — speak just the highlighted
+  // range (macOS-style speak-selection), else the whole card
+  const sel = window.getSelection();
+  const selText =
+    sel && !sel.isCollapsed && card.contains(sel.anchorNode) && card.contains(sel.focusNode)
+      ? sel.toString().replace(/\s+/g, " ").trim()
+      : "";
   const title = (card.dataset.title ?? card.querySelector(".callout-title")?.textContent ?? "").trim();
   const bodyEl = card.querySelector<HTMLElement>(".callout-body");
-  const text = [title, bodyEl?.innerText ?? ""].join(". ").replace(/\s+/g, " ").trim();
+  const text =
+    selText || [title, bodyEl?.innerText ?? ""].join(". ").replace(/\s+/g, " ").trim();
   if (!text) return;
   const u = new SpeechSynthesisUtterance(text);
   u.rate = 1;
@@ -1001,6 +1244,163 @@ function enhanceCard(card: HTMLElement) {
   makeDraggable(card);
   restoreCardState(card);
   focusBodyOnCardClick(card);
+  if (card.dataset.kind === "terminal") {
+    // the terminal log is output, not editable text — the input row owns typing
+    const lg = card.querySelector<HTMLElement>(".term-log");
+    if (lg) lg.contentEditable = "false";
+    // a reloaded chat keeps its id — seed the sequence so new spawns never collide
+    const cid0 = card.dataset.chatId;
+    if (cid0 && /^\d+$/.test(cid0)) termSeq = Math.max(termSeq, parseInt(cid0));
+    wireTerminal(card);
+    if (!card.querySelector(".card-dup")) {
+      const dup = document.createElement("button");
+      dup.className = "card-dup";
+      dup.textContent = "⧉";
+      dup.title = "Duplicate this chat — same history, a fresh copy";
+      dup.contentEditable = "false";
+      dup.addEventListener("pointerdown", (e) => e.stopPropagation());
+      dup.addEventListener("click", (e) => {
+        e.stopPropagation();
+        duplicateTerminalCard(card);
+      });
+      card.append(dup);
+    }
+  }
+  if (card.dataset.kind === "sheet") {
+    // the grid handles its own editing — only the cells are editable
+    const wrap = card.querySelector<HTMLElement>(".sheet-wrap");
+    if (wrap) wrap.contentEditable = "false";
+    wireSheet(card); // no-op when spawn already wired it at a custom size
+    card.addEventListener("sheet:changed", () => {
+      dirty = true;
+      void save();
+    });
+    if (!card.querySelector(".card-dup")) {
+      const dup = document.createElement("button");
+      dup.className = "card-dup";
+      dup.textContent = "⧉";
+      dup.title = "Duplicate this sheet — copies all cells";
+      dup.contentEditable = "false";
+      dup.addEventListener("pointerdown", (e) => e.stopPropagation());
+      dup.addEventListener("click", (e) => {
+        e.stopPropagation();
+        duplicateSheetCard(card);
+      });
+      card.append(dup);
+    }
+  }
+  if (card.dataset.kind === "deck") {
+    // slides handle their own editing — the card surface stays static
+    const wrap = card.querySelector<HTMLElement>(".deck-body");
+    if (wrap) wrap.contentEditable = "false";
+    wireDeck(card); // no-op when spawn already wired it
+    card.addEventListener("deck:changed", () => {
+      dirty = true;
+      void save();
+    });
+    if (!card.querySelector(".card-dup")) {
+      const dup = document.createElement("button");
+      dup.className = "card-dup";
+      dup.textContent = "⧉";
+      dup.title = "Duplicate this deck — copies all slides";
+      dup.contentEditable = "false";
+      dup.addEventListener("pointerdown", (e) => e.stopPropagation());
+      dup.addEventListener("click", (e) => {
+        e.stopPropagation();
+        duplicateDeckCard(card);
+      });
+      card.append(dup);
+    }
+  }
+  if (card.dataset.kind === "todo") {
+    // the todo card edits its own rows — the card surface stays static
+    const wrap = card.querySelector<HTMLElement>(".todo-body");
+    if (wrap) wrap.contentEditable = "false";
+    wireTodo(card); // no-op when spawn already wired it
+    card.addEventListener("todo:changed", () => {
+      dirty = true;
+      void save();
+    });
+    if (!card.querySelector(".card-dup")) {
+      const dup = document.createElement("button");
+      dup.className = "card-dup";
+      dup.textContent = "⧉";
+      dup.title = "Duplicate this task list — copies every task";
+      dup.contentEditable = "false";
+      dup.addEventListener("pointerdown", (e) => e.stopPropagation());
+      dup.addEventListener("click", (e) => {
+        e.stopPropagation();
+        duplicateTodoCard(card);
+      });
+      card.append(dup);
+    }
+  }
+  if (card.dataset.kind === "browser") {
+    const wrap = card.querySelector<HTMLElement>(".browser-view");
+    if (wrap) wrap.contentEditable = "false";
+    wireBrowser(card);
+    card.addEventListener("browser:changed", () => {
+      dirty = true;
+      void save();
+    });
+  }
+  if (card.dataset.kind === "cards") {
+    const wrap = card.querySelector<HTMLElement>(".fc-list");
+    if (wrap) wrap.contentEditable = "false";
+    for (const w of card.querySelectorAll<HTMLElement>(".fc-tools, .fc-addrow, .fc-status, .fc-review"))
+      w.contentEditable = "false";
+    wireCards(card);
+    card.addEventListener("cards:changed", () => {
+      dirty = true;
+      void save();
+    });
+  }
+  if (card.dataset.kind === "map") {
+    const wrap = card.querySelector<HTMLElement>(".map-canvas");
+    if (wrap) wrap.contentEditable = "false";
+    wireMap(card);
+    card.addEventListener("map:changed", () => {
+      dirty = true;
+      void save();
+    });
+  }
+  if (card.dataset.kind === "agenda") {
+    const wrap = card.querySelector<HTMLElement>(".ag-body");
+    if (wrap) wrap.contentEditable = "false";
+    wireAgenda(card);
+  }
+  if (card.dataset.kind === "graph") {
+    const wrap = card.querySelector<HTMLElement>(".callout-body");
+    if (wrap) wrap.contentEditable = "false";
+    wireGraph(card);
+  }
+  if (card.dataset.kind === "canvas") {
+    const wrap = card.querySelector<HTMLElement>(".callout-body");
+    if (wrap) wrap.contentEditable = "false";
+    wireCanvas(card);
+    card.addEventListener("canvas:changed", () => {
+      dirty = true;
+      void save();
+    });
+  }
+  if (card.dataset.kind === "base") {
+    const wrap = card.querySelector<HTMLElement>(".callout-body");
+    if (wrap) wrap.contentEditable = "false";
+    wireBase(card);
+    card.addEventListener("base:changed", () => {
+      dirty = true;
+      void save();
+    });
+  }
+  if (card.dataset.kind === "chart") {
+    const wrap = card.querySelector<HTMLElement>(".chart-wrap");
+    if (wrap) wrap.contentEditable = "false";
+    wireChart(card);
+    card.addEventListener("chart:changed", () => {
+      dirty = true;
+      void save();
+    });
+  }
   const del = document.createElement("button");
   del.className = "card-del";
   del.textContent = "×";
@@ -1017,6 +1417,9 @@ function enhanceCard(card: HTMLElement) {
   });
   card.append(del);
   if (!card.classList.contains("sticky") && !card.querySelector(".card-pin")) {
+    // term chats and sheets both get the viewport pin — floating widgets the
+    // user wants on screen while they scroll the note
+    const isTerm = card.classList.contains("term-card") || card.classList.contains("sheet-card") || card.classList.contains("deck-card") || card.classList.contains("todo-card");
     const pinBtn = document.createElement("button");
     pinBtn.className = "card-pin";
     pinBtn.textContent = "⌖";
@@ -1025,11 +1428,28 @@ function enhanceCard(card: HTMLElement) {
     pinBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
     pinBtn.addEventListener("click", (e) => {
       e.stopPropagation();
+      // leaving floating-pin mode first, then pinning to the sheet
+      if (isTerm && card.classList.contains("viewport-pin")) toggleFloatPin(card);
       togglePin(card);
     });
     card.append(pinBtn);
+    if (isTerm && !card.querySelector(".card-floatpin")) {
+      // the second pin: viewport-fixed — the chat stays on screen while the
+      // user scrolls anywhere on the sheet
+      const fp = document.createElement("button");
+      fp.className = "card-floatpin";
+      fp.textContent = "📌";
+      fp.title = "Floating pin — the chat stays on screen while you scroll";
+      fp.contentEditable = "false";
+      fp.addEventListener("pointerdown", (e) => e.stopPropagation());
+      fp.addEventListener("click", (e) => {
+        e.stopPropagation();
+        toggleFloatPin(card);
+      });
+      card.append(fp);
+    }
   }
-  if (!card.querySelector(".card-tts")) {
+  if (!card.classList.contains("term-card") && !card.classList.contains("sheet-card") && !card.classList.contains("deck-card") && !card.classList.contains("todo-card") && !card.querySelector(".card-tts")) {
     const tts = document.createElement("button");
     tts.className = "card-tts";
     tts.textContent = "♪";
@@ -1109,6 +1529,11 @@ function enhanceCard(card: HTMLElement) {
   }
   // widget chrome must never capture Tab from the text
   card.querySelectorAll("button").forEach((b) => (b.tabIndex = -1));
+  // generic snapshot undo — every widget kind rides it; sheets' finer
+  // cell undo eats Ctrl+Z first, the card stack catches what it can't
+  if (card.dataset.kind && KIND_WIRE[card.dataset.kind]) {
+    armCardUndo(card, cardUndoHost());
+  }
 }
 
 /* ---------- card links: a "nylon" thread drawn pin-to-pin from a source
@@ -1183,11 +1608,188 @@ let genZ = 10; // each generated card tops the last — newest always on top
 
 const CMD_TOKEN = /(^|\s)@(document|ask|skill|research|recall|tasks|related|loop|summary)\b/;
 
+/** command words that open the no-@ picker when followed by a space */
+const CMD_WORDS = [
+  "document",
+  "ask",
+  "skill",
+  "research",
+  "recall",
+  "tasks",
+  "related",
+  "loop",
+  "summary",
+  "schedule",
+  "terminal",
+  "chat",
+  "sheet",
+  "table",
+  "slides",
+  "deck",
+  "powerpoint",
+  "ppt",
+  "todo",
+  "browser",
+  "browse",
+  "chart",
+  "cards",
+  "flashcards",
+  "review",
+  "today",
+  "map",
+  "mindmap",
+  "mind",
+  "tpl",
+  "template",
+  "agenda",
+  "due",
+  "week",
+  "graph",
+  "canvas",
+  "draw",
+  "persona",
+  "base",
+  "view",
+] as const;
+type CmdWord = (typeof CMD_WORDS)[number];
+
+/** input types that count as hand-typed text — paste and drop never arm
+ *  commands. insertCompositionText is the IME commit, insertReplacementText
+ *  is an autocorrect/spell-suggestion swap (Input Events Level 2) */
+const TYPED_INPUTS = new Set(["insertText", "insertCompositionText", "insertReplacementText"]);
+
+function makeCmdChip(word: string): HTMLSpanElement {
+  const s = document.createElement("span");
+  s.className = "cmd-chip";
+  s.dataset.cmd = word;
+  s.contentEditable = "false";
+  s.textContent = word;
+  return s;
+}
+
+function makeArgChip(slug: string, label: string): HTMLSpanElement {
+  const s = document.createElement("span");
+  s.className = "cmd-chip arg";
+  s.dataset.arg = slug;
+  s.contentEditable = "false";
+  s.textContent = label;
+  return s;
+}
+
+/** the command a chipped line carries — "@cmd [arg] rest" — so chipped
+ *  lines dispatch through the exact branches legacy @ lines use */
+function chipCommand(block: HTMLElement): { cmd: string; arg: string | null; rest: string } | null {
+  const chip = block.querySelector<HTMLElement>(".cmd-chip[data-cmd]");
+  if (!chip) return null;
+  let arg: HTMLElement | null = null;
+  for (let n = chip.nextSibling; n; n = n.nextSibling) {
+    if (n.nodeType === Node.TEXT_NODE && (n.textContent ?? "").trim() === "") continue;
+    if (n instanceof HTMLElement && n.classList.contains("cmd-chip") && n.dataset.arg) arg = n;
+    break;
+  }
+  const last: Node = arg ?? chip;
+  let rest = "";
+  for (let n = last.nextSibling; n; n = n.nextSibling) rest += n.textContent ?? "";
+  return { cmd: chip.dataset.cmd ?? "", arg: arg?.dataset.arg ?? null, rest: rest.trim() };
+}
+
+/** legacy @commands load as chips — the @ disappears from the UI while the
+ *  saved markdown keeps it (storage stays plain, WYSIWYG rule extended) */
+function decorateCommandChips(root: HTMLElement) {
+  const re = new RegExp(`(^|[\\s\\u200b\\ufeff])@(${CMD_WORDS.join("|")})\\b`);
+  for (const block of Array.from(root.children) as HTMLElement[]) {
+    if (block.classList.contains("callout") || block.classList.contains("proposal")) continue;
+    const tw = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+    let node: Text | null;
+    let hit: Text | null = null;
+    let m: RegExpExecArray | null = null;
+    while ((node = tw.nextNode() as Text | null)) {
+      const mm = re.exec(node.textContent ?? "");
+      if (mm) {
+        hit = node;
+        m = mm;
+        break;
+      }
+    }
+    if (!hit || !m) continue;
+    const at = m.index + m[1].length;
+    const word = m[2];
+    const range = document.createRange();
+    range.setStart(hit, at);
+    range.setEnd(hit, at + 1 + word.length);
+    range.deleteContents();
+    const chip = makeCmdChip(word);
+    range.insertNode(chip);
+    // an optional target follows — "@document @slug q" or "@document slug q";
+    // only known slugs/pseudo targets chip, anything else is the question
+    const after = chip.nextSibling;
+    if (after?.nodeType === Node.TEXT_NODE) {
+      const t = after as Text;
+      const tm = (t.textContent ?? "").match(/^\s*@?([\w-]+)\s/);
+      if (tm && /^(my-notes|everything|all-files)$/.test(tm[1])) {
+        // keep the leading whitespace — it is the gap between the two chips
+        const leadSp = tm[0].length - tm[0].replace(/^\s+/, "").length;
+        const ar = document.createRange();
+        ar.setStart(t, leadSp);
+        ar.setEnd(t, tm[0].length);
+        ar.deleteContents();
+        const arg = makeArgChip(tm[1], tm[1]);
+        ar.insertNode(arg);
+        arg.after(document.createTextNode(" "));
+      } else if (tm) {
+        // file slugs upgrade asynchronously once rag_list answers
+        argChipCandidates.push({ block, chip, slug: tm[1], len: tm[0].length });
+      }
+    }
+  }
+}
+
+/** file slugs found while decorating — upgraded to arg chips when rag_list
+ *  answers, so note open stays instant on big libraries */
+let argChipCandidates: Array<{ block: HTMLElement; chip: HTMLElement; slug: string; len: number }> = [];
+
+function upgradeArgChips() {
+  const pending = argChipCandidates;
+  argChipCandidates = [];
+  if (!pending.length) return;
+  void invoke<Array<{ slug: string; name: string }>>("rag_list")
+    .then((list) => {
+      const slugs = new Map(list.map((f) => [f.slug, f.name]));
+      for (const c of pending) {
+        if (!c.chip.isConnected) continue;
+        const name = slugs.get(c.slug);
+        if (!name) continue;
+        const t = c.chip.nextSibling;
+        if (t?.nodeType !== Node.TEXT_NODE) continue;
+        const tm = (t.textContent ?? "").match(/^\s*@?([\w-]+)\s/);
+        if (!tm || tm[1] !== c.slug) continue;
+        const leadSp = tm[0].length - tm[0].replace(/^\s+/, "").length;
+        const ar = document.createRange();
+        ar.setStart(t, leadSp);
+        ar.setEnd(t, c.len);
+        ar.deleteContents();
+        const arg = makeArgChip(c.slug, name);
+        ar.insertNode(arg);
+        arg.after(document.createTextNode(" "));
+      }
+    })
+    .catch(() => {});
+}
+
 /** the typed @command line is a receipt for the run — once its answer card
  *  exists the line is redundant: cut from the @ token to end-of-line and
  *  return whatever text precedes it ("" means the block held only the
- *  command and should be dropped entirely) */
+ *  command and should be dropped entirely). Chipped lines cut from the
+ *  first chip instead. */
 function stripCommandText(block: HTMLElement): string {
+  const chip = block.querySelector<HTMLElement>(".cmd-chip");
+  if (chip) {
+    const range = document.createRange();
+    range.setStartBefore(chip);
+    range.setEnd(block, block.childNodes.length);
+    range.deleteContents();
+    return block.textContent ?? "";
+  }
   const text = block.textContent ?? "";
   const m = CMD_TOKEN.exec(text);
   if (!m) return text;
@@ -1235,8 +1837,12 @@ function insertDictation(text: string) {
 
 /** [[note]] links: open the target, creating it when it doesn't exist yet */
 async function openWikiNote(name: string) {
-  const base = name.trim();
-  if (!base) return;
+  const [base0, frag] = name.trim().split("#", 2);
+  const base = base0.trim();
+  if (!base) {
+    if (frag) scrollToFrag(frag); // [[#heading]] / [[#^id]] — same note
+    return;
+  }
   const file = /\.(laido|md)$/.test(base) ? base : `${base}.laido`;
   try {
     const list = await invoke<Array<{ name: string }>>("vault_list");
@@ -1245,9 +1851,183 @@ async function openWikiNote(name: string) {
       addActivity(`📄 created ${file}`);
     }
     await loadNote(file);
+    if (frag) scrollToFrag(frag);
   } catch (err) {
     addActivity(`✕ ${String(err)}`);
   }
+}
+
+/** scroll the open note to `#Heading` or a `^blockid` anchor */
+function scrollToFrag(frag: string) {
+  const host = body();
+  if (!host) return;
+  let el: HTMLElement | null = null;
+  if (frag.startsWith("^")) {
+    const want = `^${frag.slice(1)}`;
+    const badge = Array.from(host.querySelectorAll<HTMLElement>(".blkid")).find(
+      (b) => b.textContent?.trim() === want,
+    );
+    el = (badge?.closest("p, li, h1, h2, h3, .callout") as HTMLElement | null) ?? null;
+  } else {
+    const want = frag.trim().toLowerCase();
+    el =
+      Array.from(host.querySelectorAll<HTMLElement>("h1, h2, h3")).find(
+        (h) => !h.closest(".callout, .note-embed") && h.textContent?.trim().toLowerCase() === want,
+      ) ?? null;
+  }
+  if (!el) return;
+  el.scrollIntoView({ block: "center", behavior: "smooth" });
+  el.classList.remove("or-flash");
+  void el.offsetWidth;
+  el.classList.add("or-flash");
+}
+
+/* ---------- hover preview — Ctrl+hover a wikilink previews the note
+ * (Obsidian Page Preview: in an editing surface the modifier is required).
+ * ~350ms dwell, Esc / mouse-leave / Ctrl-release dismisses. */
+let ctrlHeld = false;
+let peekEl: HTMLElement | null = null;
+let peekTimer = 0;
+function hidePeek(force = false) {
+  if (!force && peekEl?.dataset.pinned === "1") return;
+  clearTimeout(peekTimer);
+  peekEl?.remove();
+  peekEl = null;
+}
+async function showPeek(link: HTMLElement) {
+  const [base0, frag] = (link.dataset.note ?? "").split("#", 2);
+  const base = base0.trim();
+  if (!base) return;
+  const file = /\.(laido|md)$/.test(base) ? base : `${base}.laido`;
+  let md: string;
+  try {
+    md = await invoke<string>("vault_read", { name: file });
+  } catch {
+    return;
+  }
+  hidePeek(true);
+  const pop = document.createElement("div");
+  pop.className = "peek-pop";
+  pop.contentEditable = "false";
+  const slice = (m: string) =>
+    !frag ? m : frag.startsWith("^") ? sliceBlock(m, frag.slice(1)) : sliceSection(m, frag);
+  const sliced = slice(md);
+  pop.innerHTML =
+    `<div class="peek-head"><span class="peek-title">${stem(file)}${frag ? ` <span class="ne-sec">#${frag.replace(/</g, "&lt;")}</span>` : ""}</span>` +
+    `<button class="peek-btn" data-a="edit" title="edit this slice (Ctrl+Enter saves)">✎</button>` +
+    `<button class="peek-btn" data-a="pin" title="pin open">📌</button>` +
+    `<button class="peek-btn" data-a="x" title="close">✕</button></div>` +
+    `<div class="peek-body">${renderMarkdown(sliced.trim() === "" ? "*(empty)*" : sliced, 1)}</div>`;
+  const r = link.getBoundingClientRect();
+  pop.style.left = `${Math.min(r.left, innerWidth - 400)}px`;
+  pop.style.top = `${r.bottom + 6}px`;
+  document.body.append(pop);
+  peekEl = pop;
+  void hydrateAssets(pop);
+  pop.addEventListener("mouseenter", () => clearTimeout(peekTimer));
+  pop.addEventListener("mouseleave", () => {
+    if (pop.dataset.pinned !== "1") peekTimer = window.setTimeout(hidePeek, 120);
+  });
+  const head = pop.querySelector<HTMLElement>(".peek-head")!;
+  const bodyEl = pop.querySelector<HTMLElement>(".peek-body")!;
+  // ✎ — the popover becomes a tiny editor (Hover-Editor pattern): the
+  // slice's raw markdown in a textarea, Ctrl+Enter/click ✓ writes it
+  // back through vault_write (which snapshots the file first, so a
+  // peek-edit is one `> history` away from undone). Esc cancels.
+  const toggleEdit = () => {
+    const ta = bodyEl.querySelector<HTMLTextAreaElement>(".peek-edit");
+    if (ta) return; // already editing
+    const prev = bodyEl.innerHTML;
+    bodyEl.innerHTML =
+      `<textarea class="peek-edit" spellcheck="false"></textarea>` +
+      `<div class="peek-editbar"><button class="peek-save">✓ save</button><button class="peek-cancel">esc</button><span class="peek-hint">Ctrl+Enter saves</span></div>`;
+    const ed = bodyEl.querySelector<HTMLTextAreaElement>(".peek-edit")!;
+    ed.value = slice(md); // fresh — a prior save may have changed md
+    ed.focus();
+    const done = () => {
+      bodyEl.innerHTML = prev;
+      void hydrateAssets(bodyEl);
+    };
+    bodyEl.querySelector(".peek-cancel")!.addEventListener("click", done);
+    const save = async () => {
+      const next = ed.value;
+      const whole = !frag
+        ? next
+        : frag.startsWith("^")
+          ? spliceBlock(md, frag.slice(1), next)
+          : spliceSection(md, frag, next);
+      if (whole === null) {
+        document.dispatchEvent(new CustomEvent("laido:toast", { detail: `no ${frag} in ${stem(file)}` }));
+        return;
+      }
+      await invoke("vault_write", { name: file, content: whole });
+      md = whole;
+      document.dispatchEvent(new CustomEvent("laido:toast", { detail: `${stem(file)} updated from peek` }));
+      void refreshIndex(true).then(paintLinkStrip);
+      const re = slice(md);
+      bodyEl.innerHTML = renderMarkdown(re.trim() === "" ? "*(empty)*" : re, 1);
+      void hydrateAssets(bodyEl);
+    };
+    bodyEl.querySelector(".peek-save")!.addEventListener("click", () => void save());
+    ed.addEventListener("keydown", (ke) => {
+      if (ke.key === "Escape") { ke.stopPropagation(); done(); }
+      if (ke.key === "Enter" && ke.ctrlKey) { ke.preventDefault(); void save(); }
+      ke.stopPropagation(); // keep typing out of global shortcuts
+    });
+  };
+  pop.querySelector('[data-a="edit"]')!.addEventListener("click", toggleEdit);
+  pop.querySelector('[data-a="pin"]')!.addEventListener("click", (e) => {
+    const on = pop.dataset.pinned === "1";
+    pop.dataset.pinned = on ? "" : "1";
+    (e.target as HTMLElement).classList.toggle("on", !on);
+  });
+  pop.querySelector('[data-a="x"]')!.addEventListener("click", () => {
+    delete pop.dataset.pinned;
+    hidePeek(true);
+  });
+  // dragging the head moves the popover and auto-pins it
+  head.addEventListener("mousedown", (e) => {
+    if ((e.target as HTMLElement).closest(".peek-btn")) return;
+    e.preventDefault();
+    pop.dataset.pinned = "1";
+    pop.querySelector('[data-a="pin"]')?.classList.add("on");
+    const ox = e.clientX - pop.offsetLeft;
+    const oy = e.clientY - pop.offsetTop;
+    const mv = (ev: MouseEvent) => {
+      pop.style.left = `${Math.max(0, Math.min(ev.clientX - ox, innerWidth - 120))}px`;
+      pop.style.top = `${Math.max(0, ev.clientY - oy)}px`;
+    };
+    const up = () => {
+      document.removeEventListener("mousemove", mv);
+      document.removeEventListener("mouseup", up);
+    };
+    document.addEventListener("mousemove", mv);
+    document.addEventListener("mouseup", up);
+  });
+}
+function armPeek() {
+  // Ctrl+hover on a wikilink → preview after a short dwell
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Control") ctrlHeld = true;
+    if (e.key === "Escape") hidePeek(true);
+  });
+  document.addEventListener("keyup", (e) => {
+    if (e.key === "Control") { ctrlHeld = false; hidePeek(); }
+  });
+  document.addEventListener("mouseover", (e) => {
+    const w = (e.target as HTMLElement).closest?.(".wikilink") as HTMLElement | null;
+    if (!w || !e.ctrlKey) return;
+    if (peekEl?.dataset.pinned === "1") return; // a pinned popover stays
+    clearTimeout(peekTimer);
+    peekTimer = window.setTimeout(() => { if (ctrlHeld) void showPeek(w); }, 350);
+  });
+  document.addEventListener("mouseout", (e) => {
+    const w = (e.target as HTMLElement).closest?.(".wikilink");
+    if (!w) return;
+    const to = e.relatedTarget as Node | null;
+    if (to && peekEl?.contains(to)) return; // slid onto the popover
+    peekTimer = window.setTimeout(() => hidePeek(), 120);
+  });
 }
 
 export function insertCallout(
@@ -1260,9 +2040,13 @@ export function insertCallout(
   hidePencil();
   const root = body();
   const needle = clean(anchor ?? `@research ${topic}`);
+  // chipped lines show the command without the @ — match either form so
+  // cards always anchor to the line that started them
+  const alt = needle.replace(/^@/, "");
   let target: HTMLElement | null = null;
   for (const child of Array.from(root.children) as HTMLElement[]) {
-    if (clean(child.textContent ?? "") === needle) {
+    const t = clean(child.textContent ?? "");
+    if (t === needle || t === alt) {
       target = child;
       break;
     }
@@ -1291,7 +2075,7 @@ export function insertCallout(
     const ref = target.nextSibling;
     const left = calloutMd.startsWith("> [!ai] rag failed")
       ? "x"
-      : stripCommandText(target).trim();
+      : stripCommandText(target).replace(/[\u200b\ufeff]/g, "").trim();
     if (left) target.after(card);
     else {
       target.remove();
@@ -1357,6 +2141,82 @@ export function pinCard(card: HTMLElement, cascade = 0) {
   markEdited();
 }
 
+/** the capture pipe's landing zone — a browser clip appends quote lines
+ *  (one <blockquote> per line, so the `> ` round-trip stays clean) plus a
+ *  `— [title](url)` source link. Serializes back as `> quote` + `> — [..](..)`. */
+export function insertClip(title: string, url: string, text: string): void {
+  const b = body();
+  if (!b) return;
+  title = String(title ?? "");
+  url = String(url ?? "");
+  text = String(text ?? "");
+  // a `tpl-clip` / `clip-template` note takes over the clip's landing
+  // format — same {{var}} grammar as @tpl, plus {{content}} and {{url}}
+  void (async () => {
+    const ix = await refreshIndex().catch(() => null);
+    const tpl = ix?.notes.find((n) => {
+      const s = stem(n).toLowerCase();
+      return s === "tpl-clip" || s === "clip-template" || s === "clip" || s === "web-clip";
+    });
+    if (tpl && current) {
+      let md: string;
+      try {
+        md = await invoke<string>("vault_read", { name: tpl });
+      } catch {
+        md = "";
+      }
+      if (md.trim()) {
+        md = fillTemplateVars(md, title || titleName(current))
+          .replace(/\{\{\s*url\s*\}\}/g, url)
+          .replace(/\{\{\s*content\s*\}\}/g, text.trim());
+        const prompts = [...md.matchAll(/\{\{\s*prompt:([^}]+)\}\}/g)];
+        for (const p of prompts) {
+          const q = p[1].trim();
+          let ans = `(${q})`;
+          try {
+            const r = await invoke<{ text: string }>("term_ai", {
+              prompt: `Answer briefly for a clipped-webpage template slot — the page is "${title}" (${url}); clipped text follows.\n\n${text.slice(0, 3000)}\n\nQuestion: ${q}`,
+              history: [],
+              others: "",
+              model: null,
+              persona: null,
+            });
+            if (r.text.trim()) ans = r.text.trim();
+          } catch { /* keep placeholder */ }
+          md = md.replace(p[0], ans);
+        }
+        const frag2 = document.createElement("div");
+        frag2.innerHTML = renderMarkdown(md);
+        const kids = Array.from(frag2.children);
+        for (const el2 of kids) {
+          b.appendChild(el2);
+          if (el2.classList?.contains("callout")) enhanceCard(el2 as HTMLElement);
+        }
+        kids[0]?.scrollIntoView({ block: "nearest" });
+        markEdited();
+        return;
+      }
+    }
+    // default — blockquote lines + a source link
+    const frag = document.createDocumentFragment();
+    for (const ln of text.split("\n")) {
+      const q = document.createElement("blockquote");
+      q.textContent = ln.trimEnd() || " ";
+      frag.appendChild(q);
+    }
+    const p = document.createElement("p");
+    const a = document.createElement("a");
+    a.className = "lnk";
+    a.dataset.url = url;
+    a.textContent = `— ${title}`;
+    p.appendChild(a);
+    frag.appendChild(p);
+    b.appendChild(frag);
+    p.scrollIntoView({ block: "nearest" });
+    markEdited();
+  })().catch(() => {});
+}
+
 /** arrange one research-loop run into a clean two-column grid on the sheet:
  *  uniform width, natural height, each new card goes to the shorter column */
 export function layoutLoopRun(run: string) {
@@ -1412,6 +2272,10 @@ export async function loadNote(name: string) {
   $("#note-title").textContent = titleName(name);
   const el = body();
   el.innerHTML = renderMarkdown(md);
+  hydrateAssets(el);
+  void hydrateEmbeds(el);
+  decorateCommandChips(el);
+  upgradeArgChips();
   const cards = Array.from(el.querySelectorAll(".callout")) as HTMLElement[];
   for (const card of cards) {
     enhanceCard(card);
@@ -1427,6 +2291,172 @@ export async function loadNote(name: string) {
     flowAroundCards();
     drawCardLinks();
   });
+  void refreshIndex().then(paintLinkStrip);
+  refreshOutline();
+}
+
+/** vault-relative `![](attachments/x.png)` renders as data-asset imgs —
+ *  this pass swaps in the real bytes via asset_data_url */
+export function hydrateAssets(root: HTMLElement) {
+  root.querySelectorAll<HTMLImageElement>("img[data-asset]").forEach((img) => {
+    const p = img.dataset.asset ?? "";
+    void invoke<string>("asset_data_url", { path: p })
+      .then((u) => {
+        img.src = u;
+      })
+      .catch(() => img.classList.add("img-missing"));
+  });
+}
+
+/** `![[note]]` / `![[note#Heading]]` placeholders → live rendered content.
+ *  A `#heading` slices just that section (to the next same-or-higher
+ *  heading). Embedded content renders at depth 1 — nested embeds inside
+ *  it collapse to ordinary wikilinks. */
+export async function hydrateEmbeds(root: HTMLElement) {
+  const embeds = Array.from(
+    root.querySelectorAll<HTMLElement>(".note-embed[data-src]"),
+  );
+  for (const em of embeds) {
+    const src = em.dataset.src ?? "";
+    const head = em.dataset.head;
+    em.querySelector<HTMLElement>(".ne-open")?.addEventListener("click", () =>
+      void loadNote(src.endsWith(".laido") ? src : `${src}.laido`),
+    );
+    const body = em.querySelector<HTMLElement>(".ne-body");
+    if (!body) continue;
+    try {
+      let md = await invoke<string>("vault_read", {
+        name: src.endsWith(".laido") ? src : `${src}.laido`,
+      });
+      if (head) md = head.startsWith("^") ? sliceBlock(md, head.slice(1)) : sliceSection(md, head);
+      body.innerHTML = renderMarkdown(md.trim() === "" ? "*(empty)*" : md, 1);
+      hydrateAssets(body);
+      body.querySelectorAll<HTMLElement>(".callout").forEach((c) => enhanceCard(c));
+    } catch {
+      body.innerHTML = `<span class="ne-miss">note not found — [[${src}]]</span>`;
+    }
+  }
+}
+export { sliceBlock };
+
+/** `{{date:fmt}}`/`{{time:fmt}}` — tiny token formatter (YYYY YY MM DD
+ *  HH mm ss + MMM) — Obsidian Templates-compatible for the common cases */
+export function fillTemplateVars(md: string, title: string, now = new Date()): string {
+  const fmtDate = (fmt: string) =>
+    fmt
+      .replace(/YYYY/g, String(now.getFullYear()))
+      .replace(/YY/g, String(now.getFullYear()).slice(-2))
+      .replace(/MM/g, String(now.getMonth() + 1).padStart(2, "0"))
+      .replace(/DD/g, String(now.getDate()).padStart(2, "0"))
+      .replace(/HH/g, String(now.getHours()).padStart(2, "0"))
+      .replace(/mm/g, String(now.getMinutes()).padStart(2, "0"))
+      .replace(/ss/g, String(now.getSeconds()).padStart(2, "0"))
+      .replace(/MMM/g, now.toLocaleDateString(undefined, { month: "short" }));
+  return md
+    .replace(/\{\{\s*title\s*\}\}/g, title)
+    .replace(/\{\{\s*date(?::([^}]+))?\s*\}\}/g, (_m, f) => fmtDate(f ?? "YYYY-MM-DD"))
+    .replace(/\{\{\s*time(?::([^}]+))?\s*\}\}/g, (_m, f) => fmtDate(f ?? "HH:mm"));
+}
+
+/** `@tpl <name>` → find the template note (tpl-x / template-x /
+ *  x-template / tpl_x), fill `{{title}}/{{date}}/{{time}}`, then ask the
+ *  model each `{{prompt:…}}` and drop the result in — the clipper
+ *  Interpreter pattern. Inserts rendered content where the command ran. */
+export async function insertTemplate(name: string, block?: HTMLElement) {
+  if (!current) return;
+  const ix = await refreshIndex().catch(() => null);
+  const want = name.toLowerCase();
+  const match = ix?.notes.find((n) => {
+    const s = stem(n).toLowerCase();
+    return (
+      s === `tpl-${want}` || s === `template-${want}` || s === `${want}-template` ||
+      s === `tpl_${want}` || s === `template_${want}` ||
+      (!name && (s.startsWith("tpl-") || s.startsWith("template-")))
+    );
+  }) ?? ix?.notes.find((n) => stem(n).toLowerCase().includes(`tpl`));
+  if (!match) {
+    addActivity(`no template note found for "${name || "(any)"}" — make a note named tpl-<name>`);
+    return;
+  }
+  let md: string;
+  try {
+    md = await invoke<string>("vault_read", { name: match });
+  } catch {
+    addActivity(`template "${match}" unreadable`);
+    return;
+  }
+  md = fillTemplateVars(md, titleName(current));
+  // {{prompt:q}} slots — each asks the model, answer replaces the slot
+  const prompts = [...md.matchAll(/\{\{\s*prompt:([^}]+)\}\}/g)];
+  for (const p of prompts) {
+    const q = p[1].trim();
+    let ans = `(${q})`;
+    try {
+      const r = await invoke<{ text: string }>("term_ai", {
+        prompt: `Answer briefly and factually for a note template slot — plain text, no preamble: ${q}`,
+        history: [],
+        others: "",
+        model: null,
+      });
+      if (r.text.trim()) ans = r.text.trim();
+    } catch { /* keep the placeholder */ }
+    md = md.replace(p[0], ans);
+  }
+  // {{cursor}} — leave a sentinel in the text; after insertion the caret
+  // lands on it and the sentinel is stripped (Templater's jump-spot)
+  const CURSOR = "\u0001CURSOR\u0001";
+  md = md.replace(/\{\{\s*cursor(?::\d+)?\s*\}\}/g, CURSOR);
+  // render + insert where the command line was (or append at end)
+  const frag = document.createElement("div");
+  frag.innerHTML = renderMarkdown(md);
+  const host = body();
+  const kids = Array.from(frag.children);
+  for (const el2 of kids) {
+    if (block && block.parentElement === host) block.after(el2);
+    else host.append(el2);
+  }
+  if (block) {
+    const left = stripCommandText(block).replace(/[​﻿]/g, "").trim();
+    if (!left) block.remove();
+  }
+  for (const el2 of kids) {
+    if (el2.classList?.contains("callout")) enhanceCard(el2 as HTMLElement);
+  }
+  // cursor jump-spot — find the sentinel text node, place the caret there
+  const w = document.createTreeWalker(host, NodeFilter.SHOW_TEXT);
+  let tn: Text | null;
+  while ((tn = w.nextNode() as Text | null)) {
+    const at = tn.data.indexOf(CURSOR);
+    if (at < 0) continue;
+    tn.data = tn.data.replace(CURSOR, "");
+    const r = document.createRange();
+    r.setStart(tn, at);
+    r.collapse(true);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(r);
+    break; // first {{cursor}} wins
+  }
+  hydrateAssets(host);
+  void hydrateEmbeds(host);
+  addActivity(`template "${match.replace(/\.laido$/, "")}" inserted (${kids.length} blocks)`);
+  dirty = true;
+  void save();
+}
+
+/** paste/drop landing: save to vault attachments, insert `![](rel)` img */
+export function insertImageAsset(relPath: string, anchor?: HTMLElement | null) {
+  const b = body();
+  if (!b) return;
+  const p = document.createElement("p");
+  const img = document.createElement("img");
+  img.className = "note-img";
+  img.dataset.asset = relPath;
+  p.appendChild(img);
+  if (anchor) anchor.after(p);
+  else b.appendChild(p);
+  hydrateAssets(p);
+  markEdited();
 }
 
 export async function save() {
@@ -1447,96 +2477,8 @@ interface SkillRow {
   description: string;
   runs: number;
   steps: string[];
-}
-
-async function maybeSkillPicker() {
-  const pop = $("#skill-pop");
-  const sel = window.getSelection();
-  if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) {
-    pop.classList.add("hidden");
-    return;
-  }
-  const node = sel.anchorNode;
-  if (!node || !body().contains(node)) {
-    pop.classList.add("hidden");
-    return;
-  }
-  const text = node.textContent ?? "";
-  const before = text.slice(0, sel.anchorOffset);
-  const m = before.match(/@(skill|document)\s*$/);
-  if (!m) {
-    pop.classList.add("hidden");
-    return;
-  }
-  await showCommandPicker(m[1] as "skill" | "document");
-}
-
-/** picker for bare @document (library files) / @skill (saved skills only) */
-async function showCommandPicker(mode: "skill" | "document") {
-  const pop = $("#skill-pop");
-  if (!pop.classList.contains("hidden")) return;
-  const list = mode === "skill" ? await invoke<SkillRow[]>("skills_list") : [];
-  pop.innerHTML = "";
-  if (mode === "skill" && list.length === 0) {
-    const e = document.createElement("div");
-    e.className = "menu-sub";
-    e.textContent = "no skills yet";
-    pop.append(e);
-  }
-  interface RagRow {
-    slug: string;
-    name: string;
-    chunks: number;
-  }
-  // @skill is for saved routines — library files only belong to @document
-  let files: RagRow[] = [];
-  if (mode === "document") {
-    try {
-      files = await invoke<RagRow[]>("rag_list");
-    } catch {
-      files = [];
-    }
-  }
-  if (files.length > 0) {
-    const label = document.createElement("div");
-    label.className = "menu-label";
-    label.textContent = "Files";
-    pop.append(label);
-    const addFile = (slug: string, label2: string) => {
-      const b = document.createElement("button");
-      b.className = "skill-item";
-      const n = document.createElement("span");
-      n.className = "skill-name";
-      n.textContent = slug;
-      const d = document.createElement("span");
-      d.className = "skill-desc";
-      d.textContent = label2;
-      b.append(n, d);
-      b.addEventListener("mousedown", (e) => e.preventDefault());
-      b.addEventListener("click", () => insertCmdName(mode, `${slug} `));
-      pop.append(b);
-    };
-    addFile("my-notes", "your own notes — ask everything you wrote");
-    addFile("everything", "library files + your notes");
-    addFile("all-files", `every document · ${files.length} files`);
-    for (const f of files) addFile(f.slug, `${f.name} · ${f.chunks} chunks`);
-  }
-  for (const s of list) {
-    const b = document.createElement("button");
-    b.className = "skill-item";
-    const n = document.createElement("span");
-    n.className = "skill-name";
-    n.textContent = s.name;
-    const d = document.createElement("span");
-    d.className = "skill-desc";
-    d.textContent = s.description || `${s.steps.length} steps`;
-    b.append(n, d);
-    b.addEventListener("mousedown", (e) => e.preventDefault());
-    b.addEventListener("click", () => insertCmdName("skill", s.name));
-    pop.append(b);
-  }
-  pop.classList.remove("hidden");
-  placeAtCaret(pop);
+  triggers?: string[];
+  body?: string;
 }
 
 /** Position a floating pop under the caret (flips above when near the bottom). */
@@ -1565,186 +2507,1463 @@ function placeAtCaret(pop: HTMLElement) {
   pop.style.top = `${top}px`;
 }
 
-/* ---------- @-mention popup: tools + library files while typing ---------- */
+/** the floating pop element — the no-@ command picker owns it */
+const mentionPop = () => $("#mention-pop") as HTMLDivElement;
 
-interface MentionItem {
+/* ---------- no-@ command picker: type a word, press space, pick ---------- */
+
+interface CmdPickRow {
   label: string;
   desc: string;
-  insert: string;
+  /** prefix mode: what this row becomes when accepted */
+  kind?: "cmd" | "skill";
+  /** target mode: accepting inserts a target chip carrying this slug */
+  arg?: { slug: string; label: string };
+  /** target mode: accepting inserts this text after the chip (schedule/loop templates) */
+  template?: string;
 }
 
-interface Mention {
+interface CmdPickState {
+  /** target: picking an argument for an armed chip · prefix: completing a typed word */
+  mode: "target" | "prefix";
+  /** target mode: the armed command word · prefix mode: the typed partial */
+  word: string;
+  /** the text node holding the typed word (word starts at `start`) */
   node: Text;
   start: number;
   end: number;
-  partial: string;
+  /** bare-chip mode: insert after this node instead of replacing a range */
+  after?: ChildNode;
 }
 
-/** the live "@<partial>" immediately before a collapsed caret, if any */
-function currentMention(): Mention | null {
+let cmdPick: CmdPickState | null = null;
+let cmdRows: CmdPickRow[] = [];
+let cmdRowsAll: CmdPickRow[] = [];
+let cmdRowsWord: string | null = null;
+let cmdActive = 0;
+
+function closeCmdPick() {
+  if (!cmdPick) return;
+  cmdPick = null;
+  cmdRows = [];
+  cmdRowsWord = null;
+  cmdActive = 0;
+  mentionPop().classList.add("hidden");
+}
+
+/** the top-level row an element sits in — the note body itself for bare rows */
+function rowOf(el: HTMLElement): HTMLElement {
+  let top = el;
+  while (top.parentElement && top.parentElement.id !== "note-body" && top.id !== "note-body") {
+    top = top.parentElement;
+  }
+  return top;
+}
+
+/** the top-level row a text node belongs to — the note body itself when the
+ *  node sits directly on the paper (a bare line) */
+function lineRow(node: Text): HTMLElement | null {
+  const host = node.parentElement;
+  return host ? rowOf(host) : null;
+}
+
+/** the "word " a collapsed caret sits right after, when word is a command */
+function currentCmdWord(): CmdPickState | null {
   const sel = window.getSelection();
   if (!sel || !sel.isCollapsed || sel.rangeCount === 0) return null;
   const node = sel.anchorNode;
   if (!node || node.nodeType !== Node.TEXT_NODE) return null;
   const host = (node as Text).parentElement;
   if (!host?.closest("#note-body") || host.closest(".callout")) return null;
+  // one command per line — a line that already carries a chip never reopens
+  // the picker, so the message after a command is never hijacked
+  const top = lineRow(node as Text);
+  if (top && top !== body() && top.querySelector(".cmd-chip")) return null;
   const before = (node.textContent ?? "").slice(0, sel.anchorOffset);
-  const m = before.match(/@([\w-]*)$/);
-  if (!m) return null;
+  // a blank ruled line can carry a zero-width space (U+200B) that trim and
+  // \s both ignore — accept it as a word boundary so typing on those lines
+  // still arms the command
+  const m = before.match(/(?:^|[\s\u200b\ufeff])@?([a-z]+) $/);
+  if (!m || !(CMD_WORDS as readonly string[]).includes(m[1])) return null;
+  // a typed @ right before the word is muscle memory — consume it into the chip
+  const at = sel.anchorOffset - m[1].length - 1;
+  const hasAt = at > 0 && (node.textContent ?? "")[at - 1] === "@";
   return {
+    mode: "target",
+    word: m[1],
     node: node as Text,
-    start: sel.anchorOffset - m[0].length,
+    start: hasAt ? at - 1 : at,
     end: sel.anchorOffset,
-    partial: m[1],
   };
 }
 
-const MENTION_TOOLS: MentionItem[] = [
-  { label: "@research", desc: "deep research — your files + the web", insert: "@research " },
-  { label: "@document", desc: "ask a question to your library files", insert: "@document " },
-  { label: "@skill", desc: "run a saved skill", insert: "@skill " },
-];
+/** the in-progress command word under a collapsed caret, when it starts the
+ *  row — "r", "rese", "ask" … feed the live suggestion list */
+function currentCmdPrefix(): CmdPickState | null {
+  const sel = window.getSelection();
+  if (!sel || !sel.isCollapsed || sel.rangeCount === 0) return null;
+  const node = sel.anchorNode;
+  if (!node || node.nodeType !== Node.TEXT_NODE) return null;
+  const host = (node as Text).parentElement;
+  if (!host?.closest("#note-body") || host.closest(".callout")) return null;
+  const top = lineRow(node as Text);
+  if (top && top !== body() && top.querySelector(".cmd-chip")) return null;
+  const before = (node.textContent ?? "").slice(0, sel.anchorOffset);
+  const m = before.match(/(?:^|[\s\u200b\ufeff])@?([a-z]+)$/);
+  if (!m) return null;
+  const st: CmdPickState = {
+    mode: "prefix",
+    word: m[1],
+    node: node as Text,
+    start: sel.anchorOffset - m[1].length,
+    end: sel.anchorOffset,
+  };
+  if (!wordAtLineStart(st)) return null;
+  return st;
+}
 
-let mentionFiles: Array<{ slug: string; name: string; chunks: number }> = [];
-let mentionItems: MentionItem[] = [];
-let mentionActive = 0;
-let mentionOpen = false;
+/** true when only whitespace (or invisible zero-width markers) precedes the
+ *  word inside its row */
+function wordAtLineStart(p: CmdPickState): boolean {
+  const top = lineRow(p.node);
+  if (!top) return false;
+  const strip = (s: string) => s.replace(/[\u200b\ufeff]/g, "");
+  if (top === body()) return strip((p.node.textContent ?? "").slice(0, p.start)).trim() === "";
+  const r = document.createRange();
+  r.setStart(top, 0);
+  r.setEnd(p.node, p.start);
+  return strip(r.toString()).trim() === "";
+}
 
-const mentionPop = () => $("#mention-pop") as HTMLDivElement;
+/** a hand-typed word at line start arms immediately — the word becomes a
+ *  chip and the picker stays open for an optional target */
+function chipifyTypedWord(p: CmdPickState): CmdPickState | null {
+  const row = lineRow(p.node);
+  // one command per line — a stale trigger never adds a second chip
+  if (!row || row !== body() && row.querySelector(".cmd-chip")) return null;
+  const sel = window.getSelection();
+  const caret = sel?.anchorNode === p.node ? sel.anchorOffset : p.end;
+  // swallow a zero-width prefix so the chip starts the line cleanly
+  const prefix = (p.node.textContent ?? "").slice(0, p.start);
+  const start = /^[\u200b\ufeff]*$/.test(prefix) ? 0 : p.start;
+  const range = document.createRange();
+  range.setStart(p.node, start);
+  range.setEnd(p.node, Math.max(p.end, caret));
+  range.deleteContents();
+  const chip = makeCmdChip(p.word);
+  range.insertNode(chip);
+  const sp = document.createTextNode(" ");
+  chip.after(sp);
+  const r2 = document.createRange();
+  r2.setStart(sp, 1);
+  r2.collapse(true);
+  sel?.removeAllRanges();
+  sel?.addRange(r2);
+  markEdited();
+  return { mode: "target", word: p.word, node: sp, start: 1, end: 1 };
+}
 
-async function updateMentionPop() {
+/** short descriptions for the suggestion list */
+const CMD_DESC: Record<string, string> = {
+  document: "ask a library file (or all files)",
+  ask: "notes + library + web, one cited answer",
+  skill: "run a saved skill",
+  research: "deep research — files + web",
+  recall: "quiz yourself from your notes",
+  tasks: "pull action items out of notes",
+  related: "the notes closest to this one",
+  loop: "iterative research with simulations",
+  summary: "summarize this note",
+  schedule: "recurring work while you sleep",
+  terminal: "an AI terminal on this note — run commands",
+  chat: "chat with the AI right on the note",
+  sheet: "a spreadsheet on this note — Excel-style formulas",
+  table: "a spreadsheet on this note — Excel-style formulas",
+  slides: "a slide deck on this note — presentable, PowerPoint-style",
+  deck: "a slide deck on this note — presentable, PowerPoint-style",
+  powerpoint: "a slide deck on this note — presentable, PowerPoint-style",
+  ppt: "a slide deck on this note — presentable, PowerPoint-style",
+  todo: "a task list on this note — checkboxes, due dates, AI-managed",
+};
+
+/** commands + skills whose name starts with the typed partial */
+async function prefixRowsFor(partial: string): Promise<CmdPickRow[]> {
+  const p = partial.toLowerCase();
+  const rows: CmdPickRow[] = CMD_WORDS.filter((w) => w.startsWith(p)).map((w) => ({
+    label: w,
+    desc: CMD_DESC[w] ?? "",
+    kind: "cmd" as const,
+  }));
+  if (rows.length) {
+    const skills = await invoke<SkillRow[]>("skills_list").catch(() => []);
+    for (const s of skills) {
+      if (s.name.toLowerCase().startsWith(p))
+        rows.push({ label: s.name, desc: s.description || "saved skill", kind: "skill" });
+    }
+  }
+  return rows;
+}
+
+/** rows the picker offers for a command word */
+async function cmdRowsFor(word: CmdWord): Promise<CmdPickRow[]> {
+  if (word === "skill") {
+    const list = await invoke<SkillRow[]>("skills_list").catch(() => []);
+    return list.map((s) => ({
+      label: s.name,
+      desc: s.description || "saved skill",
+      arg: { slug: s.name, label: s.name },
+    }));
+  }
+  if (word === "research")
+    return [
+      { label: "research", desc: "deep research — your files + the web — then type your topic" },
+    ];
+  if (word === "summary")
+    return [{ label: "summary", desc: "summarize this note — optional instruction after" }];
+  if (word === "related") return [{ label: "related", desc: "the notes closest to this one" }];
+  if (word === "schedule")
+    return [
+      { label: "daily 08:00 brief", desc: "a morning brief, every day", template: "daily 08:00 brief" },
+      { label: "every 6h summary", desc: "a summary every 6 hours", template: "every 6h summary" },
+      { label: "mon-fri 09:00 tasks", desc: "weekday action items", template: "mon-fri 09:00 tasks" },
+    ];
+  // the browser picker — a url or a search phrase opens on the card
+  if (word === "browser" || word === "browse")
+    return [
+      { label: "duckduckgo.com", desc: "a search page on the note", template: "duckduckgo.com" },
+      { label: "wikipedia.org", desc: "an encyclopedia on the note", template: "wikipedia.org" },
+      { label: "search…", desc: "type any phrase — it searches", template: "" },
+    ];
+  // the flashcards picker — a spaced-repetition deck
+  if (word === "cards" || word === "flashcards" || word === "review")
+    return [
+      { label: "blank deck", desc: "add front :: back rows", template: "" },
+      { label: "study deck", desc: "a starter set to review", template: "study" },
+    ];
+  // the mind-map picker — an outline that draws itself as a tree
+  if (word === "map" || word === "mindmap" || word === "mind")
+    return [
+      { label: "blank map", desc: "＋ nodes grow the tree", template: "" },
+      { label: "project plan", desc: "a starter outline", template: "project" },
+    ];
+  // the chart picker — a viz card; can bind live to a sheet range
+  if (word === "chart")
+    return [
+      { label: "sales bar", desc: "a bar chart", template: "sales bar" },
+      { label: "trend line", desc: "a line chart", template: "trend line" },
+      { label: "budget pie", desc: "a pie chart", template: "budget pie" },
+    ];
+  // the todo picker — a named task list; dates parse inline (@tomorrow, +3d, fri)
+  if (word === "todo")
+    return [
+      { label: "my day", desc: "today's tasks", template: "my day" },
+      { label: "groceries", desc: "a shared list", template: "groceries" },
+      { label: "this week", desc: "weekly plan", template: "this week" },
+    ];
+  // the deck picker — just a title; layouts live inside the card
+  if (word === "slides" || word === "deck" || word === "powerpoint" || word === "ppt")
+    return [
+      { label: "new deck", desc: "title slide first — add more inside the card", template: "" },
+      { label: "pitch deck", desc: "name it — the AI can outline the whole deck in chat", template: "pitch" },
+      { label: "status update", desc: "name it — or let a chat write the slides", template: "status update" },
+    ];
+  // the sheet size picker — rows × columns at insert time; a name can follow
+  if (word === "sheet" || word === "table")
+    return [
+      { label: "4 × 3", desc: "a small scratch sheet — add a name after", template: "4x3" },
+      { label: "6 × 4", desc: "tracker-sized", template: "6x4" },
+      { label: "8 × 5", desc: "budget-sized", template: "8x5" },
+      { label: "10 × 6", desc: "a roomy sheet", template: "10x6" },
+      { label: "12 × 8", desc: "ledger-sized", template: "12x8" },
+      { label: "20 × 6", desc: "a long list", template: "20x6" },
+    ];
+  const files = await invoke<Array<{ slug: string; name: string; chunks: number }>>(
+    "rag_list",
+  ).catch(() => []);
+  const rows: CmdPickRow[] = [];
+  if (word === "loop") rows.push({ label: "stop", desc: "end the running loop early", template: "stop" });
+  rows.push({
+    label: "my-notes",
+    desc: "your own notes — everything you wrote",
+    arg: { slug: "my-notes", label: "my-notes" },
+  });
+  rows.push({
+    label: "everything",
+    desc: "library files + your notes",
+    arg: { slug: "everything", label: "everything" },
+  });
+  rows.push({
+    label: "all-files",
+    desc: `every document · ${files.length} files`,
+    arg: { slug: "all-files", label: "all-files" },
+  });
+  for (const f of files)
+    rows.push({ label: f.name, desc: `${f.chunks} chunks`, arg: { slug: f.slug, label: f.name } });
+  return rows;
+}
+
+async function renderCmdPick(filter: string) {
+  const p = cmdPick;
+  if (!p) return;
+  if (p.mode === "prefix") {
+    cmdRowsAll = await prefixRowsFor(filter);
+    if (!cmdPick) return;
+    cmdRows = cmdRowsAll;
+  } else {
+    if (cmdRowsWord !== p.word) {
+      cmdRowsWord = p.word;
+      cmdRowsAll = await cmdRowsFor(p.word as CmdWord);
+      if (!cmdPick || cmdPick.word !== p.word) return;
+    }
+    const f = filter.trim().toLowerCase();
+    cmdRows = cmdRowsAll.filter(
+      (r) =>
+        !f || r.label.toLowerCase().includes(f) || (r.arg?.slug ?? "").toLowerCase().includes(f),
+    );
+  }
+  if (!cmdRows.length) {
+    closeCmdPick();
+    return;
+  }
+  cmdActive = Math.min(cmdActive, cmdRows.length - 1);
   const pop = mentionPop();
-  const m = currentMention();
-  if (!m) {
-    pop.classList.add("hidden");
-    mentionOpen = false;
-    return;
-  }
-  if (!mentionOpen) {
-    mentionOpen = true; // fresh file list each time the pop opens
-    mentionFiles = await invoke<Array<{ slug: string; name: string; chunks: number }>>(
-      "rag_list",
-    ).catch(() => []);
-  }
-  const p = m.partial.toLowerCase();
-  // library files belong to @document/@ask only — a bare @ lists the tools,
-  // and the file list appears once the line is already inside a document ask
-  const before = (m.node.textContent ?? "").slice(0, m.start);
-  const docMode = /(^|\s)@(document|ask)\s+$/.test(before);
-  mentionItems = docMode
-    ? [
-        ...(p === "" || "my-notes".startsWith(p)
-          ? [
-              {
-                label: "@my-notes",
-                desc: "your own notes — ask everything you wrote",
-                insert: "@my-notes ",
-              },
-            ]
-          : []),
-        ...(p === "" || "everything".startsWith(p)
-          ? [
-              {
-                label: "@everything",
-                desc: "library files + your notes",
-                insert: "@everything ",
-              },
-            ]
-          : []),
-        ...(p === "" || "all-files".startsWith(p)
-          ? [
-              {
-                label: "@all-files",
-                desc: `every document · ${mentionFiles.length} files`,
-                insert: "@all-files ",
-              },
-            ]
-          : []),
-        ...mentionFiles
-          .filter((f) => f.slug.toLowerCase().includes(p) || f.name.toLowerCase().includes(p))
-          .map((f) => ({
-            label: `@${f.slug}`,
-            desc: `${f.name} · ${f.chunks} chunks`,
-            insert: `@${f.slug} `,
-          })),
-      ]
-    : MENTION_TOOLS.filter((t) => !p || t.label.slice(1).startsWith(p));
-  if (!mentionItems.length) {
-    pop.classList.add("hidden");
-    return;
-  }
-  mentionActive = Math.min(mentionActive, mentionItems.length - 1);
   pop.innerHTML = "";
   const lbl = document.createElement("div");
   lbl.className = "menu-label";
-  lbl.textContent = docMode ? "Library files" : "Tools";
+  lbl.textContent =
+    p.mode === "prefix"
+      ? "Commands & skills"
+      : p.word === "skill"
+        ? "Skills"
+        : ["document", "ask", "recall", "tasks", "loop"].includes(p.word)
+          ? "Targets"
+          : "Commands";
   pop.append(lbl);
-  mentionItems.forEach((it, i) => {
+  cmdRows.forEach((r, i) => {
     const b = document.createElement("button");
-    b.className = "skill-item" + (i === mentionActive ? " active" : "");
+    b.className = "skill-item" + (i === cmdActive ? " active" : "");
     const n = document.createElement("span");
     n.className = "skill-name";
-    n.textContent = it.label;
+    n.textContent = r.label;
     const d = document.createElement("span");
     d.className = "skill-desc";
-    d.textContent = it.desc;
+    d.textContent = r.desc;
     b.append(n, d);
-    b.addEventListener("mousedown", (e) => e.preventDefault());
-    b.addEventListener("click", () => acceptMention(it));
+    b.addEventListener("mousedown", (ev) => ev.preventDefault());
+    b.addEventListener("click", () => acceptCmdRow(r));
     pop.append(b);
   });
   pop.classList.remove("hidden");
   placeAtCaret(pop);
 }
 
-function acceptMention(it: MentionItem) {
-  const m = currentMention();
-  if (!m) return;
-  const range = document.createRange();
-  range.setStart(m.node, m.start);
-  range.setEnd(m.node, m.end);
-  range.deleteContents();
-  const t = document.createTextNode(it.insert);
-  range.insertNode(t);
-  const after = document.createRange();
-  after.setStartAfter(t);
-  after.collapse(true);
+/** keep the open picker in step with the caret — filter by typed text, or
+ *  close when the caret leaves the command's tail */
+function refreshCmdPick() {
+  if (!cmdPick) return;
   const sel = window.getSelection();
-  sel?.removeAllRanges();
-  sel?.addRange(after);
-  mentionPop().classList.add("hidden");
-  mentionActive = 0;
-  markEdited();
-  // picking @document flows straight into the library file list
-  if (it.insert.trim() === "@document") void showCommandPicker("document");
+  if (!sel || !sel.isCollapsed || sel.rangeCount === 0) return closeCmdPick();
+  if (cmdPick.after) {
+    // bare-chip target picker: close once the caret leaves the chip's row
+    const anchor = sel.anchorNode;
+    const hRow =
+      anchor?.nodeType === Node.TEXT_NODE
+        ? lineRow(anchor as Text)
+        : anchor instanceof HTMLElement
+          ? rowOf(anchor)
+          : null;
+    const cRow = rowOf(cmdPick.after as HTMLElement);
+    if (!hRow || hRow !== cRow) return closeCmdPick();
+    return;
+  }
+  if (cmdPick.mode === "prefix") {
+    // still typing the word — rebuild the suggestion list from the live text
+    if (sel.anchorNode !== cmdPick.node || sel.anchorOffset < cmdPick.start) return closeCmdPick();
+    const partial = (cmdPick.node.textContent ?? "").slice(cmdPick.start, sel.anchorOffset);
+    if (!/^[a-z]+$/.test(partial)) return closeCmdPick();
+    void renderCmdPick(partial);
+    return;
+  }
+  if (sel.anchorNode !== cmdPick.node || sel.anchorOffset < cmdPick.end) return closeCmdPick();
+  const typed = (cmdPick.node.textContent ?? "").slice(cmdPick.end, sel.anchorOffset);
+  if (/[\n\r]/.test(typed)) return closeCmdPick();
+  void renderCmdPick(typed);
 }
 
-/** keyboard nav for the open mention pop — returns true when the key was eaten */
-function mentionKey(e: KeyboardEvent): boolean {
-  const pop = mentionPop();
-  if (pop.classList.contains("hidden")) return false;
+/** accepting a row turns the typed word into a chip — the only way a no-@
+ *  line can ever run; plain prose never executes */
+function acceptCmdRow(row: CmdPickRow) {
+  const p = cmdPick;
+  if (!p) return;
+  const sel = window.getSelection();
+  const caret = sel?.anchorNode === p.node ? sel.anchorOffset : p.end;
+  // a stale picker state must never insert — in prefix mode a row that
+  // already carries a chip would duplicate it, so just close the list
+  const line = lineRow(p.node);
+  if (
+    !p.node.isConnected ||
+    (p.mode === "prefix" && line && line !== body() && line.querySelector(".cmd-chip"))
+  ) {
+    closeCmdPick();
+    return;
+  }
+  if (p.mode === "prefix") {
+    // completing a typed word: the partial becomes the chosen command chip
+    const cur = (p.node.textContent ?? "").slice(p.start, Math.max(p.end, caret));
+    if (!/^[a-z]+$/.test(cur)) {
+      closeCmdPick();
+      return;
+    }
+    const range = document.createRange();
+    // a typed @ before the word is consumed with it — "@ask" arms one chip
+    const s0 = p.start > 0 && (p.node.textContent ?? "")[p.start - 1] === "@" ? p.start - 1 : p.start;
+    range.setStart(p.node, s0);
+    range.setEnd(p.node, Math.max(p.end, caret));
+    range.deleteContents();
+    if (row.kind === "skill") {
+      const chip = makeCmdChip("skill");
+      range.insertNode(chip);
+      const sp = document.createTextNode(" ");
+      const arg = makeArgChip(row.label, row.label);
+      const tail = document.createTextNode(" ");
+      chip.after(sp, arg, tail);
+      const r2 = document.createRange();
+      r2.setStart(tail, 1);
+      r2.collapse(true);
+      sel?.removeAllRanges();
+      sel?.addRange(r2);
+      closeCmdPick();
+    } else {
+      const chip = makeCmdChip(row.label);
+      range.insertNode(chip);
+      const sp = document.createTextNode(" ");
+      chip.after(sp);
+      const r2 = document.createRange();
+      r2.setStart(sp, 1);
+      r2.collapse(true);
+      sel?.removeAllRanges();
+      sel?.addRange(r2);
+      // target-taking commands flow straight into their target list
+      if (["document", "ask", "skill", "loop", "recall", "tasks"].includes(row.label)) {
+        cmdPick = { mode: "target", word: row.label, node: sp, start: 1, end: 1 };
+        cmdRowsWord = null;
+        cmdActive = 0;
+        void renderCmdPick("");
+      } else {
+        closeCmdPick();
+      }
+    }
+    markEdited();
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  frag.append(document.createTextNode(" "));
+  if (row.arg) frag.append(makeArgChip(row.arg.slug, row.arg.label), document.createTextNode(" "));
+  else if (row.template) frag.append(document.createTextNode(`${row.template} `));
+  // the caret lands after the fragment's trailing space so typed text keeps
+  // its gap from the chip
+  const last = frag.lastChild as Node;
+  if (p.after) {
+    p.after.after(frag);
+  } else {
+    const range = document.createRange();
+    range.setStart(p.node, p.start);
+    range.setEnd(p.node, Math.max(p.end, caret));
+    range.deleteContents();
+    // the armed flow already carries its command chip — only the target or
+    // template fragment is missing; the mid-line flow still needs the chip
+    const existing =
+      line && line !== body() ? line.querySelector<HTMLElement>(".cmd-chip[data-cmd]") : null;
+    const chip = existing ?? makeCmdChip(p.word);
+    if (!existing) range.insertNode(chip);
+    chip.after(frag);
+  }
+  const r2 = document.createRange();
+  r2.setStartAfter(last);
+  r2.collapse(true);
+  sel?.removeAllRanges();
+  sel?.addRange(r2);
+  closeCmdPick();
+  markEdited();
+}
+
+/** keyboard for the open picker — Tab moves the highlight, Enter or a click
+ *  accepts (returns true when the key was eaten) */
+function cmdPickKey(e: KeyboardEvent): boolean {
+  if (!cmdPick) return false;
   if (e.key === "ArrowDown") {
     e.preventDefault();
-    mentionActive = (mentionActive + 1) % mentionItems.length;
+    if (cmdRows.length) cmdActive = (cmdActive + 1) % cmdRows.length;
   } else if (e.key === "ArrowUp") {
     e.preventDefault();
-    mentionActive = (mentionActive - 1 + mentionItems.length) % mentionItems.length;
-  } else if (e.key === "Enter" || e.key === "Tab") {
+    if (cmdRows.length) cmdActive = (cmdActive - 1 + cmdRows.length) % cmdRows.length;
+  } else if (e.key === "Tab") {
     e.preventDefault();
-    const it = mentionItems[mentionActive];
-    if (it) acceptMention(it);
+    if (cmdRows.length)
+      cmdActive = (cmdActive + (e.shiftKey ? -1 : 1) + cmdRows.length) % cmdRows.length;
+  } else if (e.key === " " && cmdPick.mode === "prefix") {
+    // space completes the highlighted suggestion (shell-style)
+    const r = cmdRows[cmdActive];
+    if (!r) return false; // rows still loading — let the space type through
+    e.preventDefault();
+    acceptCmdRow(r);
+    return true;
+  } else if (e.key === "Enter") {
+    const r = cmdRows[cmdActive];
+    if (!r) return false; // rows still loading — plain newline instead
+    e.preventDefault();
+    acceptCmdRow(r);
     return true;
   } else if (e.key === "Escape") {
     e.preventDefault();
-    pop.classList.add("hidden");
+    closeCmdPick();
     return true;
   } else {
     return false;
   }
-  pop.querySelectorAll(".skill-item").forEach((b, i) =>
-    b.classList.toggle("active", i === mentionActive),
-  );
+  mentionPop()
+    .querySelectorAll(".skill-item")
+    .forEach((b, i) => b.classList.toggle("active", i === cmdActive));
   return true;
+}
+
+/** Enter on a bare command chip reopens the picker for its target list */
+function openCmdPickFromChip(block: HTMLElement, word?: CmdWord) {
+  const chip = block.querySelector<HTMLElement>(".cmd-chip[data-cmd]");
+  if (!chip) return;
+  const w = (word ?? chip.dataset.cmd) as CmdWord;
+  if (!(CMD_WORDS as readonly string[]).includes(w)) return;
+  let t = chip.nextSibling;
+  if (!(t instanceof Text)) {
+    t = document.createTextNode(" ");
+    chip.after(t);
+  }
+  const r = document.createRange();
+  r.setStart(t, Math.min(1, (t as Text).length));
+  r.collapse(true);
+  const sel = window.getSelection();
+  sel?.removeAllRanges();
+  sel?.addRange(r);
+  cmdPick = { mode: "target", word: w, node: t as Text, start: 0, end: 0, after: chip };
+  cmdRowsWord = null;
+  cmdActive = 0;
+  void renderCmdPick("");
+}
+
+/* ---------- `[[` wikilink autocomplete — Obsidian's link suggester ----
+ * Typing `[[` inside note text opens the shared popover with vault
+ * stems; `[[#` lists the open note's headings, `[[stem#` lists that
+ * note's. Enter accepts → a real `.wikilink` span (serializes back to
+ * `[[note]]`), Esc dismisses. */
+
+let wikiPick: { node: Text; start: number; embed: boolean } | null = null;
+let wikiRows: { note: string; label: string; sub?: string; kind?: string }[] = [];
+let wikiActive = 0;
+/** `attachments/…` paths — fetched once, the `![[` suggester's image pool */
+let assetFiles: string[] | null = null;
+function ensureAssetList() {
+  if (assetFiles !== null) return;
+  assetFiles = [];
+  void invoke<string[]>("asset_list")
+    .then((l) => {
+      assetFiles = l;
+      const ctx = wikiCtx();
+      if (wikiPick && ctx?.embed) renderWikiPick(ctx.q, true);
+    })
+    .catch(() => {});
+}
+
+function closeWikiPick() {
+  wikiPick = null;
+  if (!cmdPick) mentionPop().classList.add("hidden");
+}
+
+/** the `[[…` / `![[…` context at the caret, or null. `embed` is armed only
+ *  when the `![[` opens a bare paragraph — embeds are whole-block grammar. */
+function wikiCtx(): { node: Text; start: number; q: string; embed: boolean } | null {
+  const sel = window.getSelection();
+  if (!sel?.isCollapsed || !sel.rangeCount) return null;
+  const node = sel.anchorNode;
+  if (!(node instanceof Text)) return null;
+  const host = node.parentElement;
+  if (!host?.closest("#note-body") || host.closest(".callout, code, .cmd-chip")) return null;
+  const m = matchWikiCtx(node.data.slice(0, sel.anchorOffset));
+  if (!m) return null;
+  let embed = false;
+  if (m.embed) {
+    const block = host?.closest("p");
+    const tail = node.data.slice(sel.anchorOffset);
+    embed =
+      !!block &&
+      block.childNodes.length === 1 &&
+      block.firstChild === node &&
+      m.start === 0 &&
+      (tail === "" || tail === "]]");
+  }
+  // a `![[` that can't become a block embed falls back to a plain link
+  // pick — `start` must then point at the `[[`, not the `!`
+  return { node, start: m.embed && !embed ? m.start + 1 : m.start, q: m.q, embed };
+}
+
+function renderWikiPick(q: string, embed = false) {
+  const ix = vaultIndex();
+  if (!ix) { closeWikiPick(); return; }
+  const cur = current;
+  wikiRows = [];
+  const headMatch = splitWikiQuery(q);
+  if (embed) {
+    // `![[` embed mode — images from attachments/ + whole/section note
+    // embeds. `![[#h` (current-note heading) isn't in the render grammar.
+    ensureAssetList();
+    if (headMatch) {
+      const target = headMatch.stem.toLowerCase();
+      const hq = headMatch.head;
+      const owner = target
+        ? ix.notes.find((n) => stem(n).toLowerCase() === target)
+        : null;
+      if (owner) {
+        wikiRows = (ix.heads ?? [])
+          .filter(([n]) => n === owner)
+          .map(([, h]) => ({ note: `${stem(owner)}#${h}`, label: h, sub: `${stem(owner)} · embed`, kind: "embed" }))
+          .filter((r) => !hq.trim() || r.label.toLowerCase().includes(hq.trim().toLowerCase()));
+      }
+    } else {
+      const f = q.split("|")[0].trim().toLowerCase();
+      const imgs = (assetFiles ?? [])
+        .filter((p) => !f || p.toLowerCase().includes(f))
+        .map((p) => ({
+          note: p,
+          label: `🖼 ${p.split("/").pop() ?? p}`,
+          sub: "image",
+          kind: "img",
+        }));
+      const notes = ix.notes
+        .filter((n) => n !== cur)
+        .map((n) => ({ note: stem(n), label: stem(n), sub: "note embed", kind: "embed" }))
+        .filter((r) => !f || r.label.toLowerCase().includes(f));
+      wikiRows = [...imgs, ...notes].slice(0, 12);
+    }
+  } else if (headMatch) {
+    // `[[#x` → this note's headings; `[[stem#x` → that note's
+    const target = headMatch.stem.toLowerCase();
+    const hq = headMatch.head;
+    const owner = !target
+      ? cur
+      : ix.notes.find((n) => stem(n).toLowerCase() === target);
+    if (owner) {
+      wikiRows = (ix.heads ?? [])
+        .filter(([n]) => n === owner)
+        .map(([, h]) => ({ note: `${stem(owner)}#${h}`, label: h, sub: stem(owner) }))
+        .filter((r) => !hq.trim() || r.label.toLowerCase().includes(hq.trim().toLowerCase()));
+    }
+  } else {
+    const f = q.split("|")[0].trim().toLowerCase(); // ignore a `|alias` tail
+    wikiRows = ix.notes
+      .filter((n) => n !== cur)
+      .map((n) => ({ note: stem(n), label: stem(n) }))
+      .filter((r) => !f || r.label.toLowerCase().includes(f))
+      .slice(0, 12);
+    // a query that matches nothing offers to create the note
+    if (!wikiRows.length && f.length >= 2)
+      wikiRows = [{ note: f, label: `create “${q.split("|")[0].trim()}”`, sub: "new note" }];
+  }
+  if (!wikiRows.length) { closeWikiPick(); return; }
+  wikiActive = Math.min(wikiActive, wikiRows.length - 1);
+  const pop = mentionPop();
+  pop.innerHTML = `<div class="menu-label">${embed ? "Embed…" : "Link to…"}</div>`;
+  wikiRows.forEach((r, i) => {
+    const b = document.createElement("button");
+    b.className = "skill-item" + (i === wikiActive ? " active" : "");
+    b.innerHTML = `<span class="skill-name"></span>` + (r.sub ? `<span class="skill-desc"></span>` : "");
+    b.querySelector(".skill-name")!.textContent = r.label;
+    if (r.sub) b.querySelector(".skill-desc")!.textContent = r.sub;
+    b.addEventListener("mousedown", (ev) => ev.preventDefault());
+    b.addEventListener("click", () => acceptWikiRow(r));
+    pop.append(b);
+  });
+  pop.classList.remove("hidden");
+  placeAtCaret(pop);
+}
+
+/** replace `[[query` / `![[query` → caret with the real link/embed DOM */
+function acceptWikiRow(r: { note: string; label: string; kind?: string }) {
+  const ctx = wikiCtx();
+  if (!ctx || !wikiPick || ctx.start !== wikiPick.start) { closeWikiPick(); return; }
+  const { node, start } = ctx;
+  // embed acceptance replaces the whole `![[query` paragraph with the
+  // embed block (img or note-embed) — the grammar is block-level
+  if (wikiPick.embed) {
+    const block = node.parentElement?.closest("p");
+    if (!block) { closeWikiPick(); return; }
+    let el: HTMLElement;
+    if (r.kind === "img") {
+      const img = document.createElement("img");
+      img.className = "note-img";
+      img.dataset.asset = r.note;
+      img.dataset.wiki = "1";
+      const dims = ctx.q.split("|")[1]?.trim().match(/^(\d+)(?:x(\d+))?$/);
+      if (dims) {
+        img.setAttribute("width", dims[1]);
+        if (dims[2]) img.setAttribute("height", dims[2]);
+      }
+      el = img;
+      block.replaceWith(el);
+      hydrateAssets(body());
+    } else {
+      const [src, head] = r.note.split("#");
+      const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+      const div = document.createElement("div");
+      div.className = "callout note-embed";
+      div.dataset.kind = "embed";
+      div.dataset.src = src;
+      if (head) div.dataset.head = head;
+      div.dataset.md = `![[${src}${head ? `#${head}` : ""}]]`;
+      div.innerHTML =
+        `<div class="callout-head"><span class="callout-title">📄 ${esc(src)}` +
+        (head ? ` <span class="ne-sec">#${esc(head)}</span>` : "") +
+        `</span><button class="ne-open" title="open note" contenteditable="false">↗</button></div>` +
+        `<div class="ne-body" contenteditable="false"><span class="ne-load">…</span></div>`;
+      el = div;
+      block.replaceWith(el);
+      void hydrateEmbeds(body());
+    }
+    const blank = document.createElement("p");
+    blank.textContent = "​";
+    el.after(blank);
+    const cr = document.createRange();
+    cr.setStart(blank, 0);
+    cr.collapse(true);
+    const sel2 = window.getSelection();
+    sel2?.removeAllRanges();
+    sel2?.addRange(cr);
+    closeWikiPick();
+    markEdited();
+    return;
+  }
+  // absorb a just-typed `]]` so we never leave `[[x]]]]` behind
+  let end = window.getSelection()?.anchorOffset ?? start;
+  if (node.data.slice(end, end + 2) === "]]") end += 2;
+  const range = document.createRange();
+  range.setStart(node, start);
+  range.setEnd(node, end);
+  range.deleteContents();
+  const a = document.createElement("a");
+  a.className = "wikilink";
+  a.dataset.note = r.note;
+  a.textContent = r.note.includes("#") ? r.note.split("#")[1] : r.note;
+  const spacer = document.createTextNode(" ");
+  range.insertNode(spacer);
+  range.insertNode(a);
+  const sel = window.getSelection();
+  const cr = document.createRange();
+  cr.setStart(spacer, 1);
+  cr.collapse(true);
+  sel?.removeAllRanges();
+  sel?.addRange(cr);
+  closeWikiPick();
+  markEdited();
+}
+
+function wikiPickKey(e: KeyboardEvent): boolean {
+  if (!wikiPick) return false;
+  if (e.key === "ArrowDown" || (e.key === "Tab" && !e.shiftKey)) {
+    e.preventDefault();
+    wikiActive = (wikiActive + 1) % wikiRows.length;
+  } else if (e.key === "ArrowUp" || (e.key === "Tab" && e.shiftKey)) {
+    e.preventDefault();
+    wikiActive = (wikiActive - 1 + wikiRows.length) % wikiRows.length;
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    const r = wikiRows[wikiActive];
+    if (r) acceptWikiRow(r);
+    return true;
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    closeWikiPick();
+    return true;
+  } else {
+    return false;
+  }
+  mentionPop().querySelectorAll(".skill-item").forEach((b, i) =>
+    b.classList.toggle("active", i === wikiActive));
+  return true;
+}
+
+/** called on each note-body input — arms/refreshes/closes the `[[` pick */
+function refreshWikiPick(typed: boolean) {
+  const ctx = wikiCtx();
+  if (!ctx) {
+    if (wikiPick) closeWikiPick();
+    return;
+  }
+  // `]]` ahead of the caret means the link is complete already
+  const trig = ctx.embed ? "![[" : "[[";
+  if (ctx.node.data.slice(ctx.start, ctx.start + trig.length) === trig) {
+    const closed = ctx.node.data.slice(ctx.start + trig.length).startsWith("]]") &&
+      ctx.q.length === 0;
+    if (closed) { closeWikiPick(); return; }
+  }
+  if (!wikiPick || wikiPick.node !== ctx.node || wikiPick.start !== ctx.start) {
+    if (!typed) return; // only manual typing arms it
+    wikiPick = { node: ctx.node, start: ctx.start, embed: ctx.embed };
+    wikiActive = 0;
+  }
+  renderWikiPick(ctx.q, wikiPick.embed);
+}
+
+/** spawn the AI terminal widget — a draggable, resizable card whose session
+ *  lives in the note like written text. Command-spawned chats number 1, 2, 3…;
+ *  a delegated child numbers under its parent (1.1, 1.2…). Returns the card. */
+let termSeq = 0;
+
+/** the next child id of a chat — "1" yields 1.1, 1.2…; "1.1" yields 1.1.1 */
+function nextChatId(parent: string): string {
+  const re = new RegExp(`^${parent.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.(\\d+)$`);
+  let max = 0;
+  document.querySelectorAll<HTMLElement>(".term-card").forEach((c) => {
+    const m = (c.dataset.chatId ?? "").match(re);
+    if (m) max = Math.max(max, Number(m[1]));
+  });
+  return `${parent}.${max + 1}`;
+}
+
+export function spawnTerminalCard(
+  kind: string,
+  seed?: string,
+  block?: HTMLElement,
+  parentChatId?: string,
+  persona?: string,
+): HTMLElement {
+  const card = document.createElement("div");
+  card.className = "callout term-card";
+  card.dataset.kind = "terminal";
+  card.dataset.topic = kind === "chat" ? "chat" : "terminal";
+  if (persona) card.dataset.persona = persona;
+  const chatId = parentChatId ? nextChatId(parentChatId) : String(++termSeq);
+  card.dataset.chatId = chatId;
+  card.innerHTML =
+    `<div class="callout-head"><span class="callout-title">${card.dataset.topic} ${chatId}${persona ? ` · ${persona}` : ""}</span></div>` +
+    `<div class="term-log"></div>` +
+    `<div class="term-input-row"><span class="term-prompt">›</span><input class="term-input" placeholder="ask anything — or ! command" spellcheck="false" autocomplete="off"/><button class="term-mic" title="Voice — click to record, click again to stop and transcribe">🎙</button></div>`;
+  enhanceCard(card);
+  const log = card.querySelector<HTMLElement>(".term-log");
+  if (log) log.contentEditable = "false";
+  wireTerminal(card);
+  // the command line was only the trigger — strip it once the widget exists
+  if (block) {
+    const left = stripCommandText(block).replace(/[\u200b\ufeff]/g, "").trim();
+    if (!left) block.remove();
+  }
+  const root = body();
+  root.append(card);
+  // a fresh widget lands centered in the user's current view, floating
+  const vw = root.clientWidth;
+  const vh = root.clientHeight;
+  const cw = card.offsetWidth;
+  const ch = card.offsetHeight;
+  const x = Math.round(
+    Math.max(root.scrollLeft + 8, Math.min(root.scrollLeft + (vw - cw) / 2, root.scrollLeft + vw - cw - 8)),
+  );
+  const y = Math.round(
+    Math.max(root.scrollTop + 8, Math.min(root.scrollTop + (vh - ch) / 2, root.scrollTop + vh - ch - 8)),
+  );
+  card.classList.add("floating", "sized");
+  card.style.margin = "0";
+  card.style.left = `${x}px`;
+  card.style.top = `${y}px`;
+  card.style.zIndex = String(++genZ);
+  writeState(card, { x, y, pinned: 0, z: genZ });
+  avoidOverlap(card);
+  scheduleFlow();
+  requestAnimationFrame(drawCardLinks);
+  dirty = true;
+  setState(t("ed.saving"));
+  void save();
+  const input = card.querySelector<HTMLInputElement>(".term-input");
+  if (seed && input) {
+    input.value = seed;
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  } else {
+    input?.focus();
+  }
+  return card;
+}
+
+/** spawn a sheet widget — a spreadsheet card living on the note. `rows`/`cols`
+ *  come from the size picker (or the typed `RxC`); the title is the line's
+ *  remaining text. Floating placement mirrors the chat widget. */
+export function spawnSheetCard(
+  title: string,
+  rows: number,
+  cols: number,
+  block?: HTMLElement,
+): HTMLElement {
+  const card = buildSheetCard(title);
+  // wire at the picked size BEFORE enhanceCard — its sheet branch calls
+  // wireSheet too, and wiring is a one-time guard
+  wireSheet(card, { rows, cols });
+  enhanceCard(card);
+  if (block) {
+    const left = stripCommandText(block).replace(/[\u200b\ufeff]/g, "").trim();
+    if (!left) block.remove();
+  }
+  const root = body();
+  root.append(card);
+  const vw = root.clientWidth;
+  const vh = root.clientHeight;
+  const cw = card.offsetWidth;
+  const ch = card.offsetHeight;
+  const x = Math.round(
+    Math.max(root.scrollLeft + 8, Math.min(root.scrollLeft + (vw - cw) / 2, root.scrollLeft + vw - cw - 8)),
+  );
+  const y = Math.round(
+    Math.max(root.scrollTop + 8, Math.min(root.scrollTop + (vh - ch) / 2, root.scrollTop + vh - ch - 8)),
+  );
+  card.classList.add("floating", "sized");
+  card.style.margin = "0";
+  card.style.left = `${x}px`;
+  card.style.top = `${y}px`;
+  card.style.zIndex = String(++genZ);
+  writeState(card, { x, y, pinned: 0, z: genZ });
+  avoidOverlap(card);
+  scheduleFlow();
+  requestAnimationFrame(drawCardLinks);
+  dirty = true;
+  setState(t("ed.saving"));
+  void save();
+  card.querySelector<HTMLElement>("td[data-raw]")?.focus();
+  return card;
+}
+
+/** spawn a deck card — title slide first; `slides pitch deck` names it */
+export function spawnDeckCard(title: string, block?: HTMLElement): HTMLElement {
+  const card = buildDeckCard(title);
+  wireDeck(card);
+  enhanceCard(card);
+  if (block) {
+    const left = stripCommandText(block).replace(/[​﻿]/g, "").trim();
+    if (!left) block.remove();
+  }
+  const root = body();
+  root.append(card);
+  const vw = root.clientWidth;
+  const vh = root.clientHeight;
+  const cw = card.offsetWidth;
+  const ch = card.offsetHeight;
+  const x = Math.round(
+    Math.max(root.scrollLeft + 8, Math.min(root.scrollLeft + (vw - cw) / 2, root.scrollLeft + vw - cw - 8)),
+  );
+  const y = Math.round(
+    Math.max(root.scrollTop + 8, Math.min(root.scrollTop + (vh - ch) / 2, root.scrollTop + vh - ch - 8)),
+  );
+  card.classList.add("floating", "sized");
+  card.style.margin = "0";
+  card.style.left = `${x}px`;
+  card.style.top = `${y}px`;
+  card.style.zIndex = String(++genZ);
+  writeState(card, { x, y, pinned: 0, z: genZ });
+  avoidOverlap(card);
+  scheduleFlow();
+  requestAnimationFrame(drawCardLinks);
+  dirty = true;
+  setState(t("ed.saving"));
+  void save();
+  card.querySelector<HTMLElement>(".d-title")?.focus();
+  return card;
+}
+
+/** duplicate a deck: every slide copies across; wireDeck re-wires the clone */
+function duplicateDeckCard(card: HTMLElement) {
+  const clone = card.cloneNode(true) as HTMLElement;
+  delete clone.dataset.cid;
+  delete clone.dataset.wired;
+  delete clone.dataset.enhanced;
+  delete clone.dataset.deckWired;
+  clone.classList.remove("pinned", "viewport-pin", "floating", "sized");
+  clone
+    .querySelectorAll(
+      ".card-del, .card-pin, .card-tts, .card-stick, .card-dup, .card-floatpin, .deck-bar",
+    )
+    .forEach((b) => b.remove());
+  clone.querySelectorAll<HTMLElement>("[data-wired]").forEach((el) => delete el.dataset.wired);
+  enhanceCard(clone);
+  const root = body();
+  root.append(clone);
+  const vw = root.clientWidth;
+  const vh = root.clientHeight;
+  clone.classList.add("floating", "sized");
+  clone.style.margin = "0";
+  clone.style.left = `${Math.min(card.offsetLeft + 24, Math.max(8, vw - clone.offsetWidth - 8))}px`;
+  clone.style.top = `${Math.min(card.offsetTop + 24, Math.max(8, vh - clone.offsetHeight - 8))}px`;
+  clone.style.zIndex = String(++genZ);
+  writeState(clone, { x: clone.offsetLeft, y: clone.offsetTop, pinned: 0, z: genZ });
+  scheduleFlow();
+  requestAnimationFrame(drawCardLinks);
+  dirty = true;
+  void save();
+  addActivity(`⧉ duplicated deck: ${card.dataset.topic ?? "deck"}`);
+}
+
+/** spawn a todo card — `todo` on a blank line; the rest is the list's name */
+export function spawnTodoCard(title: string, block?: HTMLElement): HTMLElement {
+  const card = buildTodoCard(title);
+  wireTodo(card);
+  enhanceCard(card);
+  if (block) {
+    const left = stripCommandText(block).replace(/[​﻿]/g, "").trim();
+    if (!left) block.remove();
+  }
+  const root = body();
+  root.append(card);
+  const vw = root.clientWidth;
+  const vh = root.clientHeight;
+  const cw = card.offsetWidth;
+  const ch = card.offsetHeight;
+  const x = Math.round(
+    Math.max(root.scrollLeft + 8, Math.min(root.scrollLeft + (vw - cw) / 2, root.scrollLeft + vw - cw - 8)),
+  );
+  const y = Math.round(
+    Math.max(root.scrollTop + 8, Math.min(root.scrollTop + (vh - ch) / 2, root.scrollTop + vh - ch - 8)),
+  );
+  card.classList.add("floating", "sized");
+  card.style.margin = "0";
+  card.style.left = `${x}px`;
+  card.style.top = `${y}px`;
+  card.style.zIndex = String(++genZ);
+  writeState(card, { x, y, pinned: 0, z: genZ });
+  avoidOverlap(card);
+  scheduleFlow();
+  requestAnimationFrame(drawCardLinks);
+  dirty = true;
+  setState(t("ed.saving"));
+  void save();
+  card.querySelector<HTMLElement>(".todo-in")?.focus();
+  return card;
+}
+
+/** spawn a chart card — `@chart <title>`; "type" word in title selects viz */
+export function spawnChartCard(title: string, block?: HTMLElement): HTMLElement {
+  const m = title.match(/^(.*?)\s*(bar|barh|line|area|pie|doughnut|scatter|stacked)$/i);
+  const t = m ? m[1].trim() : title;
+  const card = buildChartCard(t || "chart");
+  if (m) card.dataset.ctype = m[2].toLowerCase();
+  wireChart(card);
+  enhanceCard(card);
+  if (block) {
+    const left = stripCommandText(block).replace(/[​﻿]/g, "").trim();
+    if (!left) block.remove();
+  }
+  const root = body();
+  root.append(card);
+  const vw = root.clientWidth;
+  const vh = root.clientHeight;
+  card.style.left = Math.max(8, Math.round(vw * 0.32)) + "px";
+  card.style.top = Math.max(8, Math.round(vh * 0.12)) + "px";
+  card.style.width = "560px";
+  dirty = true;
+  void save();
+  return card;
+}
+
+/** spawn a browser card — `browser <url>` navigates on spawn */
+export function spawnCardsCard(title: string, block?: HTMLElement, cards?: { front: string; back: string }[]): HTMLElement {
+  const card = buildCardsCard(title, cards ?? []);
+  enhanceCard(card);
+  if (block) {
+    const left = stripCommandText(block).replace(/[​﻿]/g, "").trim();
+    if (!left) block.remove();
+  }
+  const root = body();
+  root.append(card);
+  const vw = root.clientWidth;
+  const vh = root.clientHeight;
+  const cw = card.offsetWidth;
+  const ch = card.offsetHeight;
+  const x = Math.round(
+    Math.max(root.scrollLeft + 8, Math.min(root.scrollLeft + (vw - cw) / 2, root.scrollLeft + vw - cw - 8)),
+  );
+  const y = Math.round(
+    Math.max(root.scrollTop + 8, Math.min(root.scrollTop + (vh - ch) / 2, root.scrollTop + vh - ch - 8)),
+  );
+  card.classList.add("floating");
+  card.style.left = `${x}px`;
+  card.style.top = `${y}px`;
+  card.style.margin = "0";
+  writeState(card, { x, y, pinned: 0, z: genZ });
+  avoidOverlap(card);
+  scheduleFlow();
+  requestAnimationFrame(drawCardLinks);
+  dirty = true;
+  void save();
+  return card;
+}
+
+const PROJECT_TREE = [
+  { text: "project", kids: [
+    { text: "goals", kids: [{ text: "outcome", kids: [] }] },
+    { text: "plan", kids: [{ text: "phase 1", kids: [] }, { text: "phase 2", kids: [] }] },
+    { text: "risks", kids: [] },
+  ] },
+];
+export function spawnMapCard(title: string, block?: HTMLElement, seed?: typeof PROJECT_TREE): HTMLElement {
+  const card = buildMapCard(title);
+  if (seed) wireMap(card, seed); // pre-wire with the starter tree; enhanceCard's wireMap then no-ops
+  enhanceCard(card);
+  if (block) {
+    const left = stripCommandText(block).replace(/[​﻿]/g, "").trim();
+    if (!left) block.remove();
+  }
+  const root = body();
+  root.append(card);
+  const vw = root.clientWidth;
+  const vh = root.clientHeight;
+  const cw = card.offsetWidth;
+  const ch = card.offsetHeight;
+  const x = Math.round(
+    Math.max(root.scrollLeft + 8, Math.min(root.scrollLeft + (vw - cw) / 2, root.scrollLeft + vw - cw - 8)),
+  );
+  const y = Math.round(
+    Math.max(root.scrollTop + 8, Math.min(root.scrollTop + (vh - ch) / 2, root.scrollTop + vh - ch - 8)),
+  );
+  card.classList.add("floating");
+  card.style.left = `${x}px`;
+  card.style.top = `${y}px`;
+  card.style.margin = "0";
+  writeState(card, { x, y, pinned: 0, z: genZ });
+  avoidOverlap(card);
+  scheduleFlow();
+  requestAnimationFrame(drawCardLinks);
+  dirty = true;
+  void save();
+  return card;
+}
+
+export function spawnAgendaCard(title: string, block?: HTMLElement): HTMLElement {
+  const card = buildAgendaCard(title);
+  enhanceCard(card);
+  if (block) {
+    const left = stripCommandText(block).replace(/[​﻿]/g, "").trim();
+    if (!left) block.remove();
+  }
+  const root = body();
+  root.append(card);
+  const vw = root.clientWidth;
+  const vh = root.clientHeight;
+  const cw = card.offsetWidth;
+  const ch = card.offsetHeight;
+  const x = Math.round(
+    Math.max(root.scrollLeft + 8, Math.min(root.scrollLeft + (vw - cw) / 2, root.scrollLeft + vw - cw - 8)),
+  );
+  const y = Math.round(
+    Math.max(root.scrollTop + 8, Math.min(root.scrollTop + (vh - ch) / 2, root.scrollTop + vh - ch - 8)),
+  );
+  card.classList.add("floating");
+  card.style.left = `${x}px`;
+  card.style.top = `${y}px`;
+  card.style.margin = "0";
+  writeState(card, { x, y, pinned: 0, z: genZ });
+  avoidOverlap(card);
+  scheduleFlow();
+  requestAnimationFrame(drawCardLinks);
+  dirty = true;
+  void save();
+  return card;
+}
+
+export function spawnGraphCard(title: string, block?: HTMLElement): HTMLElement {
+  const card = buildGraphCard(title);
+  wireGraph(card);
+  enhanceCard(card);
+  if (block) {
+    const left = stripCommandText(block).replace(/[​﻿]/g, "").trim();
+    if (!left) block.remove();
+  }
+  const root = body();
+  root.append(card);
+  const vw = root.clientWidth;
+  const vh = root.clientHeight;
+  const cw = card.offsetWidth;
+  const ch = card.offsetHeight;
+  const x = Math.round(
+    Math.max(root.scrollLeft + 8, Math.min(root.scrollLeft + (vw - cw) / 2, root.scrollLeft + vw - cw - 8)),
+  );
+  const y = Math.round(
+    Math.max(root.scrollTop + 8, Math.min(root.scrollTop + (vh - ch) / 2, root.scrollTop + vh - ch - 8)),
+  );
+  card.classList.add("floating");
+  card.style.left = `${x}px`;
+  card.style.top = `${y}px`;
+  card.style.margin = "0";
+  writeState(card, { x, y, pinned: 0, z: genZ });
+  avoidOverlap(card);
+  scheduleFlow();
+  requestAnimationFrame(drawCardLinks);
+  dirty = true;
+  void save();
+  return card;
+}
+
+export function spawnCanvasCard(title: string, block?: HTMLElement): HTMLElement {
+  const card = buildCanvasCard(title);
+  wireCanvas(card);
+  enhanceCard(card);
+  if (block) {
+    const left = stripCommandText(block).replace(/[​﻿]/g, "").trim();
+    if (!left) block.remove();
+  }
+  const root = body();
+  root.append(card);
+  const vw = root.clientWidth;
+  const vh = root.clientHeight;
+  const cw = card.offsetWidth;
+  const ch = card.offsetHeight;
+  const x = Math.round(
+    Math.max(root.scrollLeft + 8, Math.min(root.scrollLeft + (vw - cw) / 2, root.scrollLeft + vw - cw - 8)),
+  );
+  const y = Math.round(
+    Math.max(root.scrollTop + 8, Math.min(root.scrollTop + (vh - ch) / 2, root.scrollTop + vh - ch - 8)),
+  );
+  card.classList.add("floating");
+  card.style.left = `${x}px`;
+  card.style.top = `${y}px`;
+  card.style.margin = "0";
+  writeState(card, { x, y, pinned: 0, z: genZ });
+  avoidOverlap(card);
+  scheduleFlow();
+  requestAnimationFrame(drawCardLinks);
+  dirty = true;
+  void save();
+  return card;
+}
+
+export function spawnBaseCard(title: string, block?: HTMLElement, q = ""): HTMLElement {
+  const card = buildBaseCard(title);
+  card.dataset.q = q;
+  wireBase(card);
+  enhanceCard(card);
+  if (block) {
+    const left = stripCommandText(block).replace(/[​﻿]/g, "").trim();
+    if (!left) block.remove();
+  }
+  const root = body();
+  root.append(card);
+  const vw = root.clientWidth;
+  const vh = root.clientHeight;
+  const cw = card.offsetWidth;
+  const ch = card.offsetHeight;
+  const x = Math.round(
+    Math.max(root.scrollLeft + 8, Math.min(root.scrollLeft + (vw - cw) / 2, root.scrollLeft + vw - cw - 8)),
+  );
+  const y = Math.round(
+    Math.max(root.scrollTop + 8, Math.min(root.scrollTop + (vh - ch) / 2, root.scrollTop + vh - ch - 8)),
+  );
+  card.classList.add("floating");
+  card.style.left = `${x}px`;
+  card.style.top = `${y}px`;
+  card.style.margin = "0";
+  writeState(card, { x, y, pinned: 0, z: genZ });
+  avoidOverlap(card);
+  scheduleFlow();
+  requestAnimationFrame(drawCardLinks);
+  dirty = true;
+  void save();
+  return card;
+}
+
+/** `> properties` — prepend an empty frontmatter panel (serializes back
+ *  to a `---`/`---` block once rows exist) */
+function insertPropsPanel() {
+  const b = body();
+  if (b.querySelector(".fm-props")) return;
+  const div = document.createElement("div");
+  div.className = "fm-props";
+  div.contentEditable = "false";
+  div.innerHTML =
+    `<div class="fm-title">properties</div>` +
+    `<div class="fm-row"><input class="fm-k" spellcheck="false" placeholder="key"/>` +
+    `<input class="fm-v" spellcheck="false" placeholder="value"/>` +
+    `<button class="fm-x" title="remove property" tabindex="-1">✕</button></div>` +
+    `<button class="fm-add" title="add property">＋ property</button>`;
+  b.prepend(div);
+  markEdited();
+  div.querySelector<HTMLInputElement>(".fm-k")?.focus();
+}
+
+export function spawnBrowserCard(title: string, url: string, block?: HTMLElement): HTMLElement {
+  const card = buildBrowserCard(title, url);
+  wireBrowser(card);
+  enhanceCard(card);
+  if (block) {
+    const left = stripCommandText(block).replace(/[​﻿]/g, "").trim();
+    if (!left) block.remove();
+  }
+  const root = body();
+  root.append(card);
+  const vw = root.clientWidth;
+  const vh = root.clientHeight;
+  const cw = card.offsetWidth;
+  const ch = card.offsetHeight;
+  const x = Math.round(
+    Math.max(root.scrollLeft + 8, Math.min(root.scrollLeft + (vw - cw) / 2, root.scrollLeft + vw - cw - 8)),
+  );
+  const y = Math.round(
+    Math.max(root.scrollTop + 8, Math.min(root.scrollTop + (vh - ch) / 2, root.scrollTop + vh - ch - 8)),
+  );
+  card.classList.add("floating", "sized");
+  card.style.margin = "0";
+  card.style.left = `${x}px`;
+  card.style.top = `${y}px`;
+  card.style.zIndex = String(++genZ);
+  writeState(card, { x, y, pinned: 0, z: genZ });
+  avoidOverlap(card);
+  scheduleFlow();
+  requestAnimationFrame(drawCardLinks);
+  dirty = true;
+  setState(t("ed.saving"));
+  void save();
+  card.querySelector<HTMLElement>(".bb-url")?.focus();
+  return card;
+}
+
+/** duplicate a todo card: every task copies across; wireTodo re-wires */
+function duplicateTodoCard(card: HTMLElement) {
+  const clone = card.cloneNode(true) as HTMLElement;
+  delete clone.dataset.cid;
+  delete clone.dataset.wired;
+  delete clone.dataset.enhanced;
+  delete clone.dataset.todoWired;
+  clone.classList.remove("pinned", "viewport-pin", "floating", "sized");
+  clone
+    .querySelectorAll(
+      ".card-del, .card-pin, .card-tts, .card-stick, .card-dup, .card-floatpin",
+    )
+    .forEach((b) => b.remove());
+  clone.querySelectorAll<HTMLElement>("[data-wired]").forEach((el) => delete el.dataset.wired);
+  enhanceCard(clone);
+  const root = body();
+  root.append(clone);
+  const vw = root.clientWidth;
+  const vh = root.clientHeight;
+  clone.classList.add("floating", "sized");
+  clone.style.margin = "0";
+  clone.style.left = `${Math.min(card.offsetLeft + 24, Math.max(8, vw - clone.offsetWidth - 8))}px`;
+  clone.style.top = `${Math.min(card.offsetTop + 24, Math.max(8, vh - clone.offsetHeight - 8))}px`;
+  clone.style.zIndex = String(++genZ);
+  writeState(clone, { x: clone.offsetLeft, y: clone.offsetTop, pinned: 0, z: genZ });
+  scheduleFlow();
+  requestAnimationFrame(drawCardLinks);
+  dirty = true;
+  void save();
+  addActivity(`⧉ duplicated todo: ${card.dataset.topic ?? "todo"}`);
+}
+
+/** duplicate a sheet: every cell (formulas included) copies across — the
+ *  clone's static tds get re-upgraded by wireSheet */
+function duplicateSheetCard(card: HTMLElement) {
+  const clone = card.cloneNode(true) as HTMLElement;
+  delete clone.dataset.cid;
+  delete clone.dataset.wired;
+  delete clone.dataset.enhanced;
+  delete clone.dataset.sheetWired;
+  clone.classList.remove("pinned", "viewport-pin", "floating", "sized");
+  clone
+    .querySelectorAll(
+      ".card-del, .card-pin, .card-tts, .card-stick, .card-dup, .card-floatpin, .sheet-addcol, .sheet-addrow",
+    )
+    .forEach((b) => b.remove());
+  enhanceCard(clone);
+  const root = body();
+  root.append(clone);
+  const x = (parseFloat(card.style.left) || 0) + 28;
+  const y = (parseFloat(card.style.top) || 0) + 28;
+  clone.classList.add("floating", "sized");
+  clone.style.margin = "0";
+  clone.style.left = `${x}px`;
+  clone.style.top = `${y}px`;
+  clone.style.zIndex = String(++genZ);
+  writeState(clone, { x, y, pinned: 0, z: genZ });
+  avoidOverlap(clone);
+  scheduleFlow();
+  requestAnimationFrame(drawCardLinks);
+  markEdited();
+}
+
+/** the chat widget's floating pin: viewport-fixed while pinned — the user
+ *  can scroll anywhere on the sheet and the chat stays right where they put
+ *  it on screen; unpinning returns it to the sheet at the same spot */
+function toggleFloatPin(card: HTMLElement) {
+  const root = body();
+  const r = card.getBoundingClientRect();
+  if (card.classList.contains("viewport-pin")) {
+    // back to the sheet — screen coords → paper coords (zoom-aware)
+    const rr = root.getBoundingClientRect();
+    const z = Z();
+    const x = Math.round((r.left - rr.left) / z + root.scrollLeft);
+    const y = Math.round((r.top - rr.top) / z + root.scrollTop);
+    card.classList.remove("viewport-pin");
+    card.classList.add("floating", "sized");
+    card.style.left = `${x}px`;
+    card.style.top = `${y}px`;
+    writeState(card, { x, y, pinned: 0, fixed: 0 });
+    addActivity("📌 floating pin off — the chat is back on the sheet");
+  } else {
+    card.classList.add("viewport-pin");
+    card.classList.remove("pinned");
+    card.style.margin = "0";
+    // CSS zoom scales fixed descendants' coordinates — divide the screen
+    // position by the paper zoom so the card stays exactly where it was
+    const z = Z();
+    card.style.left = `${Math.round(r.left / z)}px`;
+    card.style.top = `${Math.round(r.top / z)}px`;
+    writeState(card, { fixed: 1, x: Math.round(r.left / z), y: Math.round(r.top / z), pinned: 0 });
+    addActivity("📌 floating pin on — the chat stays on screen while you scroll");
+  }
+  markEdited();
+}
+
+/** duplicate a terminal widget: a brand-new EMPTY chat — every widget is its
+ *  own separate conversation; the AI can still see the other chats' threads
+ *  in its context when they matter */
+function duplicateTerminalCard(card: HTMLElement) {
+  const clone = card.cloneNode(true) as HTMLElement;
+  delete clone.dataset.cid;
+  delete clone.dataset.wired;
+  delete clone.dataset.enhanced;
+  clone.classList.remove("pinned");
+  // a fresh conversation: no copied log, no stale UI, no dead buttons
+  clone.querySelectorAll(".term-line").forEach((l) => l.remove());
+  clone
+    .querySelectorAll(".card-del, .card-pin, .card-tts, .card-stick, .card-dup, .card-floatpin")
+    .forEach((b) => b.remove());
+  // numbered like the family tree: chat 1 duplicates to 1.1, 1.2…; a new
+  // chat from the command is 2, and its first duplicate is 2.1
+  const parentId = card.dataset.chatId ?? "1";
+  const childId = nextChatId(parentId);
+  clone.dataset.chatId = childId;
+  const title = clone.querySelector(".callout-title");
+  if (title) title.textContent = `${clone.dataset.topic ?? "chat"} ${childId}`;
+  const input = clone.querySelector<HTMLInputElement>(".term-input");
+  if (input) input.value = "";
+  enhanceCard(clone);
+  const lg = clone.querySelector<HTMLElement>(".term-log");
+  if (lg) lg.contentEditable = "false";
+  const root = body();
+  root.append(clone);
+  const x = (parseFloat(card.style.left) || 0) + 28;
+  const y = (parseFloat(card.style.top) || 0) + 28;
+  clone.classList.add("floating", "sized");
+  clone.style.margin = "0";
+  clone.style.left = `${x}px`;
+  clone.style.top = `${y}px`;
+  clone.style.zIndex = String(++genZ);
+  writeState(clone, { x, y, pinned: 0, z: genZ });
+  avoidOverlap(clone);
+  scheduleFlow();
+  requestAnimationFrame(drawCardLinks);
+  dirty = true;
+  setState(t("ed.saving"));
+  void save();
+  clone.querySelector<HTMLInputElement>(".term-input")?.focus();
 }
 
 /** resolve "@document/@ask <file?> <question>" — the file token is optional;
@@ -1761,33 +3980,6 @@ async function resolveAskTarget(
     return { target: m[1], query: m[2] };
   }
   return { target: hybrid ? "everything" : "all-files", query: rest };
-}
-
-function insertCmdName(cmd: "skill" | "document", name: string) {
-  const sel = window.getSelection();
-  if (sel && sel.rangeCount > 0) {
-    const node = sel.anchorNode;
-    const off = sel.anchorOffset;
-    if (node && node.nodeType === Node.TEXT_NODE) {
-      const text = node.textContent ?? "";
-      const m = text.slice(0, off).match(/@(skill|document)\s*$/);
-      if (m) {
-        const range = document.createRange();
-        range.setStart(node, off - m[0].length);
-        range.setEnd(node, off);
-        range.deleteContents();
-        const t = document.createTextNode(`@${cmd} ${name}`);
-        range.insertNode(t);
-        const after = document.createRange();
-        after.setStartAfter(t);
-        after.collapse(true);
-        sel.removeAllRanges();
-        sel.addRange(after);
-      }
-    }
-  }
-  $("#skill-pop").classList.add("hidden");
-  markEdited();
 }
 
 export function appendToNote(node: HTMLElement) {
@@ -2063,6 +4255,93 @@ export function initEditor() {
   const el = body();
   document.execCommand("defaultParagraphSeparator", false, "p");
 
+  // Ctrl+K/Ctrl+O palette + vault link index + the links strip
+  initPalette();
+  initOutline();
+  initFind(); // Ctrl+F find-in-note — mark-spans, never unrenders widgets
+  void refreshIndex(true);
+  // palette `>` commands spawn widgets on the current note
+  document.addEventListener("palette:cmd", (e) => {
+    const kind = (e as CustomEvent<string>).detail;
+    if (kind === "sheet") spawnSheetCard("sheet", 6, 4);
+    else if (kind === "slides" || kind === "deck") spawnDeckCard("deck");
+    else if (kind === "chart") spawnChartCard("chart");
+    else if (kind === "todo") spawnTodoCard("tasks");
+    else if (kind === "browser") spawnBrowserCard("browser", "");
+    else if (kind === "cards" || kind === "review") spawnCardsCard("cards");
+    else if (kind === "map" || kind === "mindmap") spawnMapCard("map");
+    else if (kind === "agenda" || kind === "due") spawnAgendaCard("agenda");
+    else if (kind === "graph") spawnGraphCard("vault map");
+    else if (kind === "canvas" || kind === "draw") spawnCanvasCard("canvas");
+    else if (kind === "base" || kind === "view" || kind === "db") spawnBaseCard("base");
+    else if (kind === "props") insertPropsPanel();
+    else if (kind === "digest") void speakDigest();
+    else if (kind === "speak") {
+      // read the live selection aloud; nothing selected → the note title +
+      // body. Esc or any further speak toggles cancels via speechSynthesis.
+      const sel = window.getSelection();
+      const selText = sel && !sel.isCollapsed ? sel.toString().replace(/\s+/g, " ").trim() : "";
+      const b = body();
+      const text =
+        selText ||
+        (current ? [titleName(current), b?.innerText ?? ""].join(". ").replace(/\s+/g, " ").trim() : "");
+      if (text) {
+        window.speechSynthesis.cancel();
+        const u = new SpeechSynthesisUtterance(text.slice(0, 4000));
+        window.speechSynthesis.speak(u);
+        addActivity(selText ? "reading selection aloud" : "reading note aloud");
+      }
+    }
+    else if (kind === "research") {
+      // drop `@research ` on a fresh line so the user types the topic
+      const b = document.createElement("p");
+      b.textContent = "@research ";
+      el.append(b);
+      b.focus();
+    }
+  });
+
+  // a base card's ⤓ — materialize the filtered view as a live [!sheet]
+  // card right after it: the base filters, the sheet computes
+  document.addEventListener("base:export", (e) => {
+    const md = (e as CustomEvent<string>).detail;
+    if (typeof md === "string" && md.includes("[!sheet]")) insertCallout("sheet", md);
+    else if (typeof md === "string" && md.includes("[!chart]")) insertCallout("chart", md);
+    addActivity("base → sheet card materialized");
+  });
+
+  // capture pipe — a browser card's ⇲ lands its quote + source on the note
+  document.addEventListener("browser:clip", (e) => {
+    const d = (e as CustomEvent<{ title: string; url: string; text: string }>).detail;
+    if (d?.text) insertClip(d.title, d.url, d.text);
+  });
+
+  // transient toast — one-liner notifications (history empty, restore done…)
+  document.addEventListener("laido:toast", (e) => {
+    const msg = (e as CustomEvent<string>).detail;
+    if (!msg) return;
+    document.querySelector(".laido-toast")?.remove();
+    const t = document.createElement("div");
+    t.className = "laido-toast";
+    t.textContent = msg;
+    document.body.append(t);
+    setTimeout(() => t.classList.add("out"), 2400);
+    setTimeout(() => t.remove(), 2800);
+  });
+
+  // reload the open note (history restore path)
+  document.addEventListener("laido:reload", () => {
+    if (current) void loadNote(current);
+  });
+
+  // audio digest — the transcript lands as a callout (visible trace)
+  document.addEventListener("digest:insert", (e) => {
+    const text = (e as CustomEvent<string>).detail;
+    if (!text) return;
+    const lines = text.split(/\n+/).map((l) => `> ${l}`).join("\n");
+    insertCallout("digest", `> [!ai] digest — ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}\n${lines}`);
+  });
+
   const SIZES = [14, 15, 16, 18, 20];
   let sizeIdx = Number(localStorage.getItem("laido.notesize") ?? 2);
   if (!Number.isFinite(sizeIdx) || sizeIdx < 0 || sizeIdx >= SIZES.length) sizeIdx = 2;
@@ -2248,10 +4527,39 @@ export function initEditor() {
     }
   });
 
-  el.addEventListener("input", () => {
+  el.addEventListener("input", (e) => {
     markEdited();
-    void maybeSkillPicker();
-    void updateMentionPop();
+    const ie = e as InputEvent;
+    if (!ie.isComposing) {
+      // typing a command word + space opens the no-@ picker anywhere on the
+      // line; at line start a hand-typed word becomes a chip right away.
+      // pasted or dropped text never chips or pops — only manual typing arms.
+      // insertCompositionText covers IME/autocorrect commits (see Input
+      // Events Level 2), insertReplacementText covers spell-suggest swaps
+      const typed = TYPED_INPUTS.has(ie.inputType);
+      const fresh = currentCmdWord();
+      if (fresh && typed) {
+        const st = wordAtLineStart(fresh) ? chipifyTypedWord(fresh) : null;
+        cmdPick = st ?? fresh;
+        cmdRowsWord = null;
+        cmdActive = 0;
+        void renderCmdPick("");
+        return;
+      }
+      // while the word is still being typed at line start, suggest the
+      // commands and skills it could become — "r" offers research/recall/…
+      const part = typed ? currentCmdPrefix() : null;
+      if (part) {
+        cmdPick = part;
+        cmdActive = 0;
+        void renderCmdPick(part.word);
+        return;
+      }
+      if (cmdPick) refreshCmdPick();
+      // `[[` wikilink suggester — runs alongside the command picker
+      // (a line can't hold both live contexts at once)
+      refreshWikiPick(typed);
+    }
   });
 
   /* ---------- paper ruling: device-snapped lines on a viewport canvas ---------- */
@@ -2428,8 +4736,57 @@ export function initEditor() {
   el.addEventListener("mouseup", clickAndType);
 
   el.addEventListener("keydown", (e) => {
-    // the open @-mention pop owns arrows/enter/tab/escape until it closes
-    if (mentionKey(e)) return;
+    // the open pickers own arrows/tab/enter/escape until they close
+    if (wikiPickKey(e)) return;
+    if (cmdPickKey(e)) return;
+    // Escape cancels a command: with the picker open it just closes the list;
+    // on a chipped row it dissolves every chip back into plain text so the
+    // line is inert — never a command
+    if (e.key === "Escape" && !e.ctrlKey && !e.metaKey) {
+      const sel = window.getSelection();
+      const node = sel?.rangeCount ? sel.getRangeAt(0).startContainer : null;
+      const host = node instanceof HTMLElement ? node : node?.parentElement;
+      const top =
+        host?.closest("#note-body") && !host.closest(".callout")
+          ? node instanceof Text
+            ? lineRow(node)
+            : rowOf(host)
+          : null;
+      if (top && top !== body()) {
+        const chips = top.querySelectorAll(".cmd-chip");
+        if (chips.length > 0) {
+          e.preventDefault();
+          chips.forEach((c) => c.replaceWith(document.createTextNode(c.textContent ?? "")));
+          top.normalize();
+          markEdited();
+          return;
+        }
+      }
+    }
+    // Backspace right after a command chip deletes the whole chip
+    if (e.key === "Backspace" && !e.ctrlKey && !e.metaKey) {
+      const sel = window.getSelection();
+      if (sel?.isCollapsed && sel.rangeCount > 0) {
+        const r = sel.getRangeAt(0);
+        let prev: Node | null = null;
+        if (r.startContainer.nodeType === Node.TEXT_NODE) {
+          const t = r.startContainer as Text;
+          // caret at the start of the text, or right after the single space
+          // that follows a chip — either way the chip is the target
+          if (r.startOffset === 0 || (r.startOffset === 1 && t.length === 1 && !t.data.trim())) {
+            prev = t.previousSibling;
+          }
+        } else if (r.startContainer.nodeType === Node.ELEMENT_NODE) {
+          prev = r.startContainer.childNodes[r.startOffset - 1] ?? null;
+        }
+        if (prev instanceof HTMLElement && prev.classList.contains("cmd-chip")) {
+          e.preventDefault();
+          prev.remove();
+          markEdited();
+          return;
+        }
+      }
+    }
     // Ctrl+A is zone-scoped: inside a widget it selects that widget only;
     // on the paper it selects every text block but never the widgets
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "a") {
@@ -2509,12 +4866,12 @@ export function initEditor() {
       return;
     }
     const raw = clean(block.textContent ?? "");
-    // the @command may sit anywhere on the line — indented, click-padded, or
-    // after other text — so run from the first known command token
-    const tok = raw.match(
-      /(^|\s)@(document|ask|skill|research|schedule|recall|tasks|related|loop|summary)\b/,
-    );
-    const command = tok ? raw.slice(tok.index).trimStart() : raw;
+    // only chips run — a hand-typed word arms a chip, pasted or dropped text
+    // never does; the chip carries the stored "@cmd [arg] rest" form so the
+    // same dispatch branches serve every command
+    const cc = chipCommand(block);
+    if (!cc) return;
+    const command = `@${cc.cmd}${cc.arg ? " " + cc.arg : ""}${cc.rest ? " " + cc.rest : ""}`;
     // "@document <file?> <question>" — scoped to a library file when the
     // first token matches a slug, else all-files. "@ask <question>" is the
     // hybrid: library + your notes + web research, fused into one answer.
@@ -2551,23 +4908,24 @@ export function initEditor() {
     }
     if (/^@(document|ask)\s*$/.test(command)) {
       e.preventDefault();
-      void showCommandPicker("document");
+      openCmdPickFromChip(block, cc.cmd as CmdWord);
       return;
     }
-    const ragMatch = command.match(/^@skill\s+(@?\S+)\s+(.+)$/);
-    if (ragMatch && current) {
+    // "@skill <name> <input>" — run the saved skill on the user's input:
+    // a seeded chat card applies the skill's saved knowledge (skills_digest
+    // rides in term_ai's system prompt) and its widget fences execute live —
+    // concrete-estimate lands as a real formula sheet, not quoted text
+    const skillInput = command.match(/^@skill\s+([\w-]+)\s+(.+)$/);
+    if (skillInput) {
       e.preventDefault();
-      const target = ragMatch[1].replace(/^@/, "");
-      const query = ragMatch[2];
-      showPencil(block);
-      addActivity(`🔎 asking ${target}…`);
-      void invoke("rag_ask", { note: current, target, query, quiet: true, anchor: raw, question: query })
-        .then(() => addActivity(`✓ answered from ${target}`))
-        .catch((err) => {
-          addActivity(`✕ ${String(err)}`);
-          hidePencil();
-          insertCallout(target, `> [!ai] rag failed: ${target}\n> ${String(err)}`, raw);
-        });
+      if (!current) {
+        addActivity("✕ open a note first — skills write their results into the current note");
+        return;
+      }
+      const name = skillInput[1];
+      const input = skillInput[2].trim();
+      addActivity(`⚡ ${name} — applying to "${input.slice(0, 60)}"`);
+      spawnTerminalCard("chat", `using the ${name} skill, ${input}`, block);
       return;
     }
     const skillMatch = command.match(/^@skill\s+([\w-]+)$/);
@@ -2586,7 +4944,7 @@ export function initEditor() {
     }
     if (/^@skill\s*$/.test(command)) {
       e.preventDefault();
-      void showCommandPicker("skill");
+      openCmdPickFromChip(block, "skill");
       return;
     }
     // @summary — summarize the current note (optional extra instruction)
@@ -2735,6 +5093,127 @@ export function initEditor() {
         });
       return;
     }
+    // persona chat — `@persona chef <q>` spawns a chat card whose system
+    // prompt includes the persona-chef note's body
+    const personaMatch = command.match(/^@(persona|as|agent)\s+([\w-]+)\s*(.*)$/);
+    if (personaMatch && current) {
+      e.preventDefault();
+      const persona = personaMatch[2].toLowerCase();
+      const card = spawnTerminalCard("chat", personaMatch[3].trim() || undefined, block, undefined, persona);
+      const input = card.querySelector<HTMLInputElement>(".term-input");
+      if (input) input.placeholder = `as ${persona}…`;
+      return;
+    }
+    // terminal/chat — spawn the AI terminal widget on the sheet; text after
+    // the word seeds the first prompt
+    const termMatch = command.match(/^@(terminal|chat)\s*(.*)$/);
+    if (termMatch && current) {
+      e.preventDefault();
+      spawnTerminalCard(termMatch[1], termMatch[2].trim() || undefined, block);
+      return;
+    }
+    // sheet/table — a spreadsheet card; `RxC` picks the size, the rest is the
+    // title: `sheet 8x5 budget` or `sheet budget 8x5`
+    const sheetMatch = command.match(/^@(sheet|table)\s*(.*)$/);
+    if (sheetMatch && current) {
+      e.preventDefault();
+      const rest = sheetMatch[2].trim();
+      const dim = rest.match(/(\d+)\s*[x×]\s*(\d+)/i);
+      const rows = Math.min(100, Math.max(1, Number(dim?.[1] ?? 6)));
+      const cols = Math.min(26, Math.max(1, Number(dim?.[2] ?? 4)));
+      const title = (dim ? rest.replace(dim[0], " ") : rest).replace(/\s+/g, " ").trim();
+      spawnSheetCard(title || "sheet", rows, cols, block);
+      return;
+    }
+    // slides/deck/powerpoint/ppt — a presentation card; the rest is the title
+    const deckMatch = command.match(/^@(slides|deck|powerpoint|ppt)\s*(.*)$/);
+    if (deckMatch && current) {
+      e.preventDefault();
+      spawnDeckCard(deckMatch[2].trim() || "deck", block);
+      return;
+    }
+    // todo — a task-list card; the rest is the list's name
+    const todoMatch = command.match(/^@todo\s*(.*)$/);
+    if (todoMatch && current) {
+      e.preventDefault();
+      spawnTodoCard(todoMatch[1].trim() || "tasks", block);
+      return;
+    }
+    // browser/browse — a web card; the rest is a url or a search phrase
+    const browMatch = command.match(/^@(browser|browse)\s*(.*)$/);
+    if (browMatch && current) {
+      e.preventDefault();
+      const rest = browMatch[2].trim();
+      const url = toUrl(rest);
+      const stem = url ? (url.match(/^https?:\/\/([^/?#]+)/)?.[1] ?? rest) : rest;
+      spawnBrowserCard(rest ? stem : "browser", url, block);
+      return;
+    }
+    // chart — a viz card; "chart <name> <type>" picks the type word
+    const chartMatch = command.match(/^@chart\s*(.*)$/);
+    if (chartMatch && current) {
+      e.preventDefault();
+      spawnChartCard(chartMatch[1].trim() || "chart", block);
+      return;
+    }
+    // flashcards — a spaced-repetition deck
+    const cardsMatch = command.match(/^@(cards|flashcards|review)\s*(.*)$/);
+    if (cardsMatch && current) {
+      e.preventDefault();
+      spawnCardsCard(cardsMatch[2].trim() || "cards", block);
+      return;
+    }
+    // mind map — an outline that draws itself as a tree
+    const mapMatch = command.match(/^@(map|mindmap|mind)\s*(.*)$/);
+    if (mapMatch && current) {
+      e.preventDefault();
+      const arg = mapMatch[2].trim();
+      spawnMapCard(arg === "project" ? "project" : arg || "map", block, arg === "project" ? PROJECT_TREE : undefined);
+      return;
+    }
+    // agenda — the vault's due-work dashboard
+    const agMatch = command.match(/^@(agenda|due|week)\s*(.*)$/);
+    if (agMatch && current) {
+      e.preventDefault();
+      spawnAgendaCard(agMatch[2].trim() || "agenda", block);
+      return;
+    }
+    // graph — force-directed map of the vault's [[links]]
+    const gMatch = command.match(/^@(graph|network)\s*(.*)$/);
+    if (gMatch && current) {
+      e.preventDefault();
+      spawnGraphCard(gMatch[2].trim() || "vault map", block);
+      return;
+    }
+    // canvas — freeform drawing surface (rect/ellipse/line/freehand/text)
+    const cvMatch = command.match(/^@(canvas|draw|sketch)\s*(.*)$/);
+    if (cvMatch && current) {
+      e.preventDefault();
+      spawnCanvasCard(cvMatch[2].trim() || "canvas", block);
+      return;
+    }
+    // base — property-driven table view; `@base prop:x=y` seeds the query
+    const bMatch = command.match(/^@(base|view|db)\s*(.*)$/);
+    if (bMatch && current) {
+      e.preventDefault();
+      const arg = bMatch[2].trim();
+      const isQ = /(?:^|\s)(prop|tag|is):/i.test(arg);
+      spawnBaseCard(isQ ? "base" : arg || "base", block, isQ ? arg : "");
+      return;
+    }
+    // template — insert a tpl-*/template-* note with {{vars}} + {{prompt}} filled
+    const tplMatch = command.match(/^@(tpl|template)\s*(.*)$/);
+    if (tplMatch && current) {
+      e.preventDefault();
+      void insertTemplate(tplMatch[2].trim(), block);
+      return;
+    }
+    // today — open-or-create the YYYY-MM-DD daily note
+    if (/^@today\b/.test(command) && current) {
+      e.preventDefault();
+      void openToday();
+      return;
+    }
     if (!command.startsWith("@research ")) return;
     const topic = command.slice("@research ".length).trim();
     const hasCard = Array.from(el.querySelectorAll(".callout")).some(
@@ -2871,6 +5350,17 @@ export function initEditor() {
   });
   document.addEventListener("click", (e) => {
     const t = e.target as HTMLElement;
+    // clicking a task checkbox in note text toggles it — `- [ ]` ↔ `- [x]`
+    const box = t.closest<HTMLElement>("li.todo .todo-box");
+    if (box && !box.closest(".todo-card")) {
+      const li = box.closest<HTMLElement>("li.todo")!;
+      const done = !li.classList.contains("done");
+      li.classList.toggle("done", done);
+      box.textContent = done ? "☑" : "☐";
+      dirty = true;
+      void save();
+      return;
+    }
     if (!pop.classList.contains("hidden") && !t.closest("#mark-pop, #btn-mark")) {
       pop.classList.add("hidden");
     }
@@ -3142,7 +5632,7 @@ export function initEditor() {
     else if (paperDrag || el.classList.contains("paper-selectall")) clampPaperRange();
     clearTimeout(selPopTimer);
     selPopTimer = window.setTimeout(updateSelPop, 60);
-    void updateMentionPop();
+    if (cmdPick) refreshCmdPick();
     const s = window.getSelection();
     if ((!s || s.isCollapsed) && !paperDrag) el.classList.remove("paper-selectall");
   });
@@ -3190,6 +5680,31 @@ export function initEditor() {
     }
   });
 
+  armPeek();
+  // frontmatter properties panel — add/remove rows (value edits reach
+  // markEdited via the bubbling `input` listener like any other edit)
+  el.addEventListener("change", (e) => {
+    if ((e.target as HTMLElement).closest?.(".fm-props")) markEdited();
+  });
+  el.addEventListener("click", (e) => {
+    const t = e.target as HTMLElement;
+    const panel = t.closest(".fm-props");
+    if (!panel) return;
+    if (t.closest(".fm-add")) {
+      const row = document.createElement("div");
+      row.className = "fm-row";
+      row.innerHTML =
+        `<input class="fm-k" spellcheck="false" placeholder="key"/>` +
+        `<input class="fm-v" spellcheck="false" placeholder="value"/>` +
+        `<button class="fm-x" title="remove property" tabindex="-1">✕</button>`;
+      panel.insertBefore(row, panel.querySelector(".fm-add"));
+      markEdited();
+      row.querySelector<HTMLInputElement>(".fm-k")?.focus();
+    } else if (t.closest(".fm-x")) {
+      t.closest(".fm-row")?.remove();
+      markEdited();
+    }
+  });
   el.addEventListener("click", (e) => {
     const w = (e.target as HTMLElement).closest?.(".wikilink") as HTMLElement | null;
     if (w) {
@@ -3215,6 +5730,63 @@ export function initEditor() {
 
   document.addEventListener("dragover", (e) => e.preventDefault());
   document.addEventListener("drop", (e) => e.preventDefault());
+
+  // image paste — a screenshot on the clipboard becomes a vault
+  // attachment + an ![](attachments/…) line, never inline base64
+  el.addEventListener("paste", (e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const imgItem = Array.from(items).find((i) => i.type.startsWith("image/"));
+    if (!imgItem) return;
+    const f = imgItem.getAsFile();
+    if (!f) return;
+    e.preventDefault();
+    const anchorBlock = (window.getSelection()?.anchorNode instanceof Element
+      ? (window.getSelection()!.anchorNode as Element)
+      : window.getSelection()?.anchorNode?.parentElement
+    )?.closest("p, li, h1, h2, h3, blockquote") as HTMLElement | null;
+    const fr = new FileReader();
+    fr.onload = async () => {
+      const b64 = String(fr.result ?? "");
+      try {
+        const rel = await invoke<string>("asset_save", { b64 });
+        insertImageAsset(rel, anchorBlock);
+        addActivity(`img → ${rel}`);
+      } catch (err) {
+        setState(`image save failed: ${String(err)}`);
+      }
+    };
+    fr.readAsDataURL(f);
+  });
+
+  // dropping a file onto the note copies it into attachments/ and embeds it
+  el.addEventListener("drop", (e) => {
+    const f = e.dataTransfer?.files?.[0];
+    if (!f) return;
+    const isImg = f.type.startsWith("image/") || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(f.name);
+    if (!isImg) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const srcPath = (f as File & { path?: string }).path;
+    const under = document.elementFromPoint(e.clientX, e.clientY)?.closest("p, li, h1, h2, h3, blockquote") as HTMLElement | null;
+    if (srcPath) {
+      void invoke<string>("asset_save", { src: srcPath })
+        .then((rel) => { insertImageAsset(rel, under); addActivity(`img → ${rel}`); })
+        .catch((err) => setState(`image save failed: ${String(err)}`));
+    } else {
+      const fr = new FileReader();
+      fr.onload = async () => {
+        try {
+          const rel = await invoke<string>("asset_save", { b64: String(fr.result ?? "") });
+          insertImageAsset(rel, under);
+          addActivity(`img → ${rel}`);
+        } catch (err) {
+          setState(`image save failed: ${String(err)}`);
+        }
+      };
+      fr.readAsDataURL(f);
+    }
+  });
 
   window.addEventListener("blur", () => void save());
   window.addEventListener("pagehide", () => {
