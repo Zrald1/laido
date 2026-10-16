@@ -67,10 +67,14 @@ export function mapCallout(block: string[]): string {
   );
 }
 
-const trees = new WeakMap<HTMLElement, MapNode[]>();
+/** card → { md fingerprint, tree }. The md is what the tree currently
+ *  serializes to — kept in sync on every map:changed so a rewire after
+ *  card-undo (which swaps dataset.md back) re-parses instead of reviving
+ *  the pre-undo tree */
+const trees = new WeakMap<HTMLElement, { md: string; tree: MapNode[] }>();
 
 export function cardMapTree(card: HTMLElement): MapNode[] {
-  return trees.get(card) ?? [];
+  return trees.get(card)?.tree ?? [];
 }
 
 /** serialize the live card → `[!map]` + indented bullets (fold state is
@@ -197,7 +201,9 @@ export function wireMap(card: HTMLElement, seed?: MapNode[]) {
   card.dataset.mapWired = "1";
   const canvas = card.querySelector<HTMLElement>(".map-canvas");
   if (!canvas) return;
-  if (!trees.has(card)) {
+  // re-parse when the snapshot changed — card-undo swaps dataset.md back
+  // to an earlier save; a stale cached tree must not outvote it
+  if (trees.get(card)?.md !== (card.dataset.md ?? "")) {
     const fromMd = card.dataset.md
       ? parseMapTree(
           card.dataset.md
@@ -206,9 +212,19 @@ export function wireMap(card: HTMLElement, seed?: MapNode[]) {
             .map((l) => l.replace(/^>\s?/, "")),
         )
       : [];
-    trees.set(card, seed ?? fromMd);
+    trees.set(card, { md: "", tree: seed ?? fromMd });
+    trees.get(card)!.md = mapToMd(card);
   }
-  const tree = trees.get(card)!;
+  const tree = trees.get(card)!.tree;
+  // keep the fingerprint aligned with the live tree after every mutation;
+  // the flag survives rewires (not a render attr) so this binds once
+  if (!card.dataset.mapMdSync) {
+    card.dataset.mapMdSync = "1";
+    card.addEventListener("map:changed", () => {
+      const c = trees.get(card);
+      if (c) c.md = mapToMd(card);
+    });
+  }
   const repaint = () => {
     canvas.innerHTML = "";
     const wrap = document.createElement("div");
@@ -318,7 +334,7 @@ export function buildMapCard(title: string): HTMLElement {
   card.dataset.kind = "map";
   card.dataset.topic = title || "map";
   card.innerHTML =
-    `<div class="callout-head"><span class="callout-title">${title || "map"}</span></div>` +
+    `<div class="callout-head"><span class="callout-title">${escH(title || "map")}</span></div>` +
     `<div class="map-canvas"></div>`;
   return card;
 }

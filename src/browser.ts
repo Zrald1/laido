@@ -65,7 +65,7 @@ export function browserToMd(card: HTMLElement): string {
 /** the card markup render.ts emits; wireBrowser upgrades it live */
 export function browserInnerHtml(): string {
   return (
-    `<div class="browser-bar">` +
+    `<div class="browser-bar" contenteditable="false">` +
     `<button class="bb-b" data-a="back" title="back">◀</button>` +
     `<button class="bb-b" data-a="fwd" title="forward">▶</button>` +
     `<button class="bb-b" data-a="re" title="reload">⟳</button>` +
@@ -79,7 +79,7 @@ export function browserInnerHtml(): string {
     `<iframe class="browser-frame" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>` +
     `<div class="browser-reader"></div>` +
     `</div>` +
-    `<div class="browser-status">idle</div>`
+    `<div class="browser-status" contenteditable="false">idle</div>`
   );
 }
 
@@ -105,6 +105,8 @@ export interface BrowserApi {
   back(): Promise<string>;
   forward(): Promise<string>;
   read(): string;
+  /** the page's extracted links — the agent's navigation targets */
+  links(): [string, string][];
   mode(): string;
   /** the clip payload — selection inside the reader view wins, else the
    *  whole extracted page text (capped) */
@@ -147,7 +149,8 @@ export function wireBrowser(card: HTMLElement) {
   };
 
   const renderReader = (p: PageInfo) => {
-    const links = (p.links ?? [])
+    const all = p.links ?? [];
+    const links = all
       .slice(0, 40)
       .map(
         ([t, u]) =>
@@ -157,7 +160,9 @@ export function wireBrowser(card: HTMLElement) {
     reader.innerHTML =
       `<div class="br-title">${escHtml(p.title || p.final_url || "")}</div>` +
       `<div class="br-url">${escHtml(p.final_url ?? "")}</div>` +
-      (links ? `<div class="br-links">${links}</div>` : "") +
+      (links
+        ? `<button class="br-linkbtn" type="button">▸ ${all.length} link${all.length === 1 ? "" : "s"} on this page</button><div class="br-links" hidden>${links}</div>`
+        : "") +
       `<div class="br-text">${escHtml(p.text ?? "").replace(/\n/g, "<br>")}</div>`;
     reader.querySelectorAll<HTMLElement>(".br-link").forEach((a) => {
       a.addEventListener("click", (e) => {
@@ -165,19 +170,33 @@ export function wireBrowser(card: HTMLElement) {
         void nav(a.dataset.u ?? "", true);
       });
     });
+    const lb = reader.querySelector<HTMLElement>(".br-linkbtn");
+    lb?.addEventListener("click", () => {
+      const list = reader.querySelector<HTMLElement>(".br-links");
+      if (!list) return;
+      const open = list.hasAttribute("hidden");
+      if (open) list.removeAttribute("hidden"); else list.setAttribute("hidden", "");
+      lb.textContent = `${open ? "▾" : "▸"} ${all.length} link${all.length === 1 ? "" : "s"} on this page`;
+    });
   };
 
+  // two fetches in flight resolve out of order — the latest request must
+  // win, not the last response; a stale reply paints over the newer page
+  let navSeq = 0;
   const nav = async (input: string, push: boolean): Promise<string> => {
     const url = toUrl(input);
     if (!url) return "empty address";
+    const seq = ++navSeq;
     say("loading…");
     let p: PageInfo;
     try {
       p = await invoke<PageInfo>("page_fetch", { url });
     } catch (e) {
+      if (seq !== navSeq) return "superseded";
       say(`failed: ${String(e)}`);
       return `fetch failed: ${String(e)}`;
     }
+    if (seq !== navSeq) return "superseded";
     lastPage = p;
     card.dataset.url = p.final_url ?? "";
     if (urlIn.value !== p.final_url) urlIn.value = p.final_url ?? "";
@@ -266,6 +285,7 @@ export function wireBrowser(card: HTMLElement) {
     back: () => navHist(-1),
     forward: () => navHist(1),
     read: () => lastPage?.text ?? "",
+    links: () => lastPage?.links ?? [],
     mode: () => (liveOn ? "live" : "reader"),
     clip: (selOnly?: boolean) => {
       if (!lastPage) return null;
@@ -302,8 +322,12 @@ async function clipBookmark(title: string, url: string): Promise<string> {
   } catch {
     cur = `# Bookmarks\n\n`;
   }
-  if (cur.includes(`(${url})`)) return `already bookmarked — ${title}`;
-  const next = `${cur.trimEnd()}\n- [ ] [${title.replace(/[\[\]\n]/g, " ")}](${url})\n`;
+  // literal parens in a url (wikipedia "(disambiguation)" links) are only
+  // legal in markdown when balanced — percent-encode both so the stored
+  // link parses everywhere
+  const safe = url.replace(/\(/g, "%28").replace(/\)/g, "%29");
+  if (cur.includes(`(${safe})`)) return `already bookmarked — ${title}`;
+  const next = `${cur.trimEnd()}\n- [ ] [${title.replace(/[\[\]\n]/g, " ")}](${safe})\n`;
   await invoke("vault_write", { name, content: next });
   return `bookmarked ${title} → bookmarks.laido`;
 }

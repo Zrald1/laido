@@ -74,8 +74,20 @@ export const DECK_TRANSITIONS = ["none", "fade", "push", "wipe", "zoom"] as cons
 
 /* ---------- markdown <-> model ---------- */
 
-const escCell = (s: string) => S(s).replace(/\|/g, "\\|");
-const unesc = (s: string) => S(s).replace(/\\\|/g, "|");
+const escCell = (s: string) =>
+  S(s).replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\n/g, "\\n");
+const unesc = (s: string) => {
+  let o = "";
+  let e = false;
+  for (const ch of S(s)) {
+    if (e) {
+      o += ch === "n" ? "\n" : ch === "|" || ch === "\\" ? ch : "\\" + ch;
+      e = false;
+    } else if (ch === "\\") e = true;
+    else o += ch;
+  }
+  return e ? o + "\\" : o;
+};
 
 /** `[!slide bullets bg=#fff]` → slide + attrs */
 export function parseSlideHead(line: string): { layout: string; bg: string } {
@@ -167,7 +179,11 @@ function slideLines(s: Slide): string[] {
   if (s.chart) out.push(`chart: ${s.chart}`);
   if (s.csrc) out.push(`data: ${escCell(s.csrc)}`);
   if (s.by) out.push(`by: ${escCell(s.by)}`);
-  if (s.body) out.push(escCell(s.body));
+  if (s.body) {
+    const b = escCell(s.body);
+    // a bare `[!` line would end the callout block on reload — ZWSP-guard it
+    out.push(b.startsWith("[!") ? "​" + b : b);
+  }
   if (s.note) out.push(`~ ${escCell(s.note)}`);
   return out;
 }
@@ -458,7 +474,12 @@ export function wireDeck(card: HTMLElement) {
     slides().forEach((sl, k) => sl.classList.toggle("live", k === i));
     slides().forEach(paintSlideCharts);
     paintThumbs();
+    refreshBar();
   };
+
+  /* enabled-state refresh — rebound by the toolbar block once wired;
+   * keeps ↑/↓/✕ honest when the deck changes */
+  let refreshBar: () => void = () => {};
 
   const touch = () => {
     paintThumbs();
@@ -582,123 +603,131 @@ export function wireDeck(card: HTMLElement) {
     });
   };
 
-  /* -- toolbar -- */
-  const head = card.querySelector<HTMLElement>(".callout-head");
-  let bar = head?.querySelector<HTMLElement>(".deck-bar") ?? null;
-  if (!bar && head) {
+  /* -- toolbar: a ribbon row of its own under the head — the head keeps
+   *  the title + card chrome; eleven widget controls need real estate -- */
+  let bar = card.querySelector<HTMLElement>(".deck-bar");
+  if (!bar) {
     bar = document.createElement("div");
     bar.className = "deck-bar";
     bar.contentEditable = "false";
-    head.append(bar);
+    body.before(bar); // between head and the strip/stage row
   }
-  if (bar && !bar.dataset.wired) {
+  if (!bar.dataset.wired) {
     bar.dataset.wired = "1";
-    const mk = (label: string, tip: string, fn: () => void) => {
+    const mk = (label: string, tip: string, fn: (b: HTMLButtonElement) => void) => {
       const b = document.createElement("button");
       b.className = "deck-btn";
       b.innerHTML = label;
       b.title = tip;
-      b.addEventListener("pointerdown", (e) => e.preventDefault());
+      // mousedown-preventDefault keeps the editor caret — pointerdown would
+      // suppress mousedown entirely, so document-level dismiss handlers
+      // (popover close, menus) never see presses on deck buttons
+      b.addEventListener("mousedown", (e) => e.preventDefault());
       b.addEventListener("click", (e) => {
         e.stopPropagation();
-        fn();
+        fn(b);
       });
       bar!.append(b);
       return b;
     };
-   
-
-    // layout picker for "+ slide"
-    mk("+ slide", "add a slide — choose a layout", () => {
+    const sep = () => {
+      const s = document.createElement("span");
+      s.className = "deck-sep";
+      bar!.append(s);
+    };
+    /* shared popover scaffold — one open at a time, closes on outside
+     * mousedown, anchors under the button that opened it */
+    const pop = (b: HTMLElement, cls = ""): HTMLElement => {
       bar!.querySelector(".deck-layoutpop")?.remove();
-      const pop = document.createElement("div");
-      pop.className = "deck-layoutpop";
-      pop.contentEditable = "false";
-      for (const l of DECK_LAYOUTS) {
-        const b = document.createElement("button");
-        b.className = "deck-lp-item";
-        b.innerHTML = `${LAYOUT_ICON[l] ?? "▢"} ${l}`;
-        b.addEventListener("click", () => {
-          addSlide(l, active() + 1);
-          pop.remove();
-        });
-        pop.append(b);
-      }
-      bar!.append(pop);
+      const p = document.createElement("div");
+      p.className = ("deck-layoutpop " + cls).trim();
+      p.contentEditable = "false";
+      const x = Math.max(0, Math.min(b.offsetLeft, Math.max(0, bar!.clientWidth - 160)));
+      p.style.left = x + "px";
+      bar!.append(p);
       const off = (e: MouseEvent) => {
-        if (!pop.contains(e.target as Node)) {
-          pop.remove();
+        if (!p.contains(e.target as Node)) {
+          p.remove();
           document.removeEventListener("mousedown", off);
         }
       };
       setTimeout(() => document.addEventListener("mousedown", off), 0);
+      return p;
+    };
+
+    // layout picker for "+ slide"
+    mk("+ slide", "add a slide — choose a layout", (b) => {
+      const p = pop(b);
+      for (const l of DECK_LAYOUTS) {
+        const it = document.createElement("button");
+        it.className = "deck-lp-item";
+        it.innerHTML = `${LAYOUT_ICON[l] ?? "▢"} ${l}`;
+        it.addEventListener("click", () => {
+          addSlide(l, active() + 1);
+          p.remove();
+        });
+        p.append(it);
+      }
     });
-    mk("⧉", "duplicate this slide", () => {
+    sep();
+    const bDup = mk("⧉", "duplicate this slide", () => {
       const s = slideFromDom(slides()[active()]);
       const idx = addSlide(s.layout, active() + 1);
       rebuildSlide(idx, s);
     });
-    mk("✕", "delete this slide", () => delSlide(active()));
-    mk("↑", "move slide earlier", () => move(active(), Math.max(0, active() - 1)));
-    mk("↓", "move slide later", () => move(active(), Math.min(slides().length - 1, active() + 1)));
+    const bDel = mk("✕", "delete this slide", () => delSlide(active()));
+    const bUp = mk("↑", "move slide earlier", () => move(active(), Math.max(0, active() - 1)));
+    const bDn = mk("↓", "move slide later", () => move(active(), Math.min(slides().length - 1, active() + 1)));
+    sep();
     mk("⇪", "export this deck — .pptx or .md", () => { void doExport().then((m) => addActivity(`deck: ${m}`)); });
     mk("⇩", "import a .pptx into this deck", () => { void doImport().then((m) => addActivity(`deck: ${m}`)); });
+    sep();
     // theme swatch picker
-    mk("🎨", "deck theme", () => {
-      bar!.querySelector(".deck-layoutpop")?.remove();
-      const pop = document.createElement("div");
-      pop.className = "deck-layoutpop deck-themepop";
-      pop.contentEditable = "false";
+    mk("🎨", "deck theme", (b) => {
+      const p = pop(b, "deck-themepop");
       for (const name of Object.keys(DECK_THEMES)) {
         const t2 = DECK_THEMES[name];
-        const b = document.createElement("button");
-        b.className = "deck-lp-item";
-        b.innerHTML = `<span class="dt-sw" style="background:${t2.bg};color:${t2.accent}">Aa</span> ${name}`;
-        b.addEventListener("click", () => {
+        const it = document.createElement("button");
+        it.className = "deck-lp-item";
+        it.innerHTML = `<span class="dt-sw" style="background:${t2.bg};color:${t2.accent}">Aa</span> ${name}`;
+        it.addEventListener("click", () => {
           card.dataset.theme = name;
           applyThemeVars(body, name);
-          pop.remove();
+          p.remove();
           touch();
         });
-        pop.append(b);
+        p.append(it);
       }
-      bar!.append(pop);
-      const off = (e: MouseEvent) => {
-        if (!pop.contains(e.target as Node)) {
-          pop.remove();
-          document.removeEventListener("mousedown", off);
-        }
-      };
-      setTimeout(() => document.addEventListener("mousedown", off), 0);
     });
     // transition picker
-    mk("⇢", "slide transition", () => {
-      bar!.querySelector(".deck-layoutpop")?.remove();
-      const pop = document.createElement("div");
-      pop.className = "deck-layoutpop";
-      pop.contentEditable = "false";
+    mk("⇢", "slide transition", (b) => {
+      const p = pop(b);
       for (const fx of DECK_TRANSITIONS) {
-        const b = document.createElement("button");
-        b.className = "deck-lp-item" + (fx === (card.dataset.trans ?? "fade") ? " on" : "");
-        b.textContent = fx;
-        b.addEventListener("click", () => {
+        const it = document.createElement("button");
+        it.className = "deck-lp-item" + (fx === (card.dataset.trans ?? "fade") ? " on" : "");
+        it.textContent = fx;
+        it.addEventListener("click", () => {
           card.dataset.trans = fx;
-          pop.remove();
+          p.remove();
           touch();
         });
-        pop.append(b);
+        p.append(it);
       }
-      bar!.append(pop);
-      const off = (e: MouseEvent) => {
-        if (!pop.contains(e.target as Node)) {
-          pop.remove();
-          document.removeEventListener("mousedown", off);
-        }
-      };
-      setTimeout(() => document.addEventListener("mousedown", off), 0);
     });
+    sep();
     mk("⊞", "slide sorter — thumbnails, drag to reorder, Ctrl+←→ moves", () => openSorter());
     mk("▶", "present (Esc to exit, N for notes)", () => present(active()));
+    /* ↑/↓/✕ disable rather than no-op — clicked-and-nothing is how a
+     * working deck feels broken */
+    refreshBar = () => {
+      const n = slides().length;
+      const i = active();
+      bDel.disabled = n <= 1;
+      bUp.disabled = i <= 0;
+      bDn.disabled = i >= n - 1;
+      bDup.disabled = n < 1;
+    };
+    refreshBar();
   }
 
   /* -- slide sorter: a thumbnail grid over the stage (PowerPoint's
@@ -878,6 +907,13 @@ export function wireDeck(card: HTMLElement) {
       render(d);
     };
     const onKey = (e: KeyboardEvent) => {
+      // the overlay hangs on <body>, so a note switch (or card deletion)
+      // orphans it — self-destruct instead of eating every keypress forever
+      if (!card.isConnected || !ov.isConnected) {
+        ov.remove();
+        document.removeEventListener("keydown", onKey, true);
+        return;
+      }
       e.stopPropagation();
       e.preventDefault();
       if (e.key === "Escape") {
@@ -970,13 +1006,17 @@ export function wireDeck(card: HTMLElement) {
     ctx.style.left = `${Math.min(e.clientX, window.innerWidth - 230)}px`;
     ctx.style.top = `${Math.min(e.clientY, window.innerHeight - 280)}px`;
   });
-  document.addEventListener("mousedown", (e) => {
-    if (!card.isConnected) return;
+  const onDocDown = (e: Event) => {
+    if (!card.isConnected) {
+      document.removeEventListener("mousedown", onDocDown);
+      return;
+    }
     if (ctx && !(e.target as HTMLElement).closest(".sheet-ctx")) {
       ctx.remove();
       ctx = null;
     }
-  });
+  };
+  document.addEventListener("mousedown", onDocDown);
 
   // upgrade the static markup render.ts emitted
   slides().forEach(wireSlide);
@@ -1036,10 +1076,17 @@ export function wireDeck(card: HTMLElement) {
     show(0);
     touch();
   };
-  // chart slides bound to a sheet repaint when that sheet changes
-  card.closest(".note-body, body")?.addEventListener("sheet:changed", () => {
+  // chart slides bound to a sheet repaint when that sheet changes; the
+  // listener outlives a deleted deck card unless it removes itself once the
+  // card leaves the document
+  const onSheetChanged = (e: Event) => {
+    if (!card.isConnected) {
+      (e.currentTarget as Element | null)?.removeEventListener("sheet:changed", onSheetChanged);
+      return;
+    }
     slides().forEach(paintSlideCharts);
-  });
+  };
+  card.closest(".note-body, body")?.addEventListener("sheet:changed", onSheetChanged);
   const doImport = async (path?: string): Promise<string> => {
     let p: string | null | undefined = path;
     if (!p) {
@@ -1168,7 +1215,7 @@ export function buildDeckCard(title: string): HTMLElement {
   card.dataset.theme = "dark";
   card.dataset.trans = "fade";
   card.innerHTML =
-    `<div class="callout-head"><span class="callout-title">${title || "deck"}</span></div>` +
+    `<div class="callout-head"><span class="callout-title">${escHtml(title || "deck")}</span></div>` +
     deckInnerHtml({ title, theme: "dark", transition: "fade", slides: [emptySlide("title")] });
   return card;
 }

@@ -117,7 +117,7 @@ export function parseSheetLine(line: string): string[] {
   let esc = false;
   for (const ch of line.trim().replace(/^\|/, "").replace(/\|$/, "")) {
     if (esc) {
-      cur += ch === "|" ? "|" : ch;
+      cur += ch === "n" ? "\n" : ch === "|" || ch === "\\" ? ch : "\\" + ch;
       esc = false;
     } else if (ch === "\\") esc = true;
     else if (ch === "|") {
@@ -125,11 +125,13 @@ export function parseSheetLine(line: string): string[] {
       cur = "";
     } else cur += ch;
   }
+  if (esc) cur += "\\";
   out.push(cur);
   return out.map((c) => c.trim());
 }
 
-const escCell = (raw: string) => S(raw).replace(/\|/g, "\\|");
+const escCell = (raw: string) =>
+  S(raw).replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\n/g, "\\n");
 
 /** grid → markdown rows for cardToMd. Beyond the `| a | b |` data rows the
  *  callout carries `> [!meta]` lines — cell formats, conditional rules,
@@ -410,21 +412,25 @@ function tokenize(src: string): Tok[] {
         i = j;
         continue;
       }
-      if (/^[A-Za-z]+\d+$/.test(word)) {
+      // $ anchors don't affect evaluation — only fill/copy treats them as
+      // fixed — so $C$5 evaluates exactly like C5
+      const clean = word.replace(/\$/g, "");
+      if (/^[A-Za-z]+\d+$/.test(clean)) {
         // cell ref, or a range when a second ref follows the colon
         if (src[j] === ":") {
           let k = j + 1;
           while (k < src.length && /[A-Za-z0-9$]/.test(src[k])) k++;
-          if (/^[A-Za-z]+\d+$/.test(src.slice(j + 1, k))) {
+          const tail = src.slice(j + 1, k).replace(/\$/g, "");
+          if (/^[A-Za-z]+\d+$/.test(tail)) {
             toks.push({
               t: "range",
-              cells: expandRange(`${word.toUpperCase()}:${src.slice(j + 1, k).toUpperCase()}`),
+              cells: expandRange(`${clean.toUpperCase()}:${tail.toUpperCase()}`),
             });
             i = k;
             continue;
           }
         }
-        const rc = refRC(word);
+        const rc = refRC(clean);
         if (rc) {
           toks.push({ t: "ref", r: rc[0], c: rc[1] });
           i = j;
@@ -2129,8 +2135,16 @@ const NUMFMT: Record<string, (n: number) => string> = {
   },
 };
 /** the shown text for a value honoring the cell's format */
+/** internal error tokens → the strings users expect from a spreadsheet */
+const ERR_SHOW: Record<string, string> = {
+  "#div0": "#DIV/0!", "#name": "#NAME?", "#ref": "#REF!", "#cycle": "#CYCLE!",
+  "#bad": "#ERROR!", "#num": "#NUM!", "#value": "#VALUE!", "#na": "#N/A",
+  "#err": "#VALUE!",
+};
+
 const displayFor = (td: HTMLElement, s: Scalar): string => {
   const f = td.dataset.fmt;
+  if (typeof s === "string" && s in ERR_SHOW) return ERR_SHOW[s];
   if (!f || f === "general" || f === "text") return toStr(s);
   const n = typeof s === "number" ? s : NaN;
   if (isNaN(n)) return toStr(s);
@@ -2572,7 +2586,9 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
       b.textContent = label;
       b.title = tip;
       b.contentEditable = "false";
-      b.addEventListener("pointerdown", (e) => e.preventDefault());
+      // mousedown-preventDefault keeps the grid's focus — pointerdown would
+      // suppress mousedown entirely, breaking document-level dismiss handlers
+      b.addEventListener("mousedown", (e) => e.preventDefault());
       b.addEventListener("click", (e) => {
         e.stopPropagation();
         fn();
@@ -2636,6 +2652,7 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
   };
   const insertRow = (at: number) => {
     const tr = document.createElement("tr");
+    tr.dataset.r = String(at);
     const th = document.createElement("th");
     tr.append(th);
     wireRowTh(th);
@@ -2644,7 +2661,10 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
     ctl.className = "sheet-rowctl";
     tr.append(ctl);
     const ref = grid!.querySelectorAll<HTMLElement>("tr[data-r]")[at] ?? null;
-    grid!.insertBefore(tr, ref);
+    // rows can live inside an implicit <tbody> after an HTML round-trip —
+    // insert against ref itself so the parent is always correct
+    if (ref) ref.before(tr);
+    else (grid!.querySelector("tbody") ?? grid!).append(tr);
     relabel(grid!);
     shiftAllRefs("row", at, 1);
     repaint();
@@ -4190,15 +4210,21 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
     }
     openCtx(e, td, th);
   });
-  // clicking anywhere outside closes menu/popovers
-  document.addEventListener("mousedown", (e) => {
-    if (!card.isConnected) return;
+  // clicking anywhere outside closes menu/popovers; the listener self-removes
+  // once the card leaves the document — else every deleted sheet pins its
+  // whole wire closure on document forever
+  const onDocDown = (e: Event) => {
+    if (!card.isConnected) {
+      document.removeEventListener("mousedown", onDocDown);
+      return;
+    }
     if (ctx && !(e.target as HTMLElement).closest(".sheet-ctx")) ctx.remove();
     if (pop && !(e.target as HTMLElement).closest(".sheet-filterpop, .sheet-cfform")) {
       pop.remove();
       pop = null;
     }
-  });
+  };
+  document.addEventListener("mousedown", onDocDown);
 
   // column-resize drag on the right edge of a header + resize cursor
   let colResize: { c: number; x0: number; w0: number; th: HTMLElement } | null = null;
@@ -4455,7 +4481,7 @@ export function buildSheetCard(title: string): HTMLElement {
   card.dataset.kind = "sheet";
   card.dataset.topic = title || "sheet";
   card.innerHTML =
-    `<div class="callout-head"><span class="callout-title">${title || "sheet"}</span></div>` +
+    `<div class="callout-head"><span class="callout-title">${escH(title || "sheet")}</span></div>` +
     `<div class="sheet-wrap"></div>`;
   return card;
 }

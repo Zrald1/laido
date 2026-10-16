@@ -285,7 +285,15 @@ export function wireAgenda(card: HTMLElement) {
       chip.textContent = `${n0} overdue`;
     } else chip?.remove();
   };
-  // live view — repaints whenever the vault index refreshes
-  document.addEventListener("index:changed", () => void paint());
+  // live view — repaints whenever the vault index refreshes; self-removes
+  // once the card is gone so deleted agendas stop repainting
+  const onIndex = () => {
+    if (!card.isConnected) {
+      document.removeEventListener("index:changed", onIndex);
+      return;
+    }
+    void paint();
+  };
+  document.addEventListener("index:changed", onIndex);
   void paint();
 }

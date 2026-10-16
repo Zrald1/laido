@@ -682,7 +682,7 @@ export function initCalendar() {
   });
   document.addEventListener("pointerdown", (e) => {
     const d = $("#cal-detail");
-    if (d.classList.contains("hidden")) return;
+    if (!d || d.classList.contains("hidden")) return;
     if ((e.target as HTMLElement).closest("#cal-detail")) return;
     closeDetail();
   });

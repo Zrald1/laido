@@ -1177,7 +1177,7 @@ function stickifyCard(card: HTMLElement) {
   card.style.height = "";
   card.classList.remove("sized");
   // drop AI-card chrome and re-enhance so sticky controls are added
-  card.querySelectorAll(".card-del, .card-pin, .card-stick").forEach((b) => b.remove());
+  card.querySelectorAll(".card-tools, .card-del, .card-pin, .card-stick").forEach((b) => b.remove());
   delete card.dataset.enhanced;
   enhanceCard(card);
   markEdited();
@@ -1242,6 +1242,18 @@ function enhanceCard(card: HTMLElement) {
     (c) => (c as HTMLElement).dataset.topic === topic,
   );
   card.dataset.slot = String(sameTopic.indexOf(card));
+  // card chrome mounts into one tool strip inside the head — a flex row at
+  // the right edge, so card actions can never collide with widget controls.
+  // stickies keep loose corner buttons: their head is editable text.
+  let chrome: HTMLElement = card;
+  if (!card.classList.contains("sticky") && head) {
+    const tools = document.createElement("span");
+    tools.className = "card-tools";
+    tools.contentEditable = "false";
+    tools.addEventListener("pointerdown", (e) => e.stopPropagation());
+    head.append(tools);
+    chrome = tools;
+  }
   makeResizable(card);
   makeDraggable(card);
   restoreCardState(card);
@@ -1265,7 +1277,7 @@ function enhanceCard(card: HTMLElement) {
         e.stopPropagation();
         duplicateTerminalCard(card);
       });
-      card.append(dup);
+      chrome.append(dup);
     }
   }
   if (card.dataset.kind === "sheet") {
@@ -1288,7 +1300,7 @@ function enhanceCard(card: HTMLElement) {
         e.stopPropagation();
         duplicateSheetCard(card);
       });
-      card.append(dup);
+      chrome.append(dup);
     }
   }
   if (card.dataset.kind === "deck") {
@@ -1311,7 +1323,7 @@ function enhanceCard(card: HTMLElement) {
         e.stopPropagation();
         duplicateDeckCard(card);
       });
-      card.append(dup);
+      chrome.append(dup);
     }
   }
   if (card.dataset.kind === "todo") {
@@ -1334,7 +1346,7 @@ function enhanceCard(card: HTMLElement) {
         e.stopPropagation();
         duplicateTodoCard(card);
       });
-      card.append(dup);
+      chrome.append(dup);
     }
   }
   if (card.dataset.kind === "browser") {
@@ -1417,7 +1429,7 @@ function enhanceCard(card: HTMLElement) {
     drawCardLinks();
     markEdited();
   });
-  card.append(del);
+  chrome.append(del);
   if (!card.classList.contains("sticky") && !card.querySelector(".card-pin")) {
     // term chats and sheets both get the viewport pin — floating widgets the
     // user wants on screen while they scroll the note
@@ -1434,7 +1446,7 @@ function enhanceCard(card: HTMLElement) {
       if (isTerm && card.classList.contains("viewport-pin")) toggleFloatPin(card);
       togglePin(card);
     });
-    card.append(pinBtn);
+    chrome.append(pinBtn);
     if (isTerm && !card.querySelector(".card-floatpin")) {
       // the second pin: viewport-fixed — the chat stays on screen while the
       // user scrolls anywhere on the sheet
@@ -1448,7 +1460,7 @@ function enhanceCard(card: HTMLElement) {
         e.stopPropagation();
         toggleFloatPin(card);
       });
-      card.append(fp);
+      chrome.append(fp);
     }
   }
   if (!card.classList.contains("term-card") && !card.classList.contains("sheet-card") && !card.classList.contains("deck-card") && !card.classList.contains("todo-card") && !card.querySelector(".card-tts")) {
@@ -1462,7 +1474,7 @@ function enhanceCard(card: HTMLElement) {
       e.stopPropagation();
       toggleCardSpeech(card, tts);
     });
-    card.append(tts);
+    chrome.append(tts);
   }
   if (!card.classList.contains("sticky") && !card.querySelector(".card-stick")) {
     const st = document.createElement("button");
@@ -1475,7 +1487,7 @@ function enhanceCard(card: HTMLElement) {
       e.stopPropagation();
       stickifyCard(card);
     });
-    card.append(st);
+    chrome.append(st);
   }
   if (card.classList.contains("sticky") && !card.querySelector(".card-move")) {
     const mv = document.createElement("button");
@@ -1516,7 +1528,7 @@ function enhanceCard(card: HTMLElement) {
       writeState(card, { x, y });
       markEdited();
     });
-    card.append(mv);
+    chrome.append(mv);
     const mn = document.createElement("button");
     mn.className = "card-menu";
     mn.textContent = "⋯";
@@ -1527,7 +1539,7 @@ function enhanceCard(card: HTMLElement) {
       e.stopPropagation();
       void openStickyMenu(mn);
     });
-    card.append(mn);
+    chrome.append(mn);
   }
   // widget chrome must never capture Tab from the text
   card.querySelectorAll("button").forEach((b) => (b.tabIndex = -1));
@@ -2260,6 +2272,7 @@ export function layoutLoopRun(run: string) {
 }
 
 export function clearNote() {
+  loadGen++; // kill any in-flight loadNote — its read must not repaint
   current = "";
   $("#note-title").textContent = "—";
   body().innerHTML = "";
@@ -2267,10 +2280,17 @@ export function clearNote() {
   setState("");
 }
 
+// each loadNote bumps this; a read that resolves after a newer load
+// started is stale — it must not repaint or become `current`, or the
+// next save writes this note's DOM into the newer note's file
+let loadGen = 0;
+
 export async function loadNote(name: string) {
   hidePencil();
-  current = name;
+  const gen = ++loadGen;
   const md = await invoke<string>("vault_read", { name });
+  if (gen !== loadGen) return;
+  current = name;
   $("#note-title").textContent = titleName(name);
   const el = body();
   el.innerHTML = renderMarkdown(md);
@@ -3388,7 +3408,9 @@ export function spawnTerminalCard(
   if (seed && input) {
     input.value = seed;
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-  } else {
+  } else if (block) {
+    // only a user-typed command line earns autofocus — AI-spawned children
+    // (spawn fence) and reloads must not yank the caret out of the note
     input?.focus();
   }
   return card;
@@ -3487,7 +3509,7 @@ function duplicateDeckCard(card: HTMLElement) {
   clone.classList.remove("pinned", "viewport-pin", "floating", "sized");
   clone
     .querySelectorAll(
-      ".card-del, .card-pin, .card-tts, .card-stick, .card-dup, .card-floatpin, .deck-bar",
+      ".card-tools, .card-del, .card-pin, .card-tts, .card-stick, .card-dup, .card-floatpin, .deck-bar",
     )
     .forEach((b) => b.remove());
   clone.querySelectorAll<HTMLElement>("[data-wired]").forEach((el) => delete el.dataset.wired);
@@ -3840,7 +3862,7 @@ function duplicateTodoCard(card: HTMLElement) {
   clone.classList.remove("pinned", "viewport-pin", "floating", "sized");
   clone
     .querySelectorAll(
-      ".card-del, .card-pin, .card-tts, .card-stick, .card-dup, .card-floatpin",
+      ".card-tools, .card-del, .card-pin, .card-tts, .card-stick, .card-dup, .card-floatpin",
     )
     .forEach((b) => b.remove());
   clone.querySelectorAll<HTMLElement>("[data-wired]").forEach((el) => delete el.dataset.wired);
@@ -3873,9 +3895,10 @@ function duplicateSheetCard(card: HTMLElement) {
   clone.classList.remove("pinned", "viewport-pin", "floating", "sized");
   clone
     .querySelectorAll(
-      ".card-del, .card-pin, .card-tts, .card-stick, .card-dup, .card-floatpin, .sheet-addcol, .sheet-addrow",
+      ".card-tools, .card-del, .card-pin, .card-tts, .card-stick, .card-dup, .card-floatpin, .sheet-addcol, .sheet-addrow",
     )
     .forEach((b) => b.remove());
+  clone.querySelectorAll<HTMLElement>("[data-wired]").forEach((el) => delete el.dataset.wired);
   enhanceCard(clone);
   const root = body();
   root.append(clone);
@@ -3938,7 +3961,7 @@ function duplicateTerminalCard(card: HTMLElement) {
   // a fresh conversation: no copied log, no stale UI, no dead buttons
   clone.querySelectorAll(".term-line").forEach((l) => l.remove());
   clone
-    .querySelectorAll(".card-del, .card-pin, .card-tts, .card-stick, .card-dup, .card-floatpin")
+    .querySelectorAll(".card-tools, .card-del, .card-pin, .card-tts, .card-stick, .card-dup, .card-floatpin")
     .forEach((b) => b.remove());
   // numbered like the family tree: chat 1 duplicates to 1.1, 1.2…; a new
   // chat from the command is 2, and its first duplicate is 2.1
@@ -4028,6 +4051,36 @@ function beginTitleEdit(mode: "rename" | "saveas") {
         current = next;
         $("#note-title").textContent = titleName(next);
         onRenamedCb?.(old, next);
+        // the vault-side rewrite fixed every [[old]] on disk — do the same
+        // in the live DOM so open links/embeds don't point at the dead name
+        const oStem = old.replace(/\.(laido|md)$/, "");
+        const nStem = next.replace(/\.(laido|md)$/, "");
+        const retarget = (tgt: string): string => {
+          const h = tgt.indexOf("#");
+          const tg = h < 0 ? tgt : tgt.slice(0, h);
+          const frag = h < 0 ? "" : tgt.slice(h); // includes the '#'
+          const named = tg === old || (!/\.(laido|md)$/.test(tg) && tg === oStem);
+          if (!named) return tgt;
+          const nt = /\.(laido|md)$/.test(tg) ? next : nStem;
+          return nt + frag;
+        };
+        body().querySelectorAll<HTMLElement>(".wikilink[data-note]").forEach((w) => {
+          const prev = w.dataset.note ?? "";
+          const tgt = retarget(prev);
+          if (tgt !== prev) {
+            w.dataset.note = tgt;
+            // bare [[old]] labels show the target — aliased labels keep theirs
+            if (w.textContent === prev || w.textContent === prev.split("#", 1)[0]) {
+              w.textContent = tgt.split("#", 1)[0];
+            }
+          }
+        });
+        body().querySelectorAll<HTMLElement>(".note-embed[data-src]").forEach((em) => {
+          const tgt = retarget(em.dataset.src ?? "");
+          if (tgt !== em.dataset.src) em.dataset.src = tgt;
+        });
+        // inbound [[links]] were rewritten vault-side — the index is stale
+        void refreshIndex(true).then(paintLinkStrip);
       } else {
         const next = /\.(laido|md)$/.test(raw) ? raw : `${raw}.laido`;
         await invoke("vault_write", { name: next, content: serialize(body()) });
@@ -4063,7 +4116,9 @@ export function startSaveAs() {
 
 export function printNote() {
   const el = body().cloneNode(true) as HTMLElement;
-  el.querySelectorAll(".grip, .card-del").forEach((n) => n.remove());
+  el.querySelectorAll(
+    ".grip, .pin-mark, .card-tools, .card-del, .card-menu, .card-move, .card-pin, .card-stick, .card-tts, .card-dup, .card-floatpin, .sheet-view, .deck-bar, .cv-tools, .base-tools, .map-root-add, .ag-refresh, .ag-speak, .term-model-select",
+  ).forEach((n) => n.remove());
   const doc = `<!doctype html><html><head><meta charset="utf-8"><style>
     body { font: 15px/1.6 Georgia, serif; color: #222; margin: 24px; }
     p { margin: 0 0 10px; }

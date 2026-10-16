@@ -12,6 +12,14 @@ import { baseToMd } from "./base.js";
 
 const DS = (v: string | undefined): string => { const s = v ?? ""; return /^(?:undefined|null|NaN|-?Infinity|\[object [^\]]*\])$/.test(s) ? "" : s; };
 
+/** lines that would re-parse as structure (callout, quote, heading, list,
+ *  hr, embed, tex) get a `\` prefix — render.ts strips it back to literal
+ *  text so typed markers survive the round-trip instead of transmuting */
+const BLOCK_MARKER =
+  /^(?:>|#{1,3}\s|[-*]\s|\d+[.)]\s|-{3,}\s*$|\*{3,}\s*$|!\[\[.*\]\]\s*$|`{3,}|\\)/;
+const escLine = (l: string) =>
+  BLOCK_MARKER.test(l.trimStart()) ? l.replace(/^(\s*)/, "$1\\") : l;
+
 export function serialize(root: HTMLElement): string {
   if (!root?.childNodes) return "";
   const blocks: string[] = [];
@@ -25,7 +33,7 @@ export function serialize(root: HTMLElement): string {
   for (const node of Array.from(root.childNodes)) {
     if (node.nodeType === Node.TEXT_NODE) {
       const t = (node.textContent ?? "").replace(/\s+$/, "");
-      if (t.trim() !== "") pending.push(t);
+      if (t.trim() !== "") pending.push(t.split("\n").map(escLine).join("\n"));
       continue;
     }
     if (node.nodeType !== Node.ELEMENT_NODE) continue;
@@ -33,6 +41,12 @@ export function serialize(root: HTMLElement): string {
     if (el.classList.contains("proposal")) continue;
     flush();
     const md = blockToMd(el);
+    // frontmatter only parses at byte 0 — wherever the panel sits in the
+    // DOM, its YAML goes first or it degrades to an <hr> + scattered text
+    if (el.classList.contains("fm-props")) {
+      if (md !== "") blocks.unshift(md);
+      continue;
+    }
     // live widgets (chat) serialize to nothing — never stored
     if (md !== "") blocks.push(md);
   }
@@ -77,7 +91,11 @@ function blockToMd(el: HTMLElement): string {
               : "false"
             : (vi?.value ?? "").trim();
         return {
-          k: (r.querySelector<HTMLInputElement>(".fm-k")?.value ?? "").trim(),
+          // keys must match the parser's [\w-]+ — anything else would flip
+          // the whole block back to raw text on reload
+          k: (r.querySelector<HTMLInputElement>(".fm-k")?.value ?? "")
+            .trim()
+            .replace(/[^\w-]/g, ""),
           v,
           list: r.dataset.list === "1",
         };
@@ -100,28 +118,25 @@ function blockToMd(el: HTMLElement): string {
   if (tag === "h1" || tag === "h2" || tag === "h3") {
     return `${"#".repeat(Number(tag[1]))} ${inlineToMd(el)}`.trimEnd();
   }
-  if (tag === "ul" || tag === "ol") {
-    return Array.from(el.children)
-      .map((li, i) => {
-        const l = li as HTMLElement;
-        if (l.classList.contains("todo")) {
-          // task lines keep their box + due date: "- [x] text @2026-02-10"
-          const done = l.classList.contains("done");
-          const box = l.querySelector(".todo-box");
-          box?.remove();
-          // the box is followed by a separating space — dropping the element
-          // leaves it behind, so trim what the checkbox itself contributed
-          const text = inlineToMd(l).replace(/^\s+/, "");
-          if (box) l.prepend(box, document.createTextNode(" "));
-          const when = l.dataset.when ? ` @${l.dataset.when}` : "";
-          return `- [${done ? "x" : " "}] ${text}${when}`;
-        }
-        return (tag === "ul" ? "- " : `${i + 1}. `) + inlineToMd(li);
-      })
+  if (tag === "ul" || tag === "ol") return listToMd(el);
+  if (tag === "blockquote") {
+    // every line keeps its > prefix; a body line that would re-parse as a
+    // callout head gets the ZWSP sentinel like callout bodies do
+    return inlineToMd(el)
+      .split("\n")
+      .map((l) => `> ${l.startsWith("[!") ? "​" + l : l}`)
       .join("\n");
   }
-  if (tag === "blockquote") return `> ${inlineToMd(el)}`;
   if (tag === "hr") return "---";
+  // fenced code — content is verbatim text; a fence longer than any
+  // backtick run inside keeps embedded ``` from closing early
+  if (tag === "pre") {
+    const lang = (el.dataset.lang ?? "").replace(/[^\w-]/g, "");
+    const code = (el.textContent ?? "").replace(/\n$/, "");
+    const maxRun = Math.max(0, ...(code.match(/`+/g) ?? []).map((r) => r.length));
+    const fence = "`".repeat(Math.max(3, maxRun + 1));
+    return `${fence}${lang}\n${code}\n${fence}`;
+  }
   // `![[x.png]]` / sized image embeds render as top-level <img> blocks —
   // without this branch the inlineToMd fallback walks the img's (empty)
   // children and the line silently drops out of the file
@@ -142,7 +157,7 @@ function blockToMd(el: HTMLElement): string {
   // an empty paragraph is a ruled line too — store it as an invisible
   // zero-width space so blank rows survive the markdown round-trip
   if (tag === "p" && txt.trim() === "") return "\u200b";
-  return txt;
+  return txt.split("\n").map(escLine).join("\n");
 }
 
 export function normalizeCard(card: HTMLElement) {
@@ -232,7 +247,16 @@ export function cardToMd(card: HTMLElement): string {
       .map((l) => {
         const raw = DS(l.dataset.raw) ?? l.textContent ?? "";
         const t = DS(l.dataset.t) ?? "out";
-        return t === "ask" ? `› ${raw}` : t === "cmd" ? `! ${raw}` : t === "err" ? `✕ ${raw}` : raw;
+        if (t === "ask") return `› ${raw}`;
+        if (t === "cmd") return `! ${raw}`;
+        if (t === "err") return `✕ ${raw}`;
+        // ai/laido keep their roles across reloads — bare text re-parses as
+        // "out" and the session history would mislabel replies as user output
+        if (t === "ai") return `≡ ${raw}`;
+        if (t === "laido") return `◆ ${raw}`;
+        // an out line starting with a type marker would re-parse as that
+        // type; a leading [! would end the callout — ZWSP sentinel both
+        return raw.replace(/^(\s*)([›!✕≡◆]|\[!)/, "$1​$2");
       });
     return `> [!terminal] ${DS(card.dataset.topic) ?? "terminal"}${id}${model}\n${lines
       .map((l) => `> ${l}`)
@@ -242,16 +266,27 @@ export function cardToMd(card: HTMLElement): string {
   const kind = DS(card.dataset.kind) ?? "ai";
   const id = DS(card.dataset.topic) ?? "";
   const color = DS(card.dataset.color) ?? "yellow";
-  const title = (DS(card.dataset.title) ?? card.querySelector(".sticky-title")?.textContent ?? "").trim();
+  // the editable .sticky-title span is the source of truth — a converted
+  // card carries dataset.title from its old head and must not let it
+  // override the user's edit
+  const title = (card.querySelector(".sticky-title")?.textContent ?? DS(card.dataset.title) ?? "").trim();
   const head =
     kind === "sticky"
       ? `> [!sticky]${id ? " " + id : ""}${color !== "yellow" ? ` color=${color}` : ""}${title ? " " + title : ""}`
-      : `> [!ai] research: ${id}`;
+      : kind === "ai"
+        ? `> [!ai] research: ${id}`
+        // any other marker ([!note], [!warning], a future widget kind, a
+        // hand-typed callout) keeps its real marker + title — rewriting it
+        // to [!ai] silently mutates the note on every save
+        : `> [!${kind.replace(/\W+/g, "") || "ai"}]${id ? " " + id : ""}`;
   const lines: string[] = [];
   const bodyEl = card.querySelector<HTMLElement>(".callout-body");
   if (bodyEl) {
     for (const line of bodyLines(bodyEl)) {
-      if (line.trim() !== "") lines.push(`> ${line}`);
+      if (line.trim() !== "")
+        // a body line starting `[!` would end this callout on reload — the
+        // zero-width prefix keeps it inside the block, invisible to the user
+        lines.push(`> ${line.replace(/^(\s*)\[!/, "$1​[!")}`);
     }
   }
   const srcEl = card.querySelector(".callout-src");
@@ -268,6 +303,35 @@ export function cardToMd(card: HTMLElement): string {
     }
   }
   return `${head}\n${lines.join("\n")}`;
+}
+
+/** <ul>/<ol> → markdown list lines. Nested child lists recurse with a
+ *  two-space indent; task items keep `- [ ] text @when`. A clone carries the
+ *  item's own text so the live DOM keeps its checkbox and child lists. */
+function listToMd(list: HTMLElement, depth = 0): string {
+  const pad = "  ".repeat(depth);
+  const ord = list.tagName === "OL";
+  return Array.from(list.children)
+    .filter((li) => li.tagName === "LI")
+    .map((li, i) => {
+      const l = li as HTMLElement;
+      const own = l.cloneNode(true) as HTMLElement;
+      own
+        .querySelectorAll(":scope > ul, :scope > ol, :scope > .todo-box")
+        .forEach((n) => n.remove());
+      let text = inlineToMd(own).replace(/^\s+/, "");
+      let head = "";
+      if (l.classList.contains("todo")) {
+        head = l.classList.contains("done") ? "[x] " : "[ ] ";
+        if (l.dataset.when) text += ` @${l.dataset.when}`;
+      }
+      let s = pad + (ord ? `${i + 1}. ` : "- ") + head + text;
+      for (const kid of Array.from(l.children))
+        if (/^(ul|ol)$/i.test(kid.tagName))
+          s += "\n" + listToMd(kid as HTMLElement, depth + 1);
+      return s;
+    })
+    .join("\n");
 }
 
 function inlineToMd(node: Node): string {
@@ -294,11 +358,24 @@ function inlineToMd(node: Node): string {
     else if (tag === "del" || tag === "s" || tag === "strike") out += `~~${inlineToMd(el)}~~`;
     else if (tag === "sub" || tag === "sup" || tag === "u")
       out += `<${tag}>${inlineToMd(el)}</${tag}>`;
-    else if (tag === "code") out += "`" + (el.textContent ?? "") + "`";
-    else if (tag === "a")
-      out += el.classList.contains("wikilink")
-        ? `[[${el.dataset.note ?? el.textContent ?? ""}]]`
-        : `[${el.textContent ?? ""}](${el.dataset.url ?? ""})`;
+    else if (tag === "code") {
+      // a code span whose text contains backticks needs a longer fence;
+      // edge-backtick content pads with a space the parser strips
+      const t = el.textContent ?? "";
+      const maxRun = Math.max(0, ...(t.match(/`+/g) ?? []).map((r) => r.length));
+      const f = "`".repeat(maxRun + 1);
+      out += /^`|`$/.test(t) ? `${f} ${t} ${f}` : `${f}${t}${f}`;
+    }
+    else if (tag === "a") {
+      if (el.classList.contains("wikilink")) {
+        const note = (el.dataset.note ?? "").replace(/[\[\]|]/g, "");
+        const label = (el.textContent ?? "").replace(/[\[\]]/g, "");
+        // keep the alias — [[note|display]] not just [[note]]
+        out += `[[${note}${label && label !== note ? `|${label}` : ""}]]`;
+      } else {
+        out += `[${el.textContent ?? ""}](${el.dataset.url ?? ""})`;
+      }
+    }
     // pasted/dropped images persist as `![alt](attachments/x.png)` — the
     // vault-relative path lives on data-asset, remote ones keep src
     else if (tag === "img") {

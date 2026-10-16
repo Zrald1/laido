@@ -404,8 +404,13 @@ export function wireTerminal(card: HTMLElement) {
         parts.push(`browser "${title}" (loading)`);
         continue;
       }
+      // a peek at the page text puts real context in the prompt — the
+      // agent can answer without burning a fence call just to look
+      const peek = api.read().trim().replace(/\s+/g, " ").slice(0, 180);
       parts.push(
-        `browser "${title}" at ${api.url() || "about:blank"} (${api.mode()}) — use a \`\`\`browser fence to navigate/read it`,
+        `browser "${title}" at ${api.url() || "about:blank"} (${api.mode()})` +
+          (peek ? ` — page text starts: "${peek}…"` : " (no page loaded yet)") +
+          ` — use a \`\`\`browser fence to navigate/read it`,
       );
     }
     // chart cards — `chart` fences draw them, bind them to sheet ranges
@@ -772,6 +777,18 @@ export function wireTerminal(card: HTMLElement) {
       return await browserApi(card)!.bookmark();
     }
 
+    // links <title> — the page's extracted links; the agent's navigation map
+    if (verb === "links") {
+      const card = findBrowser(rest);
+      if (!card) return `✕ no browser found named "${rest || "?"}"`;
+      const api = browserApi(card)!;
+      const links = api.links();
+      if (!links.length)
+        return `✕ no links on "${api.title()}" — load a page first`;
+      return `links on "${api.title()}" (${api.url()}):\n` +
+        links.slice(0, 40).map(([t, u]) => `${t} → ${u}`).join("\n");
+    }
+
     if (verb === "list") {
       const all = Array.from(document.querySelectorAll<HTMLElement>(".browser-card"));
       if (!all.length) return "no browser cards open";
@@ -779,7 +796,7 @@ export function wireTerminal(card: HTMLElement) {
         .map((c) => `"${c.dataset.topic}" — ${c.dataset.url || "about:blank"}`)
         .join("\n");
     }
-    return `✕ unknown browser verb "${verb}" — open/read/navigate/back/forward/list`;
+    return `✕ unknown browser verb "${verb}" — open/read/links/navigate/back/forward/clip/bookmark/list`;
   };
 
   /** locate a chart card by title — same fuzzy logic as findSheet */
@@ -1799,8 +1816,8 @@ export function wireTerminal(card: HTMLElement) {
           continue;
         }
         history.push({ role: "user", content: `browser tool result:\n${out}` });
-        // reads return page text — the model answers from it
-        if ((verb === "read" || verb === "get") && steps < MAX_STEPS)
+        // reads/links return page content — the model answers from it
+        if ((verb === "read" || verb === "get" || verb === "links") && steps < MAX_STEPS)
           finalText = await aiTurn("answer the request using this page text", true);
       }
       for (const body of r.chart) {
@@ -2108,5 +2125,4 @@ export function wireTerminal(card: HTMLElement) {
     } else if (LAIDO_RE.test(text)) void runLaido(text);
     else void aiTurn(text);
   });
-  input.focus();
 }

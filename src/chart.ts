@@ -13,6 +13,26 @@ import { sheetApi } from "./sheet.js";
 
 const S = (v: unknown): string => typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : "";
 const DS = (v: string | undefined): string => { const s = v ?? ""; return /^(?:undefined|null|NaN|-?Infinity|[object [^]]*])$/.test(s) ? "" : s; };
+const escH = (s: string) => S(s).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+/* markdown cell escaping — `\` first, then `|`, then newline; a label with a
+ * bare `|` would corrupt the `> label | v` row, a newline would split it */
+const escMd = (s: string) => S(s).replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\n/g, "\\n");
+/** escape-aware split on `|` that decodes `\|`, `\\`, `\n` per field */
+const splitRow = (s: string): string[] => {
+  const parts: string[] = [];
+  let cur = "", esc = false;
+  for (const ch of s) {
+    if (esc) {
+      cur += ch === "n" ? "\n" : ch === "|" ? "|" : ch === "\\" ? "\\" : "\\" + ch;
+      esc = false;
+    } else if (ch === "\\") esc = true;
+    else if (ch === "|") { parts.push(cur); cur = ""; }
+    else cur += ch;
+  }
+  if (esc) cur += "\\";
+  parts.push(cur);
+  return parts;
+};
 
 export const CHART_TYPES = [
   "bar", "barh", "line", "area", "pie", "doughnut", "scatter", "stacked",
@@ -60,7 +80,7 @@ export function parseChart(block: string[]): ChartModel {
     }
     // data row: `label | v1 | v2 …`
     if (t && t !== ">") {
-      const parts = t.split("|").map((s) => s.trim());
+      const parts = splitRow(t).map((s) => s.trim());
       m.labels.push(parts[0]);
       for (let i = 1; i < parts.length; i++) {
         while (m.series.length < parts.length - 1) m.series.push([]);
@@ -86,7 +106,10 @@ export function chartToMd(card: HTMLElement): string {
   try {
     const series = JSON.parse(serJson) as number[][];
     labels.forEach((lb, i) => {
-      lines.push(`> ${lb} | ${series.map((s) => s[i] ?? "").join(" | ")}`);
+      // a label that starts like a `type:`/`data:` kv line would hijack the
+      // kv branch on parse — park a ZWSP in front (invisible, survives trips)
+      const rowLb = /^(type|data|colors|labels):/i.test(escMd(lb)) ? `\u200b${escMd(lb)}` : escMd(lb);
+      lines.push(`> ${rowLb} | ${series.map((s) => s[i] ?? "").join(" | ")}`);
     });
   } catch { /* empty */ }
   return lines.join("\n");
@@ -346,7 +369,9 @@ export function fromSheetRange(source: string): Pick<ChartModel, "labels" | "ser
   const api = card ? sheetApi(card) : null;
   if (!api) return null;
   const read = api.read().split("\n").map((l) => l.split("\t"));
-  const cellAt = (r: number, c: number) => read[r]?.[c] ?? "";
+  // read() returns raws — a formula cell ("=A1*2") would chart as NaN → 0;
+  // the displayed value is what the user actually sees in the grid
+  const cellAt = (r: number, c: number) => api.display?.(r, c) ?? read[r]?.[c] ?? "";
   const colNum = (s: string) => {
     let n = 0;
     for (const ch of s.toUpperCase()) n = n * 26 + (ch.charCodeAt(0) - 64);
@@ -422,7 +447,7 @@ export function buildChartCard(title: string): HTMLElement {
   card.dataset.topic = title || "chart";
   card.dataset.ctype = "bar";
   card.innerHTML =
-    `<div class="callout-head"><span class="callout-title">${title || "chart"}</span></div>` +
+    `<div class="callout-head"><span class="callout-title">${escH(title || "chart")}</span></div>` +
     chartInnerHtml();
   return card;
 }
@@ -458,10 +483,17 @@ export function wireChart(card: HTMLElement) {
     srcEl.classList.toggle("live", !!m.source);
   };
 
-  // live binding: any sheet edit repaints
-  card.closest(".note-body, body")?.addEventListener("sheet:changed", () => {
+  // live binding: any sheet edit repaints — the listener removes itself once
+  // the card leaves the document, so deleted cards stop repainting
+  const liveHost = card.closest(".note-body, body");
+  const onSheetChanged = () => {
+    if (!card.isConnected) {
+      liveHost?.removeEventListener("sheet:changed", onSheetChanged);
+      return;
+    }
     if (card.dataset.csrc) paint();
-  });
+  };
+  liveHost?.addEventListener("sheet:changed", onSheetChanged);
 
   sel.addEventListener("change", () => {
     card.dataset.ctype = sel.value;

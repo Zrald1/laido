@@ -528,6 +528,30 @@ body.sticky-mode #note-body::after { content: none; }
   border-radius: 5px;
   font-size: .92em;
 }
+#note-body pre.md-code {
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin: 6px 0;
+  overflow-x: auto;
+}
+#note-body pre.md-code code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+  white-space: pre;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+#note-body pre.md-code[data-lang]::before {
+  content: attr(data-lang);
+  float: right;
+  font-size: 10px;
+  color: var(--fg-dim, #8a8178);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
 #note-body blockquote {
   border-left: 3px solid var(--line);
   margin: 0 0 26px;
@@ -609,10 +633,11 @@ body.sticky-mode #note-body::after { content: none; }
 .callout-head {
   flex: 0 0 auto;
   display: flex;
-  align-items: baseline;
-  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
   margin-bottom: 6px;
-  padding-right: 26px;
+  padding-right: 0;
   cursor: grab;
 }
 .callout-title {
@@ -1125,6 +1150,35 @@ body.reader-mode #reader {
 .callout:not(.sticky) .card-dup { right: 101px; }
 .callout:not(.sticky) .card-floatpin { right: 132px; }
 
+/* ---------- the card tool strip — chrome mounts inside the head as one
+   right-aligned row; order pins pair → content actions → delete last.
+   The hairline divider separates card chrome from widget controls. ---------- */
+.card-tools {
+  order: 60;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  padding-left: 7px;
+  border-left: 1px solid var(--line);
+  cursor: default;
+}
+.card-tools > .card-del,
+.card-tools > .card-pin,
+.card-tools > .card-floatpin,
+.card-tools > .card-dup,
+.card-tools > .card-tts,
+.card-tools > .card-stick {
+  position: static;
+}
+.card-tools > .card-pin { order: 1; }
+.card-tools > .card-floatpin { order: 2; }
+.card-tools > .card-dup { order: 3; }
+.card-tools > .card-tts { order: 4; }
+.card-tools > .card-stick { order: 5; }
+.card-tools > .card-del { order: 6; }
+
 /* ---------- recent menu polish ---------- */
 #recent-menu { max-height: min(60vh, 460px); overflow-y: auto; }
 /* these are flex-column children with max-height — flex-shrink would squash
@@ -1611,15 +1665,25 @@ body:not(.lib-open) #library { padding: 0; border-right: 0; }
   content: attr(data-ph); color: var(--dk-sub); opacity: .55; pointer-events: none;
 }
 .dslide [contenteditable]:focus { box-shadow: 0 0 0 1px var(--dk-ac); border-radius: 3px; }
-/* the in-head toolbar */
-.deck-bar { display: inline-flex; gap: 2px; margin-left: auto; position: relative; }
+/* the deck ribbon — its own row under the head; the head keeps the title
+   + card chrome. Groups of controls are separated by hairlines. */
+.deck-card .deck-bar {
+  flex: 0 0 auto; display: flex; align-items: center; flex-wrap: wrap;
+  gap: 1px; margin: 0 -4px 6px; padding: 3px 5px;
+  border: 1px solid var(--line); border-radius: 7px;
+  background: color-mix(in srgb, var(--bg-2) 55%, transparent);
+  position: relative;
+}
 .deck-btn {
-  padding: 1px 7px; border: none; border-radius: 6px; background: none;
-  color: var(--muted); font-size: 11px; cursor: pointer;
+  padding: 2px 7px; border: none; border-radius: 6px; background: none;
+  color: var(--muted); font-size: 11.5px; line-height: 1.5; cursor: pointer;
 }
 .deck-btn:hover { background: var(--bg-3); color: var(--accent); }
+.deck-btn:disabled { opacity: .35; cursor: default; }
+.deck-btn:disabled:hover { background: none; color: var(--muted); }
+.deck-sep { width: 1px; height: 14px; background: var(--line); margin: 0 4px; flex: 0 0 auto; }
 .deck-layoutpop {
-  position: absolute; right: 0; top: 100%; z-index: 40; min-width: 130px;
+  position: absolute; left: 0; top: calc(100% + 3px); z-index: 40; min-width: 130px;
   padding: 4px; background: var(--bg-2); border: 1px solid var(--line);
   border-radius: 9px; box-shadow: 0 8px 28px rgba(0,0,0,.35);
 }
@@ -1747,8 +1811,9 @@ li.todo.done .todo-box { color: var(--muted); }
 /* ---------- the browser card ---------- */
 .browser-card { min-width: 340px; }
 .browser-bar {
-  display: flex; align-items: center; gap: 2px; padding: 2px 4px;
-  border-top: 1px solid var(--line);
+  display: flex; align-items: center; gap: 2px; padding: 3px 5px;
+  margin: 0 -4px 6px; border: 1px solid var(--line); border-radius: 7px;
+  background: color-mix(in srgb, var(--bg-2) 55%, transparent);
 }
 .bb-b {
   border: none; background: none; color: var(--muted); cursor: pointer;
@@ -1774,10 +1839,17 @@ li.todo.done .todo-box { color: var(--muted); }
   color: var(--muted); font-size: 10px; margin-bottom: 6px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.br-links {
-  display: flex; flex-wrap: wrap; gap: 3px 10px; margin-bottom: 8px;
-  padding-bottom: 6px; border-bottom: 1px dashed var(--line);
+.br-linkbtn {
+  display: block; margin: 2px 0 6px; padding: 1px 0; border: none;
+  background: none; color: var(--muted); font-size: 10.5px; cursor: pointer;
 }
+.br-linkbtn:hover { color: var(--accent); }
+.br-links {
+  display: flex; flex-wrap: wrap; gap: 3px 10px;
+  margin-bottom: 8px; padding-bottom: 6px;
+  border-bottom: 1px dashed var(--line);
+}
+.br-links[hidden] { display: none; }
 .br-link {
   color: var(--accent); text-decoration: none; font-size: 11px; cursor: pointer;
 }
@@ -2072,7 +2144,7 @@ img.note-img.img-missing::after { content: "missing image"; }
 
 /* ---------- sheet board view (view: kanban <col>) ---------- */
 .sheet-view {
-  margin-left: auto; background: var(--bg-3); color: var(--fg);
+  background: var(--bg-3); color: var(--fg);
   border: 1px solid var(--line); border-radius: 6px;
   font-size: 10px; padding: 1px 4px; cursor: pointer;
 }
@@ -2271,7 +2343,7 @@ img.note-img.img-missing::after { content: "missing image"; }
 /* ---------- agenda card ---------- */
 .ag-body{display:flex;flex-direction:column;gap:4px;padding:4px 0}
 .ag-load,.ag-empty{opacity:.5;font-style:italic;padding:6px 4px}
-.ag-refresh{margin-left:auto;border:0;background:none;color:var(--dim);cursor:pointer;font-size:12px;padding:0 4px}
+.ag-refresh{border:0;background:none;color:var(--dim);cursor:pointer;font-size:12px;padding:0 4px}
 .ag-refresh:hover{color:var(--fg)}
 .ag-grp{display:flex;flex-direction:column;gap:2px}
 .ag-h{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);padding:4px 2px 0}

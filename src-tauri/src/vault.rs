@@ -480,7 +480,207 @@ pub fn vault_rename(old: String, next: String) -> Result<String, String> {
         return Err("a note with that name already exists".into());
     }
     fs::rename(&from, &to).map_err(|e| e.to_string())?;
+    // retarget inbound [[wikilinks]] vault-wide — without this, every
+    // [[old]] dies and clicking one resurrects a BLANK note under the old
+    // name while the real content lives at the new one
+    let _ = rename_links(&old, &base);
     Ok(base)
+}
+
+/// rewrite `[[old]]` → `[[new]]` in every note — the renamed file itself
+/// may carry self-links. Each write snapshots first, so a bad rewrite is
+/// `> history`-undoable per note. Returns how many notes changed.
+fn rename_links(old: &str, new: &str) -> u32 {
+    let dir = notes_dir();
+    let mut changed = 0u32;
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !is_note_file(&path) {
+                continue;
+            }
+            let Ok(md) = fs::read_to_string(&path) else { continue };
+            if let Some(next) = link_rename_md(&md, old, new) {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                maybe_snapshot(&dir, &name, &next);
+                if fs::write(&path, next).is_ok() {
+                    changed += 1;
+                }
+            }
+        }
+    }
+    changed
+}
+
+fn strip_note_ext(n: &str) -> &str {
+    n.strip_suffix(".laido")
+        .or_else(|| n.strip_suffix(".md"))
+        .unwrap_or(n)
+}
+
+fn is_note_target(t: &str) -> bool {
+    t.ends_with(".laido") || t.ends_with(".md")
+}
+
+/// pure transform behind rename_links — retargets `[[old]]`, `[[old#f]]`,
+/// `[[old|alias]]`, `![[old]]` (and combinations) to `new`. A target
+/// matches when it equals `old` verbatim, or carries no .laido/.md
+/// extension and equals old's stem — so `[[a.md]]` is never touched by a
+/// rename of `a.laido`. Escaped `\[[`, fenced code, and inline code spans
+/// stay literal.
+fn link_rename_md(md: &str, old: &str, new: &str) -> Option<String> {
+    let old_stem = strip_note_ext(old);
+    let new_stem = strip_note_ext(new);
+    let mut hit = false;
+    let mut fence = 0usize; // backtick run of the open fence; 0 = outside
+    let mut out = String::with_capacity(md.len());
+    for line in md.split_inclusive('\n') {
+        let (body, nl) = match line.strip_suffix('\n') {
+            Some(b) => (b, "\n"),
+            None => (line, ""),
+        };
+        let t = body.trim_start();
+        if t.starts_with("```") {
+            let run = t.chars().take_while(|c| *c == '`').count();
+            if fence == 0 {
+                fence = run;
+            } else if run >= fence {
+                fence = 0;
+            }
+            out.push_str(body);
+            out.push_str(nl);
+            continue;
+        }
+        if fence != 0 {
+            out.push_str(body);
+            out.push_str(nl);
+            continue;
+        }
+        out.push_str(&link_rename_line(body, old, old_stem, new, new_stem, &mut hit));
+        out.push_str(nl);
+    }
+    if hit {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+fn link_rename_line(
+    line: &str,
+    old: &str,
+    old_stem: &str,
+    new: &str,
+    new_stem: &str,
+    hit: &mut bool,
+) -> String {
+    let b = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0usize;
+    while i < b.len() {
+        // inline code span — a run of n backticks skips to the next
+        // equal-length run (unterminated swallows the rest of the line)
+        if b[i] == b'`' {
+            let mut j = i;
+            while j < b.len() && b[j] == b'`' {
+                j += 1;
+            }
+            let run = j - i;
+            let mut end = b.len();
+            let mut k = j;
+            while k < b.len() {
+                if b[k] == b'`' {
+                    let mut m = k;
+                    while m < b.len() && b[m] == b'`' {
+                        m += 1;
+                    }
+                    if m - k == run {
+                        end = m;
+                        break;
+                    }
+                    k = m;
+                } else {
+                    k += 1;
+                }
+            }
+            out.push_str(&line[i..end]);
+            i = end;
+            continue;
+        }
+        // an escaped char is literal — copy both bytes (ASCII backslash,
+        // next char may be multibyte but pushing its first byte's slice is
+        // unsafe — walk one char instead)
+        if b[i] == b'\\' {
+            out.push('\\');
+            i += 1;
+            if let Some(c) = line[i..].chars().next() {
+                out.push(c);
+                i += c.len_utf8();
+            }
+            continue;
+        }
+        // wikilink / embed opener — `[[` or `![[`
+        let embed = b[i] == b'!' && line[i + 1..].starts_with("[[");
+        let plain = b[i] == b'[' && line[i..].starts_with("[[");
+        if embed || plain {
+            let open = if embed { i + 3 } else { i + 2 };
+            if let Some(close) = line[open..].find("]]") {
+                let inner = &line[open..open + close];
+                match retarget_wikilink(inner, old, old_stem, new, new_stem) {
+                    Some(next_inner) => {
+                        *hit = true;
+                        if embed {
+                            out.push('!');
+                        }
+                        out.push_str("[[");
+                        out.push_str(&next_inner);
+                        out.push_str("]]");
+                        i = open + close + 2;
+                        continue;
+                    }
+                    None => {}
+                }
+            }
+        }
+        // default: copy one char (UTF-8 safe)
+        let c = line[i..].chars().next().unwrap();
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
+}
+
+/// the inside of `[[…]]` — `target#frag|alias`. Some(next) when the target
+/// names `old`; fragments and aliases ride across untouched.
+fn retarget_wikilink(
+    inner: &str,
+    old: &str,
+    old_stem: &str,
+    new: &str,
+    new_stem: &str,
+) -> Option<String> {
+    let (head, alias) = match inner.split_once('|') {
+        Some((h, a)) => (h, Some(a)),
+        None => (inner, None),
+    };
+    let (target, frag) = match head.split_once('#') {
+        Some((t, f)) => (t, Some(f)),
+        None => (head, None),
+    };
+    let matched = target == old || (!is_note_target(target) && target == old_stem);
+    if !matched {
+        return None;
+    }
+    let mut s = String::from(if is_note_target(target) { new } else { new_stem });
+    if let Some(f) = frag {
+        s.push('#');
+        s.push_str(f);
+    }
+    if let Some(a) = alias {
+        s.push('|');
+        s.push_str(a);
+    }
+    Some(s)
 }
 
 #[derive(Serialize)]
@@ -1455,6 +1655,35 @@ mod tests {
         assert!(prop_rename_md("status: body-only\n", "status", "state").is_none());
         // unterminated block → None
         assert!(prop_rename_md("---\nstatus: x\nno close\n", "status", "state").is_none());
+    }
+
+    /// link_rename_md — every inbound form retargets; escapes, code, other
+    /// stems, and explicit other-extension targets stay byte-identical
+    #[test]
+    fn link_rename_transform() {
+        let out = link_rename_md("see [[a]] and [[a|the label]]", "a.laido", "b.laido").unwrap();
+        assert_eq!(out, "see [[b]] and [[b|the label]]");
+        // fragments + embeds ride across
+        let out2 = link_rename_md("[[a#Sec]] ![[a]] ![[a#^blk]]", "a.laido", "b.laido").unwrap();
+        assert_eq!(out2, "[[b#Sec]] ![[b]] ![[b#^blk]]");
+        // an explicit-extension link retargets keeping the ext
+        let out3 = link_rename_md("[[a.laido]]", "a.laido", "b.laido").unwrap();
+        assert_eq!(out3, "[[b.laido]]");
+        // a.md is a DIFFERENT note — renaming a.laido must not touch it
+        assert!(link_rename_md("[[a.md]]", "a.laido", "b.laido").is_none());
+        // a different stem doesn't collide — [[ab]] survives renaming a
+        assert!(link_rename_md("[[ab]] [[a-b]]", "a.laido", "b.laido").is_none());
+        // escaped \[[a]] is literal text, not a link
+        assert!(link_rename_md("\\[[a]]", "a.laido", "b.laido").is_none());
+        // fenced code stays literal
+        let fenced = "```\n[[a]]\n```\n[[a]]\n";
+        let out4 = link_rename_md(fenced, "a.laido", "b.laido").unwrap();
+        assert_eq!(out4, "```\n[[a]]\n```\n[[b]]\n");
+        // inline code span stays literal too
+        let out5 = link_rename_md("`[[a]]` and [[a]]", "a.laido", "b.laido").unwrap();
+        assert_eq!(out5, "`[[a]]` and [[b]]");
+        // no match → None (no write, no snapshot)
+        assert!(link_rename_md("no links here", "a.laido", "b.laido").is_none());
     }
 
     #[test]

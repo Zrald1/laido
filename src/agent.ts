@@ -692,7 +692,8 @@ export async function initAgent() {
     }
   });
   await listen<{ name: string }>("open-note", async (e) => {
-    await openTab(e.payload.name);
+    const name = e.payload?.name;
+    if (typeof name === "string" && name) await openTab(name);
   });
   if (loadNotices().length > 0) {
     void ensureNoticeWindow();

@@ -54,13 +54,16 @@ let tabs: string[] = [];
 let active = "";
 
 function persist() {
-  localStorage.setItem(KEY, JSON.stringify({ tabs, active }));
+  // never serialize a bad entry — one malformed name would poison every
+  // future render() for the session (name.replace on undefined)
+  localStorage.setItem(KEY, JSON.stringify({ tabs: tabs.filter((n) => typeof n === "string" && n), active }));
 }
 
 function render() {
   const el = $("#tabs");
   el.innerHTML = "";
   for (const name of tabs) {
+    if (typeof name !== "string" || !name) continue;
     const t = document.createElement("button");
     t.className = "tab" + (name === active ? " active" : "");
     const label = document.createElement("span");
@@ -98,7 +101,7 @@ function render() {
 }
 
 async function select(name: string) {
-  if (name === active) return;
+  if (typeof name !== "string" || !name || name === active) return;
   await save();
   active = name;
   pushRecent(name);
@@ -112,6 +115,7 @@ async function select(name: string) {
 }
 
 async function close(name: string) {
+  if (typeof name !== "string" || !name) return;
   await save();
   const i = tabs.indexOf(name);
   if (i >= 0) tabs.splice(i, 1);
@@ -132,6 +136,7 @@ async function close(name: string) {
 }
 
 export async function openTab(name: string) {
+  if (typeof name !== "string" || !name) return;
   if (!tabs.includes(name)) tabs.push(name);
   if (name !== active) await select(name);
   else {
@@ -160,7 +165,7 @@ function repairNames(names: string[], all: string[]): string[] {
 // importing the editor graph (agenda cards, link lists, …)
 document.addEventListener("nav:open", (e) => {
   const name = (e as CustomEvent<string>).detail;
-  if (name) void openTab(name);
+  if (typeof name === "string" && name) void openTab(name);
 });
 
 export async function initTabs() {
@@ -297,12 +302,13 @@ async function popOutTab(name: string, e: PointerEvent) {
 const RECENT_KEY = "laido.recent";
 
 function pushRecent(name: string) {
+  if (typeof name !== "string" || !name) return;
   try {
     const list = (JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]") as string[]).filter(
       (n) => n !== name,
     );
     list.unshift(name);
-    localStorage.setItem(RECENT_KEY, JSON.stringify(list.slice(0, 12)));
+    localStorage.setItem(RECENT_KEY, JSON.stringify(list.filter((n) => typeof n === "string" && n).slice(0, 12)));
   } catch {
     /* ignore */
   }

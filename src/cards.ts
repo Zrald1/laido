@@ -41,6 +41,26 @@ export function h8(s: string): string {
 const escHtml = (s: string) =>
   S(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
+/* row text → file: `\n` becomes `\\n` (a literal newline would split the
+ * `front :: back` row), a leading `[!` gets a zero-width guard so it can't
+ * terminate the callout block on reload */
+const escRow = (s: string) =>
+  S(s).replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/^([ \t]*)\[!/, "$1​[!");
+
+/** file text → row value — reverses escRow (the ZWSP just rides along) */
+const unescRow = (s: string) => {
+  let o = "";
+  let e = false;
+  for (const ch of S(s)) {
+    if (e) {
+      o += ch === "n" ? "\n" : ch === "\\" ? "\\" : "\\" + ch;
+      e = false;
+    } else if (ch === "\\") e = true;
+    else o += ch;
+  }
+  return e ? o + "\\" : o;
+};
+
 const todayIso = (): string => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -117,7 +137,7 @@ export function parseCards(block: string[]): CardDeck {
     }
     const i = l.indexOf("::");
     if (i >= 0) {
-      cards.push({ front: l.slice(0, i).trim(), back: l.slice(i + 2).trim() });
+      cards.push({ front: unescRow(l.slice(0, i).trim()), back: unescRow(l.slice(i + 2).trim()) });
     }
   }
   return { title, cards, sched };
@@ -131,7 +151,7 @@ export function cardsToMd(card: HTMLElement): string {
   card.querySelectorAll<HTMLElement>(".fc-row").forEach((r) => {
     const f = r.querySelector<HTMLElement>(".fc-front")?.textContent ?? "";
     const b = r.dataset.back ?? "";
-    lines.push(`> ${f} :: ${b}`);
+    lines.push(`> ${escRow(f)} :: ${escRow(b)}`);
     seen.add(r.dataset.h ?? "");
   });
   // only persist sched state whose card still exists

@@ -1270,8 +1270,15 @@ export function wireBase(card: HTMLElement) {
       document.addEventListener("mousedown", () => menu.remove(), { once: true }), 0);
   });
 
-  // live view — any save/index refresh repaints this base
-  const onIndex = () => void load();
+  // live view — any save/index refresh repaints this base; the listener
+  // removes itself once the card is gone so deleted bases stop reloading
+  const onIndex = () => {
+    if (!card.isConnected) {
+      document.removeEventListener("index:changed", onIndex);
+      return;
+    }
+    void load();
+  };
   document.addEventListener("index:changed", onIndex);
   void load();
 }

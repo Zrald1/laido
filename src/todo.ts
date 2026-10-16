@@ -39,25 +39,36 @@ export function parseWhen(raw: string): string {
     if (d === 0) d = 7;
     return isoOf(new Date(today.getTime() + d * 86400000));
   }
+  const realDate = (y: number, m0: number, d: number) => {
+    // reject impossible dates — `new Date` happily rolls 2-30 over to Mar 2,
+    // and a verbatim "2026-13-45" would sort/display as garbage
+    if (m0 < 1 || m0 > 12 || d < 1 || d > 31) return "";
+    const dt = new Date(y, m0 - 1, d);
+    return dt.getFullYear() === y && dt.getMonth() === m0 - 1 && dt.getDate() === d
+      ? `${y}-${pad2(m0)}-${pad2(d)}`
+      : "";
+  };
   m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
-  if (m) return `${m[1]}-${pad2(+m[2])}-${pad2(+m[3])}`;
+  if (m) return realDate(+m[1], +m[2], +m[3]);
   m = t.match(/^(\d{1,2})-(\d{1,2})$/);
   if (m) {
     // this year; if it already passed, next year
-    let y = now.getFullYear();
-    let d = new Date(y, +m[1] - 1, +m[2]);
-    if (d.getTime() < today.getTime()) d = new Date(y + 1, +m[1] - 1, +m[2]);
-    return isoOf(d);
+    let iso = realDate(now.getFullYear(), +m[1], +m[2]);
+    if (!iso) return "";
+    if (new Date(iso + "T00:00:00").getTime() < today.getTime())
+      iso = realDate(now.getFullYear() + 1, +m[1], +m[2]);
+    return iso;
   }
   m = t.match(/^([a-z]{3,9})\s*(\d{1,2})$/); // "jan 5", "march 12"
   if (m) {
     const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
     const mi = MONTHS.findIndex((x) => m![1].startsWith(x));
     if (mi >= 0) {
-      let y = now.getFullYear();
-      let d = new Date(y, mi, +m[2]);
-      if (d.getTime() < today.getTime()) d = new Date(y + 1, mi, +m[2]);
-      return isoOf(d);
+      let iso = realDate(now.getFullYear(), mi + 1, +m[2]);
+      if (!iso) return "";
+      if (new Date(iso + "T00:00:00").getTime() < today.getTime())
+        iso = realDate(now.getFullYear() + 1, mi + 1, +m[2]);
+      return iso;
     }
   }
   return "";
@@ -98,8 +109,20 @@ export function parseTodoLine(line: string): TodoItem | null {
   return it;
 }
 
-const escCell = (s: string) => S(s).replace(/\|/g, "\\|");
-const unesc = (s: string) => S(s).replace(/\\\|/g, "|");
+const escCell = (s: string) =>
+  S(s).replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\n/g, "\\n");
+const unesc = (s: string) => {
+  let o = "";
+  let e = false;
+  for (const ch of S(s)) {
+    if (e) {
+      o += ch === "n" ? "\n" : ch === "|" || ch === "\\" ? ch : "\\" + ch;
+      e = false;
+    } else if (ch === "\\") e = true;
+    else o += ch;
+  }
+  return e ? o + "\\" : o;
+};
 
 /** callout body lines (post-`>` strip) → items */
 export function parseTodo(block: string[]): { title: string; items: TodoItem[] } {
@@ -167,7 +190,7 @@ export function buildTodoCard(title: string): HTMLElement {
   card.dataset.kind = "todo";
   card.dataset.topic = title || "todo";
   card.innerHTML =
-    `<div class="callout-head"><span class="callout-title">${title || "todo"}</span></div>` +
+    `<div class="callout-head"><span class="callout-title">${escHtml(title || "todo")}</span></div>` +
     todoInnerHtml({ title, items: [] });
   return card;
 }

@@ -104,7 +104,14 @@ function inline(s: string): string {
     return `\u0000${links.length - 1}\u0000`;
   });
   h = esc(h);
-  h = h.replace(/`([^`]+)`/g, "<code>$1</code>");
+  // code spans — CommonMark fence-of-n rule: `` ``a`b`` `` wraps content
+  // containing backticks; padding spaces around the content are stripped
+  // when they're required to disambiguate an edge backtick
+  h = h.replace(/(`+)([\s\S]+?)\1/g, (_m, _f: string, t: string) => {
+    if (t.length > 1 && t.startsWith(" ") && t.endsWith(" ") && t.trim() !== "")
+      t = t.slice(1, -1);
+    return `<code>${t}</code>`;
+  });
   h = h.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   h = h.replace(/\*([^*]+)\*/g, "<em>$1</em>");
   h = h.replace(
@@ -249,8 +256,8 @@ function termCallout(block: string[]): string {
     .slice(1)
     .filter((l) => l.trim() !== "")
     .map((l) => {
-      const t = l.startsWith("›") ? "ask" : l.startsWith("!") ? "cmd" : l.startsWith("✕") ? "err" : "out";
-      const raw = t === "ask" || t === "cmd" || t === "err" ? l.slice(2).trimStart() : l;
+      const t = l.startsWith("›") ? "ask" : l.startsWith("!") ? "cmd" : l.startsWith("✕") ? "err" : l.startsWith("≡") ? "ai" : l.startsWith("◆") ? "laido" : "out";
+      const raw = t !== "out" ? l.slice(2).trimStart() : l;
       return `<div class="term-line ${t}" data-t="${t}" data-raw="${attr(raw)}">${esc(raw)}</div>`;
     });
   const raw = "> " + block.join("\n> ");
@@ -483,7 +490,6 @@ export function renderMarkdown(src: string, depth = 0): string {
       }
     }
   }
-  let listTag: "ul" | "ol" | null = null;
   let para: string[] = [];
 
   const flushPara = () => {
@@ -492,20 +498,115 @@ export function renderMarkdown(src: string, depth = 0): string {
       para = [];
     }
   };
-  const flushList = () => {
-    if (listTag) {
-      out.push(`</${listTag}>`);
-      listTag = null;
-    }
+  const flushAll = flushPara;
+
+  /** a list item's inner html — "- [ ] text @when" carries a clickable box
+   *  and a due chip; plain items are inline content */
+  const itemInner = (body: string, ord: boolean) => {
+    const tm = ord ? null : body.match(/^\[([ xX])\]\s+(.*)$/);
+    if (!tm) return { html: inline(body), cls: "", when: "" };
+    const done = tm[1] !== " ";
+    let rest = tm[2];
+    const wm = rest.match(/@(\S+)\s*$/);
+    const when = wm ? ` data-when="${attr(wm[1])}"` : "";
+    if (wm) rest = rest.slice(0, wm.index).trim();
+    return {
+      html:
+        `<span class="todo-box" contenteditable="false">${done ? "☑" : "☐"}</span> ` +
+        inline(rest),
+      cls: ` class="todo${done ? " done" : ""}"`,
+      when,
+    };
   };
-  const flushAll = () => {
-    flushPara();
-    flushList();
+  /** leveled rows → nested <ul>/<ol>. A stack builds the tree so any
+   *  indentation pattern works — a row dedenting below the current depth
+   *  pops back to the right ancestor instead of being dropped */
+  const listHtml = (rows: { lvl: number; ord: boolean; body: string }[]): string => {
+    type Row = { ord: boolean; body: string; lvl: number; kids: Row[] };
+    const roots: Row[] = [];
+    const stack: Row[] = [];
+    for (const r of rows) {
+      const row: Row = { ord: r.ord, body: r.body, lvl: r.lvl, kids: [] };
+      while (stack.length && stack[stack.length - 1].lvl >= row.lvl) stack.pop();
+      if (stack.length) stack[stack.length - 1].kids.push(row);
+      else roots.push(row);
+      stack.push(row);
+    }
+    const emit = (nodes: Row[]): string => {
+      let html = "";
+      let i = 0;
+      while (i < nodes.length) {
+        const ord = nodes[i].ord;
+        html += ord ? "<ol>" : "<ul>";
+        while (i < nodes.length && nodes[i].ord === ord) {
+          const n = nodes[i];
+          const it = itemInner(n.body, n.ord);
+          html +=
+            `<li${it.cls}${it.when}>${it.html}` +
+            (n.kids.length ? emit(n.kids) : "") +
+            `</li>`;
+          i++;
+        }
+        html += ord ? "</ol>" : "</ul>";
+      }
+      return html;
+    };
+    return emit(roots);
   };
 
+  /** a leading `\` before a structural marker makes the line literal text —
+   *  `\> [!x]` renders as "> [!x]", not a callout. serialize writes the
+   *  escape; render eats the backslash so the user never sees it. */
+  const wouldBlock = (u: string) =>
+    u.startsWith(">") ||
+    /^#{1,3}\s/.test(u) ||
+    /^[-*]\s/.test(u) ||
+    /^\d+[.)]\s/.test(u) ||
+    /^(-{3,}|\*{3,})$/.test(u) ||
+    /^!\[\[.*\]\]$/.test(u) ||
+    /^`{3,}/.test(u) ||
+    u.startsWith("\\");
+
+  // fenced code is opaque — callouts, headings and markers inside a ``` block
+  // are literal text, never structure. The opener may carry a language
+  // (```js); the closer needs at least as many backticks as the opener so
+  // code containing ``` still round-trips inside a ```` fence.
+  let fenceLen = 0;
+  let fenceLang = "";
+  let fenceBuf: string[] = [];
+  const closeFence = () => {
+    out.push(
+      `<pre class="md-code"${fenceLang ? ` data-lang="${attr(fenceLang)}"` : ""}><code>` +
+        esc(fenceBuf.join("\n")) +
+        `</code></pre>`,
+    );
+    fenceLen = 0;
+    fenceBuf = [];
+    fenceLang = "";
+  };
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const t = line.trim();
+
+    if (fenceLen) {
+      const close = t.match(/^(`{3,})\s*$/);
+      if (close && close[1].length >= fenceLen) closeFence();
+      else fenceBuf.push(line);
+      continue;
+    }
+    const open = t.match(/^(`{3,})(.*)$/);
+    if (open) {
+      flushAll();
+      fenceLen = open[1].length;
+      fenceLang = open[2].trim();
+      fenceBuf = [];
+      continue;
+    }
+
+    if (t.startsWith("\\") && wouldBlock(t.slice(1))) {
+      para.push(line.replace(/\\/, ""));
+      continue;
+    }
 
     if (t.startsWith("> [!")) {
       flushAll();
@@ -557,7 +658,16 @@ export function renderMarkdown(src: string, depth = 0): string {
     }
     if (t.startsWith(">")) {
       flushAll();
-      out.push(`<blockquote>${inline(t.replace(/^>\s?/, ""))}</blockquote>`);
+      // consecutive > lines join one blockquote — a callout head ends the run
+      const parts: string[] = [];
+      while (i < lines.length && lines[i].trim().startsWith(">")) {
+        const c = lines[i].trim().replace(/^>\s?/, "");
+        if (c.startsWith("[!")) break;
+        parts.push(inline(c));
+        i++;
+      }
+      i--;
+      out.push(`<blockquote>${parts.join("<br>")}</blockquote>`);
       continue;
     }
     if (t.startsWith("\\[")) {
@@ -619,37 +729,34 @@ export function renderMarkdown(src: string, depth = 0): string {
     const ol = t.match(/^\d+[.)]\s+(.*)$/);
     if (ul || ol) {
       flushPara();
-      const want: "ul" | "ol" = ul ? "ul" : "ol";
-      if (listTag !== want) {
-        flushList();
-        out.push(`<${want}>`);
-        listTag = want;
+      // collect the whole contiguous list block — indentation decides the
+      // nesting level, so `  - child` becomes a real nested <ul> inside its
+      // parent <li> instead of flattening into a sibling
+      const raws: { ind: number; ord: boolean; body: string }[] = [];
+      while (i < lines.length) {
+        const m = lines[i].match(/^(\s*)([-*]|\d+[.)])\s+(.*)$/);
+        if (!m) break;
+        raws.push({
+          ind: m[1].replace(/\t/g, "  ").length,
+          ord: /^\d/.test(m[2]),
+          body: m[3],
+        });
+        i++;
       }
-      // "- [ ] text" / "- [x] text" — a task line with a clickable box;
-      // a trailing @today/@2026-02-10 rides along as the due chip
-      const tm = ul ? ul[1].match(/^\[([ xX])\]\s+(.*)$/) : null;
-      if (tm) {
-        const done = tm[1] !== " ";
-        let rest = tm[2];
-        const wm = rest.match(/@(\S+)\s*$/);
-        const when = wm ? ` data-when="${esc(wm[1])}"` : "";
-        if (wm) rest = rest.slice(0, wm.index).trim();
-        out.push(
-          `<li class="todo${done ? " done" : ""}"${when}>` +
-            `<span class="todo-box" contenteditable="false">${done ? "☑" : "☐"}</span> ${inline(rest)}</li>`,
-        );
-      } else {
-        out.push(`<li>${inline((ul ?? ol)![1])}</li>`);
-      }
+      i--;
+      // normalize arbitrary indents (2sp/4sp/tab) to nesting levels
+      const lvls = [...new Set(raws.map((r) => r.ind))].sort((a, b) => a - b);
+      const rows = raws.map((r) => ({ lvl: lvls.indexOf(r.ind), ...r }));
+      out.push(listHtml(rows));
       continue;
     }
     if (t === "") {
       flushAll();
       continue;
     }
-    flushList();
     para.push(line);
   }
+  if (fenceLen) closeFence(); // unclosed fence still renders its lines as code
   flushAll();
   return out.join("\n");
 }
