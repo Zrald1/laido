@@ -131,7 +131,7 @@ export function browserInnerHtml(): string {
     `<div class="bc-head"><span class="bc-t">✦ ask AI</span>` +
     `<button class="bc-x" title="hide the panel">×</button></div>` +
     `<div class="bc-log"></div>` +
-    `<div class="bc-bar"><input class="bc-in" maxlength="280" spellcheck="false" ` +
+    `<div class="bc-bar"><input class="bc-in" maxlength="1200" spellcheck="false" ` +
     `placeholder="ask about this page — 'summarize it', 'grab prices', 'make a tool'…"></div>` +
     `</div>` +
     `</div>` +
@@ -897,22 +897,59 @@ export function wireBrowser(card: HTMLElement) {
   if (card.dataset.chatopen === "0") setChatOpen(false);
   else setChatOpen(true);
 
+  /* a compact live digest of the page as the user sees it — read through
+   * the real DOM so post-js content (ai overviews, rendered tables) is
+   * what the model gets. Falls back to the fetch lane when the engine
+   * isn't up. Lets "summarize this" answer in one call, no fence. */
+  const digestPage = async (): Promise<string> => {
+    try {
+      const s = await invoke<string>("pv_eval", {
+        id: bvId,
+        js:
+          `(() => { const pick=(x)=>[...document.querySelectorAll(x)]` +
+          `.map(e=>e.textContent.trim()).filter(Boolean).slice(0,10);` +
+          `const m=document.querySelector('main,[role=main],article')||document.body;` +
+          `return {t:document.title,u:location.href,` +
+          `d:document.querySelector('meta[name=description]')?.content||'',` +
+          `h:pick('h1,h2'),text:(m.innerText||'').replace(/\\s+/g,' ').slice(0,2200)}; })()`,
+      });
+      const d = JSON.parse(s) as { t?: string; u?: string; d?: string; h?: string[]; text?: string };
+      return (
+        `LIVE PAGE RIGHT NOW — title "${d.t ?? ""}", url ${d.u ?? ""}` +
+        `${d.d ? `, desc "${d.d}"` : ""}.` +
+        `${d.h?.length ? ` headings: ${d.h.join(" | ")}.` : ""}` +
+        `${d.text ? ` text: ${d.text}` : ""}`
+      );
+    } catch {
+      const t = lastPage?.text?.slice(0, 1800);
+      return t ? `page text (fetch lane): ${t}` : "";
+    }
+  };
   const askBrowser = async (q: string) => {
     if (!chatIn) return;
     chatIn.disabled = true;
     const pend = chatAdd("wait", "…");
     const title = card.dataset.topic ?? "browser";
+    const digest = await digestPage();
     const others =
       `browser "${title}" on ${cur().url || "(blank tab)"} — a REAL webview2 ` +
       `page (js ran, post-render dom). Tabs: ` +
       `${tabs.map((t) => t.url || "blank").join(", ") || "one"}. ` +
       `Saved tools: ${tools.map((t) => t.name).join(", ") || "none"}.\n` +
-      `The user asks about THIS card — aim every \`\`\`browser fence at ` +
-      `"${title}". Verbs: read/extract/tables/click/eval/navigate/back/forward/` +
-      `tabs/newtab/tab/clip/bookmark/search/open. Save a reusable page tool ` +
-      `with \`tool ${title} {"name":"x","js":"…"}\` (js runs in the page, ` +
-      `result comes back JSON) then \`runtool ${title} x\`; tooldel removes. ` +
-      `Other widgets use their own \`\`\` fences with a \`new <title>\` verb.`;
+      `${digest}\n` +
+      `The user asks about THIS card. Answer page questions from the live ` +
+      `digest above — no fence needed for "summarize/what does it say". ` +
+      `Emit a \`\`\`browser fence aimed at "${title}" only when you need data ` +
+      `the digest lacks, or to ACT (navigate/click/tab/tool/clip/grab). ` +
+      `Answering an action request with prose alone does NOTHING — no fence, ` +
+      `no action. ` +
+      `Verbs: read/extract/tables/click/eval/navigate/back/forward/` +
+      `tabs/newtab/tab/clip/bookmark/search/open. Multi-step asks chain in ` +
+      `one reply: \`tab ${title} 2\` then \`extract ${title}\`. Save a ` +
+      `reusable page tool with \`tool ${title} {"name":"x","js":"…"}\` ` +
+      `(js runs in the page, JSON back) then \`runtool ${title} x\`; ` +
+      `tooldel removes. Other widgets use their own \`\`\` fences with a ` +
+      `\`new <title>\` verb. Keep answers short — this is a side panel.`;
     interface BrowserAi {
       text: string; sheet: string[]; slides: string[]; todo: string[];
       chart: string[]; cards: string[]; maps: string[]; base: string[];
@@ -920,6 +957,37 @@ export function wireBrowser(card: HTMLElement) {
     }
     try {
       const { runWidgetFence } = await import("./term.js");
+      const kinds: [keyof BrowserAi, string][] = [
+        ["browser", "browser"], ["sheet", "sheet"], ["slides", "slides"],
+        ["todo", "todo"], ["chart", "chart"], ["cards", "cards"],
+        ["maps", "map"], ["base", "base"],
+      ];
+      /* run every fence a reply carries; outs collect for the narration
+       * pass, nav-class verbs wait for the page to settle first */
+      const dispatch = async (r: BrowserAi): Promise<{ outs: string[]; readBack: boolean }> => {
+        const outs: string[] = [];
+        let readBack = false;
+        for (const [field, kind] of kinds) {
+          for (const body of (r[field] as string[]) ?? []) {
+            const out = await runWidgetFence(kind, body);
+            const head = body.trim().split("\n")[0];
+            outs.push(`${kind}: ${head} → ${out}`);
+            chatAdd("out", out);
+            const v = (head.split(/\s+/)[0] ?? "").toLowerCase();
+            if (kind === "browser" && /^(read|get|extract|data|digest|tables|table|eval|js|runtool|click|links|tabs|list)$/.test(v))
+              readBack = true;
+            if (kind === "browser" && /^(open|new|navigate|go|goto|back|forward|fwd|tab|newtab|closetab|click)$/.test(v)) {
+              const t0 = Date.now();
+              while (loading && Date.now() - t0 < 9000)
+                await new Promise((r) => setTimeout(r, 150));
+            }
+            void window.__TAURI__?.event?.emit("agent:activity", {
+              text: `browser ✦ ${title}: ${kind} ${head.slice(0, 60)}`,
+            });
+          }
+        }
+        return { outs, readBack };
+      };
       const r = await invoke<BrowserAi>("term_ai", {
         prompt: q, history: chatHist.slice(-8), others,
         model: null, persona: null,
@@ -927,32 +995,33 @@ export function wireBrowser(card: HTMLElement) {
       chatHist.push({ role: "user", content: q });
       if (r.text.trim()) chatHist.push({ role: "assistant", content: r.text });
       pend?.remove();
-      let readBack = false;
-      const outs: string[] = [];
-      const kinds: [keyof BrowserAi, string][] = [
-        ["browser", "browser"], ["sheet", "sheet"], ["slides", "slides"],
-        ["todo", "todo"], ["chart", "chart"], ["cards", "cards"],
-        ["maps", "map"], ["base", "base"],
-      ];
-      for (const [field, kind] of kinds) {
-        for (const body of (r[field] as string[]) ?? []) {
-          const out = await runWidgetFence(kind, body);
-          const head = body.trim().split("\n")[0];
-          outs.push(`${kind}: ${head} → ${out}`);
-          chatAdd("out", out);
-          const v = (head.split(/\s+/)[0] ?? "").toLowerCase();
-          if (kind === "browser" && /^(read|get|extract|data|digest|tables|table|eval|js|runtool|click|links|tabs|list)$/.test(v))
-            readBack = true;
-          void window.__TAURI__?.event?.emit("agent:activity", {
-            text: `browser ✦ ${title}: ${kind} ${head.slice(0, 60)}`,
-          });
+      const first = await dispatch(r);
+      const outs = [...first.outs];
+      let readBack = first.readBack;
+      /* the task asked for an action (open/switch/run/…) but the model
+       * replied with prose and no fence — narrating does nothing, so push
+       * back once and make it emit the fence. One pass, no loops. */
+      let tail = r.text.trim();
+      if (!outs.length && /\b(open|new tab|switch|navigate|go to|visit|load|browse|click|grab|delete|close|runtool|create|make)\b/i.test(q)) {
+        const rc = await invoke<BrowserAi>("term_ai", {
+          prompt: `you described doing something but emitted no fence — narrating does nothing. emit the needed \`\`\`browser fence(s) now (or say plainly why not): ${q}`,
+          history: chatHist.slice(-8), others, model: null, persona: null,
+        });
+        const more = await dispatch(rc);
+        outs.push(...more.outs);
+        readBack = readBack || more.readBack;
+        if (rc.text.trim()) {
+          chatHist.push({ role: "assistant", content: rc.text });
+          tail = rc.text.trim();
         }
       }
-      if (readBack && outs.length) {
+      const hadErr = outs.some((o) => o.includes("→ ✕"));
+      if ((readBack || hadErr) && outs.length) {
         // "what does the page say about X?" — feed the result back for a
-        // spoken answer, not raw tool output
+        // spoken answer, not raw tool output; a ✕ step gets explained or
+        // retried instead of the model claiming a switch that never ran
         const r2 = await invoke<BrowserAi>("term_ai", {
-          prompt: `browser tool results:\n${outs.join("\n")}\nanswer the original request: ${q}`,
+          prompt: `browser tool results:\n${outs.join("\n")}\n${hadErr ? "a step failed (✕) — say so briefly and what to fix, don't claim it worked. " : ""}answer the original request: ${q}`,
           history: chatHist.slice(-8), others: "", model: null, persona: null,
         });
         if (r2.text.trim()) {
@@ -960,9 +1029,9 @@ export function wireBrowser(card: HTMLElement) {
           chatAdd("ai", r2.text.trim());
         } else chatAdd("out", outs.join(" · "));
       } else if (!outs.length) {
-        chatAdd(r.text.trim() ? "ai" : "err", r.text.trim() || "no action came back — try rephrasing");
-      } else if (r.text.trim()) {
-        chatAdd("ai", r.text.trim());
+        chatAdd(tail ? "ai" : "err", tail || "no action came back — try rephrasing");
+      } else if (tail) {
+        chatAdd("ai", tail);
       }
     } catch (e) {
       pend?.remove();

@@ -1890,7 +1890,8 @@ const probeTitle = (sel: string, words: string[]): [HTMLElement | null, string] 
 const findBrowser = (name: string): HTMLElement | null => {
   const all = Array.from(document.querySelectorAll<HTMLElement>(".browser-card"));
   if (!all.length) return null;
-  const n = name.trim().toLowerCase();
+  // models quote titles ("Example Domain" 1) — the quotes aren't part of it
+  const n = name.trim().replace(/^["']+|["']+$/g, "").toLowerCase();
   if (!n) return all.length === 1 ? all[0] : null;
   return (
     all.find((c) => (c.dataset.topic ?? "").toLowerCase() === n) ??
