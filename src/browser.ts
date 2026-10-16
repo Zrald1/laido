@@ -540,6 +540,7 @@ export function wireBrowser(card: HTMLElement) {
     renderTabs();
     paintView();
     if (t.url) return nav(t.url, false);
+    blankEngine();
     lastBox = "";
     pvSync();
     say("new tab");
@@ -564,6 +565,7 @@ export function wireBrowser(card: HTMLElement) {
     renderTabs();
     paintView();
     if (url) return nav(url, true);
+    blankEngine();
     lastBox = "";
     pvSync();
     say("new tab");
@@ -588,6 +590,7 @@ export function wireBrowser(card: HTMLElement) {
     paintView();
     if (t.url && t.url !== lastFetched) void nav(t.url, false).then(say);
     else if (!t.url) {
+      blankEngine();
       lastBox = "";
       pvSync();
       say("new tab");
@@ -834,10 +837,37 @@ export function wireBrowser(card: HTMLElement) {
       w: Math.round(r.width * d), h: Math.round(r.height * d),
     });
   };
+  /* the engine is SHARED across tabs — a switch/new/close leaves the old
+   * page in it, and its late events (youtube's SPA navs, title churn,
+   * delayed loads) would stamp that old page's url/title into the tab we
+   * just switched TO — visually "going back". leaveTo() starts a short
+   * suppression window; stalePv() filters the departing page's events. */
+  let switchAt = 0;
+  let leaveUrl = "";
+  let expectUrl = ""; // "" = the engine is being sent to about:blank
+  const noTrail = (u: string) => u.replace(/\/+$/, "");
+  const leaveTo = (target: string) => {
+    leaveUrl = card.dataset.url ?? cur().url;
+    expectUrl = target;
+    switchAt = Date.now();
+  };
+  const stalePv = (u: string) =>
+    Date.now() - switchAt < 900 &&
+    (expectUrl ? noTrail(u) === noTrail(leaveUrl) : u !== "about:blank");
+  /* blank tab targets: actually unload the old page so it can't keep
+   * emitting — the surface hides anyway and youtube audio dies too */
+  const blankEngine = () => {
+    leaveTo("");
+    void invoke("pv_eval", {
+      id: bvId,
+      js: "location.href='about:blank';'blank'",
+    }).catch(() => {});
+  };
   const nav = async (input: string, push: boolean): Promise<string> => {
     const url = toUrl(input);
     if (!url) return "empty address";
     const seq = ++navSeq;
+    leaveTo(url);
     say("loading…");
     setLock(url);
     // a blank tab's webview is hidden — claim the url now so pvSync shows
@@ -926,6 +956,14 @@ export function wireBrowser(card: HTMLElement) {
   on("pv:nav", (e: { payload: any }) => {
     const pay = e.payload;
     if (!pay || pay.id !== bvId || !card.isConnected || !pay.url) return;
+    if (stalePv(pay.url)) return; // the departed page still talking
+    if (pay.url === "about:blank") {
+      // a blank tab's engine — keep the tab blank, don't stamp a url
+      card.dataset.url = "";
+      cur().url = "";
+      renderTabs();
+      return;
+    }
     const u = pay.url;
     card.dataset.url = u;
     cur().url = u;
@@ -958,6 +996,7 @@ export function wireBrowser(card: HTMLElement) {
   on("pv:load", (e: { payload: any }) => {
     const pay = e.payload;
     if (!pay || pay.id !== bvId || !card.isConnected) return;
+    if (pay.url && stalePv(pay.url)) return;
     setLoading(!pay.done);
     if (pay.done && liveOn) {
       say(`live — ${hostOf(pay.url || card.dataset.url || "")}`);
@@ -971,6 +1010,9 @@ export function wireBrowser(card: HTMLElement) {
   on("pv:title", (e: { payload: any }) => {
     const pay = e.payload;
     if (!pay || pay.id !== bvId || !card.isConnected || !pay.title) return;
+    /* titles carry no url — drop every one inside the transition window;
+     * the new page's own title arrives after its load */
+    if (Date.now() - switchAt < 900) return;
     card.dataset.topic = pay.title;
     const t = card.querySelector(".callout-title");
     if (t) t.textContent = pay.title;
