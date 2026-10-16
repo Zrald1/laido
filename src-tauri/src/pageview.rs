@@ -98,6 +98,9 @@ pub async fn pv_open(
      * ones, and "apply now" is a pv_close + re-open */
     .browser_extensions_enabled(true)
     .extensions_path(crate::extensions::ext_root(&app))
+    /* hidden (parked) views keep playing media — note-switching must not
+     * suspend a youtube/video the user is listening to */
+    .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
     .on_navigation(move |u| {
         let _ = app2.emit_to("main", "pv:nav", json!({ "id": id2, "url": u.to_string() }));
         true
@@ -206,6 +209,12 @@ pub async fn pv_visible(id: String, on: bool) -> Result<(), String> {
     } else {
         wv.hide().map_err(|e| e.to_string())
     }
+}
+
+/// live engine ids — the sound pill polls these for playing audio
+#[tauri::command]
+pub async fn pv_list() -> Result<Vec<String>, String> {
+    Ok(with_views(|m| m.keys().cloned().collect()))
 }
 
 #[tauri::command]

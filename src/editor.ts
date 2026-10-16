@@ -2360,6 +2360,12 @@ export async function loadNote(name: string) {
   current = name;
   $("#note-title").textContent = titleName(name);
   const el = body();
+  /* note switch ≠ card delete: flag browser cards so their webviews park
+   * (hidden, still playing) instead of closing — the bv: line lets the
+   * re-rendered card re-attach to the same engine */
+  el.querySelectorAll<HTMLElement>(".browser-card").forEach((c) => {
+    c.dataset.park = "1";
+  });
   el.innerHTML = renderMarkdown(md);
   hydrateAssets(el);
   void hydrateEmbeds(el);

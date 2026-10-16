@@ -53,6 +53,7 @@ export function parseBrowser(block: string[]): {
   atab: number;
   tools: { name: string; js: string }[];
   chat: string;
+  bv: string;
 } {
   if (!Array.isArray(block)) block = []; block = block.map((l) => S(l));
   const head = block[0] ?? "";
@@ -61,6 +62,7 @@ export function parseBrowser(block: string[]): {
   const tabs: { url: string; title: string }[] = [];
   const tools: { name: string; js: string }[] = [];
   let chat = "";
+  let bv = "";
   let atab = 0;
   for (const raw of block.slice(1)) {
     const line = raw.trim();
@@ -80,8 +82,10 @@ export function parseBrowser(block: string[]): {
     }
     const mc = line.match(/^chat:\s*(.+)$/i);
     if (mc) chat = mc[1];
+    const mv = line.match(/^bv:\s*(\S+)/i);
+    if (mv) bv = mv[1];
   }
-  return { title: title || "browser", url, tabs, atab, tools, chat };
+  return { title: title || "browser", url, tabs, atab, tools, chat, bv };
 }
 
 export function browserToMd(card: HTMLElement): string {
@@ -103,6 +107,9 @@ export function browserToMd(card: HTMLElement): string {
       if (t?.name && t?.js) md += `\n> tool: ${JSON.stringify({ name: t.name, js: t.js })}`;
   } catch { /* tool state is best-effort */ }
   if (DS(card.dataset.chat)) md += `\n> chat: ${DS(card.dataset.chat)}`;
+  /* the live engine id rides the markdown — reopening the note re-attaches
+   * the card to the same webview, so playing media survives the switch */
+  if (DS(card.dataset.bv)) md += `\n> bv: ${DS(card.dataset.bv)}`;
   return md;
 }
 
@@ -120,6 +127,7 @@ export function browserInnerHtml(): string {
     `<button class="bb-b" data-a="bm" title="save to bookmarks.laido">★</button>` +
     `<button class="bb-b" data-a="win" title="open in a real window">⧉</button>` +
     `<button class="bb-b" data-a="ext" title="extensions — chrome/firefox add-ons & page scripts">🧩</button>` +
+    `<button class="bb-b bb-snd" data-a="snd" hidden title="audio playing — click to mute">🔊</button>` +
     `<button class="bb-b" data-a="chat" title="ask AI about this page">✦</button>` +
     `</div>` +
     `<div class="btabs" contenteditable="false"></div>` +
@@ -198,6 +206,93 @@ export function browserApi(card: HTMLElement): BrowserApi | undefined {
 
 let pvSeq = 0;
 
+/* ---------- audio: engines that outlive their card ---------- */
+/* A parked (note-switched) or visible engine that plays audio shows up in
+ * #aud-pill on the titlebar — one click mutes it. mutedPv remembers the
+ * intent per engine so fresh page loads re-mute themselves. */
+const mutedPv = new Set<string>();
+const audioPv = new Map<string, { playing: boolean; muted: boolean; title: string }>();
+/* engines parked by a note switch, keyed by url — a revived card whose
+ * markdown never caught its bv: line can still re-claim its engine */
+const parkedByUrl = new Map<string, string>();
+
+const AUD_JS =
+  `(()=>{const ms=[...document.querySelectorAll('video,audio')];` +
+  `return JSON.stringify({n:ms.length,` +
+  `playing:ms.some(m=>!m.paused&&!m.ended&&(m.readyState>1||m.currentTime>0)),` +
+  `muted:ms.length?ms.every(m=>m.muted||m.volume===0):false,` +
+  `t:document.title||''})})()`;
+const MUTE_JS = (on: boolean) =>
+  `[...document.querySelectorAll('video,audio')].forEach(m=>{m.muted=${on}});'${on ? "muted" : "unmuted"}'`;
+
+const renderAudioPill = () => {
+  const pill = document.getElementById("aud-pill");
+  if (!pill) return;
+  const playing = [...audioPv.entries()].filter(([, a]) => a.playing);
+  pill.classList.toggle("hidden", playing.length === 0);
+  pill.innerHTML = "";
+  for (const [id, a] of playing) {
+    const chip = document.createElement("button");
+    chip.className = "aud-chip" + (a.muted ? " muted" : "");
+    chip.title = `${a.title || "media"} — ${a.muted ? "unmute" : "mute"}`;
+    chip.innerHTML =
+      `<span class="aud-ic">${a.muted ? "🔇" : "🔊"}</span>` +
+      `<span class="aud-t"></span>` +
+      `<span class="aud-x" title="stop">×</span>`;
+    chip.querySelector(".aud-t")!.textContent = a.title || id;
+    chip.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if ((e.target as HTMLElement).closest(".aud-x")) {
+        void invoke("pv_close", { id }).catch(() => {});
+        audioPv.delete(id);
+        mutedPv.delete(id);
+        renderAudioPill();
+        return;
+      }
+      const on = !a.muted;
+      if (on) mutedPv.add(id); else mutedPv.delete(id);
+      void invoke("pv_eval", { id, js: MUTE_JS(on) }).catch(() => {});
+      a.muted = on;
+      renderAudioPill();
+      paintSndButtons();
+    });
+    pill.append(chip);
+  }
+};
+
+/* card-bar 🔊 buttons follow the registry each tick */
+const paintSndButtons = () => {
+  document.querySelectorAll<HTMLElement>(".browser-card").forEach((c) => {
+    const b = c.querySelector<HTMLElement>('[data-a="snd"]');
+    if (!b) return;
+    const a = audioPv.get(c.dataset.bv ?? "");
+    b.hidden = !(a?.playing);
+    if (a) {
+      b.textContent = a.muted ? "🔇" : "🔊";
+      b.title = `${a.title || "audio"} — ${a.muted ? "unmute" : "mute"}`;
+    }
+  });
+};
+
+let audioTimer = 0;
+const startAudioPoll = () => {
+  if (audioTimer) return;
+  audioTimer = window.setInterval(async () => {
+    const ids = await invoke<string[]>("pv_list").catch(() => [] as string[]);
+    for (const id of ids) {
+      const s = await invoke<string>("pv_eval", { id, js: AUD_JS }).catch(() => "");
+      if (!s) continue;
+      try {
+        const st = JSON.parse(JSON.parse(s)) as { playing: boolean; muted: boolean; t: string };
+        audioPv.set(id, { playing: st.playing, muted: st.muted, title: st.t });
+      } catch { /* odd page state — skip this tick */ }
+    }
+    for (const id of [...audioPv.keys()]) if (!ids.includes(id)) audioPv.delete(id);
+    renderAudioPill();
+    paintSndButtons();
+  }, 2000);
+};
+
 export function wireBrowser(card: HTMLElement) {
   if (!card?.dataset) return;
   if (card.dataset.browserWired) return;
@@ -246,9 +341,29 @@ export function wireBrowser(card: HTMLElement) {
   let loading = false;
   /* the webview id must be STABLE across rewires — a fresh id makes the
    * restore path open a second engine and reload the page (and orphans
-   * the old one). Reuse the card's id when it already has one */
+   * the old one). Reuse the card's id when it already has one; a parked
+   * engine whose bv: line never reached disk is re-claimed by url. */
+  delete card.dataset.park;
+  if (!card.dataset.bv) {
+    const u = (card.dataset.url ?? "").replace(/\/+$/, "").toLowerCase();
+    const parked = u ? parkedByUrl.get(u) : undefined;
+    if (parked) {
+      card.dataset.bv = parked;
+      parkedByUrl.delete(u);
+    }
+  }
+  /* a duplicated card carries the source's bv — two live cards must never
+   * share one engine (bounds fight) */
+  if (
+    card.dataset.bv &&
+    [...document.querySelectorAll<HTMLElement>(".browser-card")].some(
+      (c) => c !== card && c.dataset.bv === card.dataset.bv,
+    )
+  )
+    delete card.dataset.bv;
   const bvId = card.dataset.bv || `bv-${Date.now().toString(36)}-${++pvSeq}`;
   card.dataset.bv = bvId;
+  startAudioPoll();
   const lock = card.querySelector<HTMLElement>(".bb-lock");
   const reBtn = bar.querySelector<HTMLElement>('[data-a="re"]');
   const setLock = (u: string) => {
@@ -552,12 +667,21 @@ export function wireBrowser(card: HTMLElement) {
   let deadTicks = 0;
   const pvTimer = window.setInterval(() => {
     if (!card.isConnected) {
-      // DOM detach = note switch or card delete → the webview must die
+      /* DOM detach has two meanings: a real card delete kills the engine,
+       * but a note switch (loadNote marks data-park first) PARKS it —
+       * hidden, still alive, so playing media keeps going and reopening
+       * the note re-glues the same webview without a reload */
       if (++deadTicks >= 2) {
         window.clearInterval(pvTimer);
         ro.disconnect();
         if (fsOn) setFs(false); // a dead card can't hold fullscreen
-        void invoke("pv_close", { id: bvId }).catch(() => {});
+        if (card.dataset.park) {
+          const u = (card.dataset.url ?? "").replace(/\/+$/, "").toLowerCase();
+          if (u) parkedByUrl.set(u, bvId);
+          void invoke("pv_visible", { id: bvId, on: false }).catch(() => {});
+        } else {
+          void invoke("pv_close", { id: bvId }).catch(() => {});
+        }
         for (const u of unlistens) void u.then((f) => f()).catch(() => {});
       }
       return;
@@ -815,6 +939,9 @@ export function wireBrowser(card: HTMLElement) {
     if (pay.done && liveOn) {
       say(`live — ${hostOf(pay.url || card.dataset.url || "")}`);
       void injectScripts(pay.url || card.dataset.url || "");
+      /* a muted engine stays muted across navigations */
+      if (mutedPv.has(bvId))
+        void invoke("pv_eval", { id: bvId, js: MUTE_JS(true) }).catch(() => {});
     }
   });
   // real titles — js-set ones included (fetch can't see them)
@@ -1055,6 +1182,14 @@ export function wireBrowser(card: HTMLElement) {
     }
     else if (a === "win") openInBrowser(card.dataset.url ?? urlIn.value);
     else if (a === "ext") void toggleExt(extPop.hidden);
+    else if (a === "snd") {
+      const on = !mutedPv.has(bvId);
+      if (on) mutedPv.add(bvId); else mutedPv.delete(bvId);
+      void invoke<string>("pv_eval", { id: bvId, js: MUTE_JS(on) }).then(say).catch(() => {});
+      const a2 = audioPv.get(bvId);
+      if (a2) { a2.muted = on; renderAudioPill(); }
+      b.textContent = on ? "🔇" : "🔊";
+    }
     else if (a === "chat") setChatOpen(chatPane ? chatPane.hidden : true);
   });
   status.addEventListener("click", () => {
