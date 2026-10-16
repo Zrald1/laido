@@ -1304,10 +1304,42 @@ export function wireBrowser(card: HTMLElement) {
       `<div class="bx-actions"><button class="bx-b" data-x="instpage">install this page</button><button class="bx-b" data-x="natup">upload .crx/.xpi/.zip/folder</button><button class="bx-b" data-x="apply">apply ⟳</button></div>` +
       `<div class="bx-actions"><button class="bx-b" data-x="cws">⌕ chrome store</button><button class="bx-b" data-x="amo">🦊 firefox add-ons</button></div>`;
   };
+  /* keep the popover inside the visible note area — the card's right edge
+   * can sit at/past the pane edge (resized cards, narrow windows), and a
+   * `right:6px` anchor would clip the panel against overflow:hidden
+   * ancestors. Clamp to #note-body's client box instead */
+  const fitExt = () => {
+    extPop.style.right = "";
+    extPop.style.left = "";
+    extPop.style.top = "";
+    extPop.style.width = "";
+    extPop.style.maxHeight = "";
+    const clipEl = card.closest<HTMLElement>("#note-body") ?? document.body;
+    const clip = clipEl.getBoundingClientRect();
+    const cr = card.getBoundingClientRect();
+    let pr = extPop.getBoundingClientRect();
+    if (pr.right > clip.right - 6) {
+      extPop.style.right = `${cr.right - (clip.right - 6)}px`;
+      pr = extPop.getBoundingClientRect();
+    }
+    if (pr.left < clip.left + 6) {
+      extPop.style.width = `${Math.max(200, pr.right - (clip.left + 6))}px`;
+      pr = extPop.getBoundingClientRect();
+    }
+    if (pr.top < clip.top + 6) {
+      extPop.style.top = `${clip.top + 6 - cr.top}px`;
+      pr = extPop.getBoundingClientRect();
+    }
+    const room = clip.bottom - pr.top - 8;
+    if (room < 380) extPop.style.maxHeight = `${Math.max(120, room)}px`;
+  };
   const toggleExt = async (on: boolean) => {
     extPop.hidden = !on;
     bar.querySelector('[data-a="ext"]')?.classList.toggle("on", on);
-    if (on) await renderExt();
+    if (on) {
+      await renderExt();
+      fitExt();
+    }
   };
   extPop.addEventListener("pointerdown", (e) => e.stopPropagation());
   extPop.addEventListener("click", async (e) => {
