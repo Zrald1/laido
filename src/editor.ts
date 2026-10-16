@@ -2354,15 +2354,25 @@ export function clearNote() {
 // started is stale — it must not repaint or become `current`, or the
 // next save writes this note's DOM into the newer note's file
 let loadGen = 0;
+/* each note keeps its own scroll spot — switching away and back lands
+ * where you left off, and a fresh note always opens at the top. Without
+ * this the shared #note-body carried the old scrollTop over: clicks in a
+ * short note computed a content-y thousands of px deep → the "pad down"
+ * path overflowed its cap → the caret fell back to the first block,
+ * i.e. "the cursor is stuck at the top" */
+const noteScroll = new Map<string, { t: number; l: number }>();
 
 export async function loadNote(name: string) {
   hidePencil();
   const gen = ++loadGen;
   const md = await invoke<string>("vault_read", { name });
   if (gen !== loadGen) return;
+  /* the same #note-body scrolls every note — park the outgoing note's
+   * scroll and restore this one's (new notes start at the top) */
+  const el = body();
+  if (current) noteScroll.set(current, { t: el.scrollTop, l: el.scrollLeft });
   current = name;
   $("#note-title").textContent = titleName(name);
-  const el = body();
   /* note switch ≠ card delete: flag browser cards so their webviews park
    * (hidden, still playing) instead of closing — the bv: line lets the
    * re-rendered card re-attach to the same engine */
@@ -2370,6 +2380,9 @@ export async function loadNote(name: string) {
     c.dataset.park = "1";
   });
   el.innerHTML = renderMarkdown(md);
+  const sv = noteScroll.get(name);
+  el.scrollTop = sv?.t ?? 0;
+  el.scrollLeft = sv?.l ?? 0;
   hydrateAssets(el);
   void hydrateEmbeds(el);
   decorateCommandChips(el);
@@ -2388,6 +2401,8 @@ export async function loadNote(name: string) {
     // widget the user placed. (Explicit re-layout lives on the align button.)
     flowAroundCards();
     drawCardLinks();
+    el.scrollTop = sv?.t ?? 0; // re-apply after the card layout settles
+    el.scrollLeft = sv?.l ?? 0;
   });
   void refreshIndex().then(paintLinkStrip);
   refreshOutline();
@@ -4899,11 +4914,10 @@ export function initEditor() {
     e.preventDefault();
     const clicked = Math.floor((y - 12) / lineH);
     const lines = last ? Math.ceil((last.offsetTop + last.offsetHeight - 12) / lineH) : 0;
-    const need = Math.max(1, clicked - lines + 1);
-    if (need > 40) {
-      if (last) placeCaretAtEnd(last);
-      return;
-    }
+    /* cap the pad, but the caret still lands on the deepest new line —
+     * never at the top: a stale scrollTop once made every click hit this
+     * branch and dumped the caret on the first block */
+    const need = Math.min(40, Math.max(1, clicked - lines + 1));
     for (let i = 0; i < need; i++) {
       const p = document.createElement("p");
       p.append(document.createElement("br"));
@@ -4911,7 +4925,10 @@ export function initEditor() {
     }
     markEdited();
     const caret = el.lastElementChild as HTMLElement | null;
-    if (caret) placeCaretAtEnd(caret);
+    if (caret) {
+      placeCaretAtEnd(caret);
+      caret.scrollIntoView({ block: "nearest" });
+    }
   });
 
   // click to the right of a line's text end → pad with nbsp and type there
