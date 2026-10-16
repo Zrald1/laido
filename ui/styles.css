@@ -2037,6 +2037,58 @@ li.todo.done .todo-box { color: var(--muted); }
 }
 .browser-status[data-open] { cursor: pointer; color: var(--accent); }
 
+/* view + chat share a row — the view flexes, the panel docks right */
+.browser-main { display: flex; flex: 1 1 auto; min-height: 300px; }
+.browser-main .browser-view { min-height: 0; }
+/* the AI chat dock — vertical panel on the card's right edge */
+.browser-chat {
+  width: 200px; flex: none; display: flex; flex-direction: column;
+  border-left: 1px solid var(--line); background: var(--bg-1); min-width: 0;
+}
+.browser-chat[hidden] { display: none; }
+.bc-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 4px 8px; border-bottom: 1px solid var(--line); flex: none;
+}
+.bc-t { font-size: 10.5px; font-weight: 600; color: var(--accent); }
+.bc-x {
+  border: none; background: none; color: var(--muted); cursor: pointer;
+  font-size: 12px; padding: 0 3px; border-radius: 3px; line-height: 1;
+}
+.bc-x:hover { background: var(--bg-3); color: var(--fg); }
+.bc-log {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 6px 6px 2px;
+  display: flex; flex-direction: column; gap: 4px; scrollbar-width: thin;
+}
+.bc-log::-webkit-scrollbar { width: 5px; }
+.bc-log::-webkit-scrollbar-thumb { background: rgba(0,0,0,.15); border-radius: 3px; }
+.bc-bar { display: flex; padding: 5px 6px; border-top: 1px solid var(--line); flex: none; }
+.bc-in {
+  flex: 1; min-width: 0; border: 0; background: transparent;
+  font: 11.5px/1.4 inherit; color: inherit; outline: none; padding: 2px 0;
+}
+.bc-in::placeholder { color: rgba(0,0,0,.35); }
+.bc-in:disabled { opacity: .55; }
+/* saved page tools — one-click js actions under the tab strip */
+.btools {
+  display: flex; align-items: center; gap: 3px; overflow-x: auto;
+  padding: 2px 4px 4px; margin: 0 -4px; scrollbar-width: none; flex: none;
+}
+.btools::-webkit-scrollbar { display: none; }
+.btools[hidden] { display: none; }
+.btool {
+  display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto;
+  padding: 2px 4px 2px 7px; border: 1px solid var(--line); border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-2) 60%, transparent);
+  color: var(--fg); font-size: 10px; cursor: pointer; user-select: none;
+}
+.btool:hover { border-color: var(--accent); color: var(--accent); }
+.btool-x {
+  border: none; background: none; color: var(--muted); cursor: pointer;
+  font-size: 11px; padding: 0 2px; border-radius: 3px; line-height: 1;
+}
+.btool-x:hover { background: var(--bg-3); color: var(--fg); }
+
 /* ---------- chart card ---------- */
 .chart-card {
   width: 580px;

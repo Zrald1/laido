@@ -366,6 +366,8 @@ function browserCallout(block: string[]): string {
     `<div class="callout browser-card" data-kind="browser" data-topic="${attr(d.title)}"` +
     ` data-url="${attr(d.url)}"` +
     (d.tabs.length > 1 ? ` data-tabs="${attr(JSON.stringify(d.tabs))}" data-atab="${d.atab}"` : "") +
+    (d.tools.length ? ` data-tools="${attr(JSON.stringify(d.tools))}"` : "") +
+    (d.chat ? ` data-chat="${attr(d.chat)}"` : "") +
     ` data-md="${attr(raw)}">` +
     `<div class="callout-head"><span class="callout-title">${esc(d.title)}</span></div>` +
     browserInnerHtml() +

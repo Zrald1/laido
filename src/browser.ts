@@ -44,18 +44,23 @@ export function toUrl(input: string): string {
 
 /* ---------- markdown <-> card ---------- */
 
-/** `[!browser] title` + `url: …` + `tab: url | title` lines → card fields */
+/** `[!browser] title` + `url: …` + `tab: url | title` + `tool:`/`chat:`
+ *  lines → card fields */
 export function parseBrowser(block: string[]): {
   title: string;
   url: string;
   tabs: { url: string; title: string }[];
   atab: number;
+  tools: { name: string; js: string }[];
+  chat: string;
 } {
   if (!Array.isArray(block)) block = []; block = block.map((l) => S(l));
   const head = block[0] ?? "";
   const title = head.replace(/^\[!\w+\]\s*/, "").trim();
   let url = "";
   const tabs: { url: string; title: string }[] = [];
+  const tools: { name: string; js: string }[] = [];
+  let chat = "";
   let atab = 0;
   for (const raw of block.slice(1)) {
     const line = raw.trim();
@@ -65,8 +70,18 @@ export function parseBrowser(block: string[]): {
     if (mt) tabs.push({ url: mt[1] === "about:blank" ? "" : mt[1], title: (mt[2] ?? "").trim() });
     const ma = line.match(/^atab:\s*(\d+)/i);
     if (ma) atab = parseInt(ma[1], 10) || 0;
+    const mo = line.match(/^tool:\s*(\{[\s\S]*\})\s*$/i);
+    if (mo) {
+      try {
+        const t = JSON.parse(mo[1]) as { name?: unknown; js?: unknown };
+        if (t && typeof t.name === "string" && typeof t.js === "string" && t.name && t.js)
+          tools.push({ name: t.name.slice(0, 40), js: t.js });
+      } catch { /* malformed tool line — skip */ }
+    }
+    const mc = line.match(/^chat:\s*(.+)$/i);
+    if (mc) chat = mc[1];
   }
-  return { title: title || "browser", url, tabs, atab };
+  return { title: title || "browser", url, tabs, atab, tools, chat };
 }
 
 export function browserToMd(card: HTMLElement): string {
@@ -82,6 +97,12 @@ export function browserToMd(card: HTMLElement): string {
         md += `\n> tab: ${tb.url || "about:blank"} | ${(tb.title || "").replace(/\|/g, "/")}`;
     }
   } catch { /* tab state is best-effort */ }
+  try {
+    const tools = JSON.parse(DS(card.dataset.tools) || "[]") as { name: string; js: string }[];
+    for (const t of tools)
+      if (t?.name && t?.js) md += `\n> tool: ${JSON.stringify({ name: t.name, js: t.js })}`;
+  } catch { /* tool state is best-effort */ }
+  if (DS(card.dataset.chat)) md += `\n> chat: ${DS(card.dataset.chat)}`;
   return md;
 }
 
@@ -98,10 +119,21 @@ export function browserInnerHtml(): string {
     `<button class="bb-b" data-a="clip" title="clip page text (or selection) into the note">⇲</button>` +
     `<button class="bb-b" data-a="bm" title="save to bookmarks.laido">★</button>` +
     `<button class="bb-b" data-a="win" title="open in a real window">⧉</button>` +
+    `<button class="bb-b" data-a="chat" title="ask AI about this page">✦</button>` +
     `</div>` +
     `<div class="btabs" contenteditable="false"></div>` +
+    `<div class="btools" contenteditable="false" hidden></div>` +
+    `<div class="browser-main">` +
     `<div class="browser-view">` +
     `<div class="browser-reader"></div>` +
+    `</div>` +
+    `<div class="browser-chat" contenteditable="false">` +
+    `<div class="bc-head"><span class="bc-t">✦ ask AI</span>` +
+    `<button class="bc-x" title="hide the panel">×</button></div>` +
+    `<div class="bc-log"></div>` +
+    `<div class="bc-bar"><input class="bc-in" maxlength="280" spellcheck="false" ` +
+    `placeholder="ask about this page — 'summarize it', 'grab prices', 'make a tool'…"></div>` +
+    `</div>` +
     `</div>` +
     `<div class="browser-status" contenteditable="false">idle</div>`
   );
@@ -148,6 +180,14 @@ export interface BrowserApi {
   newTab(url?: string): Promise<string>;
   /** switch to tab i (0-based) */
   tab(i: number): Promise<string>;
+  /** the card's saved page tools */
+  tools(): { name: string; js: string }[];
+  /** save (or overwrite) a named page tool */
+  saveTool(spec: { name: string; js: string }): string;
+  /** delete a saved tool by name */
+  delTool(name: string): string;
+  /** run a saved tool's js in the live page — JSON-parsed result back */
+  runTool(name: string): Promise<string>;
 }
 
 const apis = new WeakMap<HTMLElement, BrowserApi>();
@@ -252,6 +292,81 @@ export function wireBrowser(card: HTMLElement) {
         .join("") +
       `<button class="btab-add" title="new tab">+</button>`;
   };
+
+  /* ---------- saved page tools — named js that runs in the live page;
+   * the strip sits under the tab bar and each chip is a one-click action */
+  let tools: { name: string; js: string }[] = [];
+  try {
+    const raw = JSON.parse(DS(card.dataset.tools) || "[]") as { name?: unknown; js?: unknown }[];
+    if (Array.isArray(raw))
+      tools = raw
+        .filter((t) => t && typeof t.name === "string" && typeof t.js === "string" && t.name && t.js)
+        .map((t) => ({ name: t.name as string, js: t.js as string }));
+  } catch { tools = []; }
+  const toolsStrip = card.querySelector<HTMLElement>(".btools");
+  const persistTools = () => {
+    card.dataset.tools = JSON.stringify(tools);
+    onChange();
+  };
+  const renderTools = () => {
+    if (!toolsStrip) return;
+    toolsStrip.hidden = !tools.length;
+    toolsStrip.innerHTML = tools
+      .map(
+        (t, i) =>
+          `<span class="btool" data-t="${i}" title="run ${escHtml(t.name)} on the live page">` +
+          `⚒ ${escHtml(t.name)}<button class="btool-x" data-dx="${i}" title="delete tool">×</button></span>`,
+      )
+      .join("");
+  };
+  const saveTool = (spec: { name: string; js: string }): string => {
+    const name = S(spec?.name).trim().slice(0, 40);
+    const js = S(spec?.js).trim();
+    if (!name || !js) return "✕ tool needs {name, js}";
+    const ix = tools.findIndex((t) => t.name.toLowerCase() === name.toLowerCase());
+    if (ix >= 0) tools[ix] = { name, js };
+    else tools.push({ name, js });
+    persistTools();
+    renderTools();
+    return `tool "${name}" saved to "${card.dataset.topic ?? "browser"}"`;
+  };
+  const delTool = (name: string): string => {
+    const ix = tools.findIndex((t) => t.name.toLowerCase() === S(name).trim().toLowerCase());
+    if (ix < 0) return `✕ no tool "${name}" on this card`;
+    tools.splice(ix, 1);
+    persistTools();
+    renderTools();
+    return `tool "${name}" removed`;
+  };
+  const runTool = async (name: string): Promise<string> => {
+    const t = tools.find((x) => x.name.toLowerCase() === S(name).trim().toLowerCase());
+    if (!t) return `✕ no tool "${name}" — ${tools.map((x) => x.name).join(", ") || "none saved"}`;
+    try {
+      const s = await invoke<string>("pv_eval", { id: bvId, js: t.js });
+      const out = JSON.parse(s);
+      const txt = typeof out === "string" ? out : JSON.stringify(out);
+      say(`tool "${t.name}" → ${txt.slice(0, 80)}`);
+      return `tool "${t.name}" → ${txt.slice(0, 4000)}`;
+    } catch (e) {
+      return `✕ tool "${t.name}" failed: ${String(e).slice(0, 120)}`;
+    }
+  };
+  toolsStrip?.addEventListener("click", (e) => {
+    const el = e.target as HTMLElement;
+    const dx = el.closest<HTMLElement>(".btool-x");
+    if (dx) {
+      e.preventDefault(); e.stopPropagation();
+      const t = tools[parseInt(dx.dataset.dx ?? "-1", 10)];
+      if (t) say(delTool(t.name));
+      return;
+    }
+    const chip = el.closest<HTMLElement>(".btool");
+    if (chip) {
+      e.preventDefault(); e.stopPropagation();
+      const t = tools[parseInt(chip.dataset.t ?? "-1", 10)];
+      if (t) void runTool(t.name).then((o) => chatAdd?.("out", o));
+    }
+  });
   const showBlank = () => {
     reader.innerHTML =
       `<div class="br-newtab"><b>new tab</b><span>type an address or a search above</span></div>`;
@@ -350,9 +465,9 @@ export function wireBrowser(card: HTMLElement) {
     const r = view.getBoundingClientRect();
     const clipEl = card.closest<HTMLElement>("#note-body") ?? document.body;
     const clip = clipEl.getBoundingClientRect();
-    /* the body clips the view too (overflow:hidden on small cards) — the
-     * webview may only cover the truly visible slice */
-    const body = view.parentElement?.getBoundingClientRect();
+    /* the callout body clips the view too (overflow:hidden on small
+     * cards) — the webview may only cover the truly visible slice */
+    const body = view.closest<HTMLElement>(".callout-body")?.getBoundingClientRect();
     const clipTop = body ? Math.max(clip.top, body.top) : clip.top;
     const clipBot = body ? Math.min(clip.bottom, body.bottom) : clip.bottom;
     /* the native surface can't be scissored by the DOM scroll region, so
@@ -691,6 +806,7 @@ export function wireBrowser(card: HTMLElement) {
       void apis.get(card)?.bookmark().then(say);
     }
     else if (a === "win") openInBrowser(card.dataset.url ?? urlIn.value);
+    else if (a === "chat") setChatOpen(chatPane ? chatPane.hidden : true);
   });
   status.addEventListener("click", () => {
     if (status.dataset.live) setMode(true);
@@ -725,6 +841,146 @@ export function wireBrowser(card: HTMLElement) {
     }
   });
 
+  /* ---------- the AI chat dock — a vertical panel on the card's right
+   * edge; the same fence machinery as the terminal, aimed at THIS card */
+  const chatPane = card.querySelector<HTMLElement>(".browser-chat");
+  const chatLog = card.querySelector<HTMLElement>(".bc-log");
+  const chatIn = card.querySelector<HTMLInputElement>(".bc-in");
+  const chatHist: { role: string; content: string }[] = [];
+  interface ChatBubble { c: string; t: string }
+  const liveCard = (): HTMLElement =>
+    // a mid-flight AI mutation re-renders the callout — later bubbles must
+    // land on the replacement card, not the detached one
+    card.isConnected
+      ? card
+      : (Array.from(document.querySelectorAll<HTMLElement>(".browser-card")).find(
+          (c) => (c.dataset.topic ?? "") === (card.dataset.topic ?? "browser"),
+        ) ?? card);
+  function chatAdd(cls: string, text: string): HTMLElement | null {
+    const host = liveCard().querySelector<HTMLElement>(".bc-log") ?? chatLog;
+    if (!host) return null;
+    const m = document.createElement("div");
+    m.className = `sc-msg ${cls}`;
+    m.textContent = text;
+    host.append(m);
+    while (host.children.length > 40) host.firstElementChild!.remove();
+    host.scrollTop = host.scrollHeight;
+    if (cls !== "wait") {
+      const bubbles: ChatBubble[] = Array.from(host.querySelectorAll<HTMLElement>(".sc-msg"))
+        .map((x) => ({ c: x.className.replace("sc-msg ", ""), t: x.textContent ?? "" }))
+        .filter((b) => b.c !== "wait")
+        .slice(-20);
+      liveCard().dataset.chat = JSON.stringify(bubbles);
+    }
+    return m;
+  }
+  try {
+    for (const b of JSON.parse(DS(card.dataset.chat) || "[]") as ChatBubble[]) {
+      if (!b || typeof b.c !== "string" || typeof b.t !== "string") continue;
+      chatAdd(b.c, b.t);
+      if (b.c === "user" || b.c === "ai")
+        chatHist.push({ role: b.c === "user" ? "user" : "assistant", content: b.t });
+    }
+  } catch { /* malformed chat state — start clean */ }
+  const setChatOpen = (on: boolean) => {
+    if (!chatPane) return;
+    chatPane.hidden = !on;
+    card.dataset.chatopen = on ? "" : "0";
+    bar.querySelector('[data-a="chat"]')?.classList.toggle("on", on);
+    lastBox = "";
+    pvSync();
+  };
+  card.querySelector<HTMLElement>(".bc-x")?.addEventListener("click", () => setChatOpen(false));
+  if (card.dataset.chatopen === "0") setChatOpen(false);
+  else setChatOpen(true);
+
+  const askBrowser = async (q: string) => {
+    if (!chatIn) return;
+    chatIn.disabled = true;
+    const pend = chatAdd("wait", "…");
+    const title = card.dataset.topic ?? "browser";
+    const others =
+      `browser "${title}" on ${cur().url || "(blank tab)"} — a REAL webview2 ` +
+      `page (js ran, post-render dom). Tabs: ` +
+      `${tabs.map((t) => t.url || "blank").join(", ") || "one"}. ` +
+      `Saved tools: ${tools.map((t) => t.name).join(", ") || "none"}.\n` +
+      `The user asks about THIS card — aim every \`\`\`browser fence at ` +
+      `"${title}". Verbs: read/extract/tables/click/eval/navigate/back/forward/` +
+      `tabs/newtab/tab/clip/bookmark/search/open. Save a reusable page tool ` +
+      `with \`tool ${title} {"name":"x","js":"…"}\` (js runs in the page, ` +
+      `result comes back JSON) then \`runtool ${title} x\`; tooldel removes. ` +
+      `Other widgets use their own \`\`\` fences with a \`new <title>\` verb.`;
+    interface BrowserAi {
+      text: string; sheet: string[]; slides: string[]; todo: string[];
+      chart: string[]; cards: string[]; maps: string[]; base: string[];
+      browser: string[]; laido: string[];
+    }
+    try {
+      const { runWidgetFence } = await import("./term.js");
+      const r = await invoke<BrowserAi>("term_ai", {
+        prompt: q, history: chatHist.slice(-8), others,
+        model: null, persona: null,
+      });
+      chatHist.push({ role: "user", content: q });
+      if (r.text.trim()) chatHist.push({ role: "assistant", content: r.text });
+      pend?.remove();
+      let readBack = false;
+      const outs: string[] = [];
+      const kinds: [keyof BrowserAi, string][] = [
+        ["browser", "browser"], ["sheet", "sheet"], ["slides", "slides"],
+        ["todo", "todo"], ["chart", "chart"], ["cards", "cards"],
+        ["maps", "map"], ["base", "base"],
+      ];
+      for (const [field, kind] of kinds) {
+        for (const body of (r[field] as string[]) ?? []) {
+          const out = await runWidgetFence(kind, body);
+          const head = body.trim().split("\n")[0];
+          outs.push(`${kind}: ${head} → ${out}`);
+          chatAdd("out", out);
+          const v = (head.split(/\s+/)[0] ?? "").toLowerCase();
+          if (kind === "browser" && /^(read|get|extract|data|digest|tables|table|eval|js|runtool|click|links|tabs|list)$/.test(v))
+            readBack = true;
+          void window.__TAURI__?.event?.emit("agent:activity", {
+            text: `browser ✦ ${title}: ${kind} ${head.slice(0, 60)}`,
+          });
+        }
+      }
+      if (readBack && outs.length) {
+        // "what does the page say about X?" — feed the result back for a
+        // spoken answer, not raw tool output
+        const r2 = await invoke<BrowserAi>("term_ai", {
+          prompt: `browser tool results:\n${outs.join("\n")}\nanswer the original request: ${q}`,
+          history: chatHist.slice(-8), others: "", model: null, persona: null,
+        });
+        if (r2.text.trim()) {
+          chatHist.push({ role: "assistant", content: r2.text });
+          chatAdd("ai", r2.text.trim());
+        } else chatAdd("out", outs.join(" · "));
+      } else if (!outs.length) {
+        chatAdd(r.text.trim() ? "ai" : "err", r.text.trim() || "no action came back — try rephrasing");
+      } else if (r.text.trim()) {
+        chatAdd("ai", r.text.trim());
+      }
+    } catch (e) {
+      pend?.remove();
+      chatAdd("err", `✕ ${String(e).slice(0, 140)}`);
+    } finally {
+      chatIn.disabled = false;
+      chatIn.focus();
+    }
+  };
+  chatIn?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const q = chatIn.value.trim();
+      if (!q) return;
+      chatIn.value = "";
+      chatAdd("user", q);
+      void askBrowser(q);
+    }
+  });
+  chatIn?.addEventListener("pointerdown", (e) => e.stopPropagation());
+
   // restore persisted address
   if (cur().url) {
     urlIn.value = cur().url;
@@ -732,6 +988,7 @@ export function wireBrowser(card: HTMLElement) {
   } else {
     say("new tab");
   }
+  renderTools();
 
   apis.set(card, {
     url: () => card.dataset.url ?? "",
@@ -792,6 +1049,10 @@ export function wireBrowser(card: HTMLElement) {
     tabs: () => tabs.map((t, i) => ({ url: t.url, title: t.title, active: i === active })),
     newTab: (u?: string) => Promise.resolve(newTab(u)),
     tab: (i: number) => Promise.resolve(switchTab(i)),
+    tools: () => tools.map((t) => ({ name: t.name, js: t.js })),
+    saveTool,
+    delTool,
+    runTool,
   });
 }
 

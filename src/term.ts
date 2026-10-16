@@ -1196,7 +1196,50 @@ const browserTool = async (body: string): Promise<string> => {
     if (!Number.isFinite(n)) return "✕ tab needs a number — tab <title> <n>";
     return await browserApi(card)!.tab(n - 1);
   }
-  return `✕ unknown browser verb "${verb}" — open/read/links/search/extract/tables/grab/click/navigate/back/forward/clip/bookmark/eval/list/tabs/newtab/tab`;
+
+  /* ---------- saved page tools — named js chips that run in the live
+   * page; the AI registers specs, the strip under the tabs runs them */
+  if (verb === "tools") {
+    const card = findBrowser(rest);
+    if (!card) return `✕ no browser found named "${rest || "?"}"`;
+    const ts = browserApi(card)!.tools();
+    return ts.length
+      ? `tools on "${card.dataset.topic}": ${ts.map((t) => t.name).join(", ")}`
+      : `no tools on "${card.dataset.topic}" — save one: tool <title> {"name":"x","js":"…"}`;
+  }
+  if (verb === "tool" || verb === "addtool") {
+    const j = rest.indexOf("{");
+    const name = j < 0 ? rest : rest.slice(0, j).trim();
+    const card = findBrowser(name);
+    if (!card) return `✕ no browser found named "${name || "?"}"`;
+    if (j < 0) return `✕ tool needs a spec — tool <title> {"name":"x","js":"…"}`;
+    try {
+      return browserApi(card)!.saveTool(JSON.parse(rest.slice(j)));
+    } catch {
+      // models often emit js-literal specs (single quotes, bare keys) — same
+      // trust level as `eval`, so accept them through the literal parser
+      try {
+        const spec = new Function(`return (${rest.slice(j)})`)();
+        if (spec && typeof spec === "object") return browserApi(card)!.saveTool(spec);
+      } catch { /* fall through */ }
+      return `✕ bad tool spec — tool <title> {"name":"x","js":"…"}`;
+    }
+  }
+  if (verb === "runtool" || verb === "run") {
+    const sp = rest.split(/\s+/);
+    const tname = sp.pop() ?? "";
+    const card = findBrowser(sp.join(" "));
+    if (!card) return `✕ no browser found named "${sp.join(" ") || "?"}"`;
+    return await browserApi(card)!.runTool(tname);
+  }
+  if (verb === "tooldel" || verb === "rmtool") {
+    const sp = rest.split(/\s+/);
+    const tname = sp.pop() ?? "";
+    const card = findBrowser(sp.join(" "));
+    if (!card) return `✕ no browser found named "${sp.join(" ") || "?"}"`;
+    return browserApi(card)!.delTool(tname);
+  }
+  return `✕ unknown browser verb "${verb}" — open/read/links/search/extract/tables/grab/click/navigate/back/forward/clip/bookmark/eval/list/tabs/newtab/tab/tools/tool/runtool/tooldel`;
 };
 
 /** locate a chart card by title — same fuzzy logic as findSheet */
