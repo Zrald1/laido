@@ -137,12 +137,14 @@ const escCell = (raw: string) =>
  *  callout carries `> [!meta]` lines — cell formats, conditional rules,
  *  freeze/hide state, column widths, filters — all human-readable. */
 /** the sheet's tool state as `[!x] body` lines — sheetToMd persists them to
- *  markdown and undo snapshots stash them so Ctrl+Z restores tool state too */
-function collectMetaLines(card: HTMLElement): string[] {
+ *  markdown and undo snapshots stash them so Ctrl+Z restores tool state too.
+ *  Split into cell-level lines (tr/td state — travels with a stashed grid)
+ *  and card-level lines (dataset state — one per workbook sheet). */
+function cellMetaLines(root: HTMLElement): string[] {
   const meta: string[] = [];
   // cell formats — "B3=cur A1:A9=n2"
   const fmtBits: string[] = [];
-  for (const td of Array.from(card.querySelectorAll<HTMLElement>("td[data-raw][data-fmt]"))) {
+  for (const td of Array.from(root.querySelectorAll<HTMLElement>("td[data-raw][data-fmt]"))) {
     const el = td as HTMLElement;
     const r = Number(el.closest<HTMLElement>("tr")?.dataset.r ?? 0);
     const c = Number(el.dataset.c ?? 0);
@@ -150,30 +152,112 @@ function collectMetaLines(card: HTMLElement): string[] {
       fmtBits.push(`${cellName(r, c)}=${el.dataset.fmt}`);
   }
   if (fmtBits.length) meta.push(`[!fmt] ${fmtBits.join(" ")}`);
-  if (card.dataset.cf) meta.push(`[!cf] ${card.dataset.cf}`);
-  if (card.dataset.freeze) meta.push(`[!freeze] ${card.dataset.freeze}`);
+  // cell styles — "A1=b,i,f:#ffe08a B2=a:c"
+  const styBits: string[] = [];
+  for (const td of Array.from(root.querySelectorAll<HTMLElement>("td[data-raw][data-sty]"))) {
+    const el = td as HTMLElement;
+    const r = Number(el.closest<HTMLElement>("tr")?.dataset.r ?? 0);
+    const c = Number(el.dataset.c ?? 0);
+    if (el.dataset.sty) styBits.push(`${cellName(r, c)}=${el.dataset.sty}`);
+  }
+  if (styBits.length) meta.push(`[!style] ${styBits.join(" ")}`);
   // hidden rows/cols — data-uhide on tr (filters also use display:none —
   // only an explicit hide counts), data-h on the column header
   const hidR: string[] = [];
-  card.querySelectorAll<HTMLElement>(".sheet-grid tr[data-r]").forEach((tr) => {
+  root.querySelectorAll<HTMLElement>(".sheet-grid tr[data-r], tr[data-r]").forEach((tr) => {
     if (tr.dataset.uhide === "1") hidR.push(`r${Number(tr.dataset.r ?? 0) + 1}`);
   });
   const hidC: string[] = [];
-  card.querySelectorAll<HTMLElement>(".sheet-grid tr.sheet-cols th[data-c][data-h]").forEach((th) => {
+  root.querySelectorAll<HTMLElement>(".sheet-grid tr.sheet-cols th[data-c][data-h], tr.sheet-cols th[data-c][data-h]").forEach((th) => {
     hidC.push(`c${COLS(Number(th.dataset.c ?? 0))}`);
   });
   if (hidR.length || hidC.length) meta.push(`[!hide] ${[...hidR, ...hidC].join(",")}`);
   const w: string[] = [];
-  card.querySelectorAll<HTMLElement>(".sheet-grid tr.sheet-cols th[data-c][data-w]").forEach((th) => {
+  root.querySelectorAll<HTMLElement>(".sheet-grid tr.sheet-cols th[data-c][data-w], tr.sheet-cols th[data-c][data-w]").forEach((th) => {
     const el = th as HTMLElement;
     w.push(`${COLS(Number(el.dataset.c ?? 0))}=${el.dataset.w}`);
   });
   if (w.length) meta.push(`[!w] ${w.join(" ")}`);
+  return meta;
+}
+
+function dataMetaLines(card: HTMLElement): string[] {
+  const meta: string[] = [];
+  for (const tl of sheetTools(card)) meta.push(`[!tool] ${JSON.stringify(tl)}`);
+  // the AI chat thread — last 20 bubbles ride the callout so a note reload
+  // brings the whole conversation back
+  if (card.dataset.chat) meta.push(`[!chat] ${card.dataset.chat}`);
+  if (card.dataset.cf) meta.push(`[!cf] ${card.dataset.cf}`);
+  if (card.dataset.freeze) meta.push(`[!freeze] ${card.dataset.freeze}`);
   if (card.dataset.filter) meta.push(`[!filter] ${card.dataset.filter}`);
   if (card.dataset.view && card.dataset.view !== "grid")
     meta.push(`[!view] ${card.dataset.view}`);
   return meta;
 }
+
+function collectMetaLines(card: HTMLElement): string[] {
+  return [...cellMetaLines(card), ...dataMetaLines(card)];
+}
+
+/* ---------- workbook tabs — one card hosts many sheets. The ACTIVE sheet
+ *  is the grid in the DOM; inactive sheets stash their detached grid (its
+ *  listeners stay bound to this same card's closures, so a re-insert needs
+ *  no rewiring) plus their `[!x]` meta lines. sheetToMd writes every stash
+ *  as a `> [!tab] <name>` segment after the active grid's body. ---------- */
+interface SheetStash {
+  grid: HTMLElement; // a detached .sheet-grid table — fresh or blob-built
+  meta: string[]; // the sheet's `[!x]` lines at stash time
+  fresh?: boolean; // built from static markup — needs wireGridEls on activate
+}
+const stashMap = new WeakMap<HTMLElement, Map<string, SheetStash>>();
+const stashOf = (card: HTMLElement): Map<string, SheetStash> => {
+  let m = stashMap.get(card);
+  if (!m) stashMap.set(card, (m = new Map()));
+  return m;
+};
+
+/** the grid's rows back to `| cells |` lines — the serializer's format */
+const gridToLines = (grid: HTMLElement): string[] =>
+  Array.from(grid.querySelectorAll<HTMLElement>("tr[data-r]")).map(
+    (tr) =>
+      `| ${Array.from(tr.querySelectorAll<HTMLElement>("td[data-raw]"))
+        .map((td) => escCell(td.dataset.raw ?? ""))
+        .join(" | ")} |`,
+  );
+
+/** a detached `.sheet-grid` table from `| cells |` row lines — the same
+ *  markup sheetCallout emits; wireGridEls upgrades it on activation */
+const gridFromLines = (rowLines: string[], minRows = 1, minCols = 1): HTMLElement => {
+  const rows = rowLines.map(parseSheetLine);
+  while (rows.length < minRows) rows.push([]);
+  if (!rows.length) rows.push([]);
+  const cols = Math.max(minCols, ...rows.map((r) => r.length));
+  const grid = document.createElement("table");
+  grid.className = "sheet-grid";
+  const head = document.createElement("tr");
+  head.className = "sheet-cols";
+  head.innerHTML =
+    `<th class="sheet-corner">#</th>` +
+    Array.from({ length: cols }, (_, i) => `<th data-c="${i}">${escH(String.fromCharCode(65 + i))}</th>`).join("");
+  grid.append(head);
+  for (let r = 0; r < rows.length; r++) {
+    const tr = document.createElement("tr");
+    tr.dataset.r = String(r);
+    tr.innerHTML = `<th>${r + 1}</th>`;
+    for (let c = 0; c < cols; c++) {
+      const td = document.createElement("td");
+      td.dataset.raw = rows[r][c] ?? "";
+      td.dataset.c = String(c);
+      td.textContent = rows[r][c] ?? "";
+      tr.append(td);
+    }
+    const ctl = document.createElement("td");
+    ctl.className = "sheet-rowctl";
+    tr.append(ctl);
+    grid.append(tr);
+  }
+  return grid;
+};
 
 export function sheetToMd(card: HTMLElement): string {
   if (!card?.dataset) return "";
@@ -185,7 +269,17 @@ export function sheetToMd(card: HTMLElement): string {
     rows.push(`> | ${cells.join(" | ")} |`);
   }
   const meta = collectMetaLines(card).map((l) => `> ${l}`);
-  return `> [!sheet] ${DS(card.dataset.topic) ?? "sheet"}\n${rows.join("\n")}${meta.length ? "\n" + meta.join("\n") : ""}`;
+  let md = `> [!sheet] ${DS(card.dataset.topic) ?? "sheet"}\n${rows.join("\n")}${meta.length ? "\n" + meta.join("\n") : ""}`;
+  // workbook tabs — each stashed sheet rides as a `[!tab] name` segment:
+  // its rows + meta lines, verbatim, inside the same callout
+  const stashes = stashMap.get(card);
+  if (stashes)
+    for (const [name, st] of stashes) {
+      md += `\n> [!tab] ${name}`;
+      for (const l of gridToLines(st.grid)) md += `\n> ${l}`;
+      for (const l of st.meta) md += `\n> ${l}`;
+    }
+  return md;
 }
 
 const intIdx = (v: unknown): number =>
@@ -198,8 +292,172 @@ const tdAt = (card: HTMLElement, r: number, c: number) =>
 
 const rawAt = (card: HTMLElement, r: number, c: number) => tdAt(card, r, c)?.dataset.raw ?? "";
 
+/* ---------- cell styles — `data-sty` carries "b,i,u,s,f:#hex,k:#hex,a:l|c|r"
+ *  (bold/italic/underline/strike + fill/ink/align), serialized into a
+ *  `[!style] A1=b,i,f:#ffe08a` meta line exactly like `[!fmt]` ---------- */
+const cssColor2 = (v: string): string => {
+  const s = S(v).trim();
+  if (/^#[0-9a-f]{3,8}$/i.test(s)) return s;
+  if (/^(rgb|hsl)a?\([\d\s.,%/-]+\)$/i.test(s) && s.length < 60) return s;
+  return /^[a-z]{2,20}$/i.test(s) ? s.toLowerCase() : "";
+};
+
+interface CellSty { b: boolean; i: boolean; u: boolean; s: boolean; f: string; k: string; a: string; }
+const parseSty = (s: string): CellSty => {
+  const o: CellSty = { b: false, i: false, u: false, s: false, f: "", k: "", a: "" };
+  for (const bit of S(s).split(",")) {
+    const t = bit.trim();
+    if (t === "b") o.b = true;
+    else if (t === "i") o.i = true;
+    else if (t === "u") o.u = true;
+    else if (t === "s") o.s = true;
+    else if (t.startsWith("f:")) o.f = cssColor2(t.slice(2));
+    else if (t.startsWith("k:")) o.k = cssColor2(t.slice(2));
+    else if (t.startsWith("a:")) o.a = /^[lcr]$/i.test(t.slice(2)) ? t.slice(2).toLowerCase() : "";
+    // model quirk — "b:#ffd700" means bold + that fill color (same for i/u/s)
+    else if (/^[bius]:/i.test(t)) {
+      o[t[0].toLowerCase() as "b" | "i" | "u" | "s"] = true;
+      const col = cssColor2(t.slice(2));
+      if (col && !o.f) o.f = col;
+    }
+  }
+  return o;
+};
+const styStr = (o: CellSty): string =>
+  [
+    o.b ? "b" : "", o.i ? "i" : "", o.u ? "u" : "", o.s ? "s" : "",
+    o.f ? `f:${o.f}` : "", o.k ? `k:${o.k}` : "", o.a ? `a:${o.a}` : "",
+  ].filter(Boolean).join(",");
+/** does `s` describe font-layer styling (b/i/u/s/f:/k:/a:) vs a number format? */
+export const isStyleSpec = (s: string): boolean => !!styStr(parseSty(s));
+
+/** write `data-sty` AND paint the td — colors are pre-sanitized by parseSty */
+const applySty = (td: HTMLElement, spec: string) => {
+  const o = parseSty(spec);
+  const str = styStr(o);
+  if (str) td.dataset.sty = str; else delete td.dataset.sty;
+  td.style.fontWeight = o.b ? "700" : "";
+  td.style.fontStyle = o.i ? "italic" : "";
+  td.style.textDecoration = [o.u ? "underline" : "", o.s ? "line-through" : ""].filter(Boolean).join(" ");
+  td.style.background = o.f;
+  td.style.color = o.k;
+  td.style.textAlign = { l: "left", c: "center", r: "right" }[o.a] ?? "";
+};
+
+/* ---------- custom tools — a named sequence of steps the ribbon can stamp
+ *  onto the current selection. Persisted as `> [!tool] {json}` meta lines;
+ *  AI-generated via sheet_tool_gen, sanitized field-by-field here ---------- */
+export interface SheetToolStep {
+  do: "formula" | "fmt" | "style" | "fill" | "sort" | "sum" | "clear";
+  formula: string;   // {r} row, {c} col letter, {r1}{c1}{r2}{c2} selection bounds
+  each: boolean;     // stamp every selected cell vs just the anchor
+  fmt: string;       // number-format name
+  style: string;     // "b,i,f:#hex" style spec
+  dir: string;       // "asc"|"desc" for sort, "down"|"right"|"up"|"left" for fill
+}
+export interface SheetTool { name: string; icon: string; steps: SheetToolStep[]; }
+
+const SHEET_FMTS = new Set(["general", "n0", "n2", "comma", "cur", "pct", "pct0", "date", "time", "text"]);
+const sanitizeStep = (raw: unknown): SheetToolStep | null => {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  const op = S(o.do ?? o.op).toLowerCase();
+  const st: SheetToolStep = { do: "formula", formula: "", each: false, fmt: "", style: "", dir: "asc" };
+  if (op === "formula") {
+    st.do = "formula";
+    st.formula = S(o.formula).slice(0, 300).trim();
+    if (!st.formula.startsWith("=")) st.formula = `=${st.formula}`;
+    // no control chars / newlines inside a cell formula
+    st.formula = st.formula.replace(/[\r\n<>`]/g, "");
+    if (st.formula.length < 2) return null;
+    st.each = o.each === true || o.each === 1;
+  } else if (op === "fmt") {
+    st.do = "fmt";
+    st.fmt = S(o.fmt).toLowerCase();
+    if (!SHEET_FMTS.has(st.fmt)) return null;
+  } else if (op === "style") {
+    st.do = "style";
+    st.style = styStr(parseSty(S(o.style)));
+    if (!st.style) return null;
+  } else if (op === "fill") {
+    st.do = "fill";
+    st.dir = /^(down|right|up|left)$/i.test(S(o.dir)) ? S(o.dir).toLowerCase() : "down";
+  } else if (op === "sort") {
+    st.do = "sort";
+    st.dir = /desc/i.test(S(o.dir)) ? "desc" : "asc";
+  } else if (op === "sum") {
+    st.do = "sum";
+  } else if (op === "clear") {
+    st.do = "clear";
+  } else return null;
+  return st;
+};
+
+/** parse + validate a sheet tool spec — raw JSON from a `[!tool]` line or
+ *  the model's reply (json may sit inside extra prose) */
+export function sheetToolFromJson(raw: string): SheetTool | null {
+  const s = S(raw).trim();
+  const a = s.indexOf("{"), b = s.lastIndexOf("}");
+  if (a < 0 || b <= a) return null;
+  /* model output sometimes carries invisible or typographic characters that
+   * break JSON.parse while displaying fine — NBSP/ZWSP/BOM and curly quotes */
+  const specText = s
+    .slice(a, b + 1)
+    .replace(/[ ​﻿]/g, " ")
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'");
+  let o: unknown;
+  try { o = JSON.parse(specText); } catch { return null; }
+  if (!o || typeof o !== "object") return null;
+  const r = o as Record<string, unknown>;
+  const name = S(r.name).replace(/[\[\]<>|&"']/g, "").trim().slice(0, 28);
+  if (!name) return null;
+  const icon = Array.from(S(r.icon).trim()).slice(0, 2).join("") || "✦";
+  /* the model sometimes emits a duplicate `"steps": <count>` AFTER the real
+   * array — JSON.parse keeps the last key and the array is lost. Recover the
+   * first array-valued steps/ops from the raw text (string-aware scan) */
+  const rawSteps = (): unknown[] => {
+    const m = s.match(/"(?:steps|ops)"\s*:\s*\[/);
+    if (!m || m.index === undefined) return [];
+    let depth = 0, inStr = false, esc = false;
+    for (let j = m.index + m[0].length - 1; j < s.length; j++) {
+      const ch = s[j];
+      if (esc) { esc = false; continue; }
+      if (ch === "\\" && inStr) { esc = true; continue; }
+      if (ch === '"') { inStr = !inStr; continue; }
+      if (inStr) continue;
+      if (ch === "[") depth++;
+      else if (ch === "]" && --depth === 0) {
+        try { const arr = JSON.parse(s.slice(m.index + m[0].length - 1, j + 1)); return Array.isArray(arr) ? arr : []; }
+        catch { return []; }
+      }
+    }
+    return [];
+  };
+  const src = Array.isArray(r.steps) ? r.steps : Array.isArray(r.ops) ? r.ops : rawSteps();
+  const steps = src.slice(0, 8).map(sanitizeStep).filter((x): x is SheetToolStep => !!x);
+  return steps.length ? { name, icon, steps } : null;
+}
+
+/** the sheet's custom tools — raw JSON lives in data-tools; every read
+ *  re-parses so a hostile attribute can't inject pre-built objects */
+export const sheetTools = (card: HTMLElement): SheetTool[] => {
+  try {
+    const raw = JSON.parse(S(card.dataset.tools) || "[]");
+    return (Array.isArray(raw) ? raw : [])
+      .map((o) => sheetToolFromJson(JSON.stringify(o)))
+      .filter((t): t is SheetTool => !!t);
+  } catch {
+    return [];
+  }
+};
+const setSheetTools = (card: HTMLElement, tl: SheetTool[]) => {
+  if (tl.length) card.dataset.tools = JSON.stringify(tl);
+  else delete card.dataset.tools;
+};
+
 /** A1 → [row, col] (0-based) */
-function refRC(ref: string): [number, number] | null {
+export function refRC(ref: string): [number, number] | null {
   const m = ref.match(/^([A-Z]+)(\d+)$/i);
   if (!m) return null;
   let c = 0;
@@ -207,7 +465,7 @@ function refRC(ref: string): [number, number] | null {
   return [Number(m[2]) - 1, c - 1];
 }
 
-function expandRange(range: string): Array<[number, number]> {
+export function expandRange(range: string): Array<[number, number]> {
   const [a, b] = range.split(":");
   const ra = refRC(a ?? "");
   const rb = refRC(b ?? "");
@@ -2343,6 +2601,19 @@ export interface SheetApi {
   /* file interchange — .xlsx/.xls/.ods/.csv/.tsv; no path → file dialog */
   exportFile?(path?: string): Promise<string>;
   importFile?(path?: string, sheet?: string): Promise<string>;
+  /* cell styles + custom tools — the Excel-font layer and AI-generated
+   * step tools share the same entry points the ribbon uses */
+  setStyle?(cells: Array<[number, number]>, spec: string): void;
+  autoSum?(r: number, c: number): void;
+  listTools?(): SheetTool[];
+  addTool?(spec: unknown): string;
+  delTool?(name: string): boolean;
+  applyTool?(name: string, a?: [number, number], b?: [number, number]): string;
+  /* workbook tabs — every sheet name in this card; activating swaps the
+   * live grid in place so AI ops land on the named sheet */
+  tabs?(): string[];
+  activateTab?(name: string): void;
+  readTab?(name: string): string | null;
 }
 
 export const SHEET_SAVE_FILTERS = [
@@ -2899,8 +3170,9 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
     el.dataset.raw = el.textContent ?? "";
   };
 
-  g.addEventListener("mousedown", (e) => {
+  wrap.addEventListener("mousedown", (e) => {
     const t = e.target as HTMLElement;
+    if (!t.closest(".sheet-grid")) return;
     // right edge of a column header starts a resize drag, not a selection
     const thEdge = t.closest<HTMLElement>("tr.sheet-cols th[data-c]");
     if (thEdge && e.offsetX > thEdge.offsetWidth - 5) {
@@ -2964,7 +3236,7 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
     }
   });
 
-  g.addEventListener("mouseover", (e) => {
+  wrap.addEventListener("mouseover", (e) => {
     const td = (e.target as HTMLElement).closest<HTMLElement>("td[data-raw]");
     if (!td) return;
     const r = Number(td.closest("tr")!.dataset.r);
@@ -3092,24 +3364,28 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
   }
   // a reloaded grid's cells came in as static markup — upgrade them to live
   // cells so they edit/recompute like a fresh card; rewire the header
-  // selects and give every row its trailing control cell too
-  g.querySelectorAll<HTMLElement>("tr.sheet-cols th[data-c]").forEach(wireColTh);
-  g.querySelectorAll<HTMLElement>("tr[data-r]").forEach((tr) => {
-    const th = tr.querySelector<HTMLElement>("th");
-    if (th) wireRowTh(th);
-    if (!tr.querySelector("td.sheet-rowctl")) {
-      const ctl = document.createElement("td");
-      ctl.className = "sheet-rowctl";
-      tr.append(ctl);
-    }
-  });
-  g.querySelectorAll<HTMLElement>("tr[data-r] td[data-raw]").forEach((old) => {
-    const r = Number(old.closest<HTMLElement>("tr")!.dataset.r);
-    const c = Number(old.dataset.c ?? Array.from(old.parentElement!.children).indexOf(old) - 1);
-    const fresh = makeTd(card, r, c, old.dataset.raw ?? "", onChange, ui);
-    old.replaceWith(fresh);
-  });
-  relabel(grid);
+  // selects and give every row its trailing control cell too. Also runs when
+  // a workbook tab's blob-built grid activates.
+  const wireGridEls = (gg: HTMLElement) => {
+    gg.querySelectorAll<HTMLElement>("tr.sheet-cols th[data-c]").forEach(wireColTh);
+    gg.querySelectorAll<HTMLElement>("tr[data-r]").forEach((tr) => {
+      const th = tr.querySelector<HTMLElement>("th");
+      if (th) wireRowTh(th);
+      if (!tr.querySelector("td.sheet-rowctl")) {
+        const ctl = document.createElement("td");
+        ctl.className = "sheet-rowctl";
+        tr.append(ctl);
+      }
+    });
+    gg.querySelectorAll<HTMLElement>("tr[data-r] td[data-raw]").forEach((old) => {
+      const r = Number(old.closest<HTMLElement>("tr")!.dataset.r);
+      const c = Number(old.dataset.c ?? Array.from(old.parentElement!.children).indexOf(old) - 1);
+      const fresh = makeTd(card, r, c, old.dataset.raw ?? "", onChange, ui);
+      old.replaceWith(fresh);
+    });
+    relabel(gg);
+  };
+  wireGridEls(g);
 
   /* ================= tools layer =================
    *  the everyday Excel surface: filters, conditional formats, freeze panes,
@@ -3345,6 +3621,93 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
     for (let r = b[0][0]; r <= b[1][0]; r++)
       for (let c = b[0][1]; c <= b[1][1]; c++) out.push([r, c]);
     return out;
+  };
+
+  /* ---- cell styles onto the selection — set, toggle a flag, or clear ---- */
+  const setStyleOn = (cells: Array<[number, number]>, spec: string) => {
+    if (!cells.length) return;
+    pushUndo();
+    for (const [r, c] of cells) {
+      const td = tdAt(card, r, c);
+      if (td) applySty(td, spec);
+    }
+    onChange();
+  };
+  const toggleStyBit = (bit: "b" | "i" | "u" | "s") => {
+    const cells = boundsCells();
+    if (!cells.length) return;
+    pushUndo();
+    // Excel semantics: if every cell already has it, toggling removes it
+    const all = cells.every(([r, c]) => parseSty(tdAt(card, r, c)?.dataset.sty ?? "")[bit]);
+    for (const [r, c] of cells) {
+      const td = tdAt(card, r, c);
+      if (!td) continue;
+      const o = parseSty(td.dataset.sty ?? "");
+      o[bit] = !all;
+      applySty(td, styStr(o));
+    }
+    onChange();
+  };
+
+  /* ---- custom tools — a step sequence stamped onto the selection ---- */
+  const subst = (f: string, r: number, c: number, b: [[number, number], [number, number]]) =>
+    f
+      .replace(/\{r1\}/g, String(b[0][0] + 1)).replace(/\{c1\}/g, COLS(b[0][1]))
+      .replace(/\{r2\}/g, String(b[1][0] + 1)).replace(/\{c2\}/g, COLS(b[1][1]))
+      .replace(/\{r\}/g, String(r + 1)).replace(/\{c\}/g, COLS(c))
+      .replace(/\{R\}/g, String(R())).replace(/\{C\}/g, String(C()));
+
+  const runSheetTool = (tl: SheetTool, bounds?: [[number, number], [number, number]]) => {
+    const b = bounds ?? selBounds();
+    if (!b) return "✕ select a cell or range first";
+    const cells: Array<[number, number]> = [];
+    for (let r = b[0][0]; r <= b[1][0]; r++)
+      for (let c = b[0][1]; c <= b[1][1]; c++) cells.push([r, c]);
+    if (!cells.length) return "✕ empty range";
+    pushUndo();
+    // an apply range can reach past the grid's edge — grow to cover it so
+    // stamps don't silently drop (the `set` path does the same)
+    growTo(b[1][0], b[1][1]);
+    for (const st of tl.steps) {
+      if (st.do === "formula") {
+        const targets = st.each ? cells : [cells[0]];
+        for (const [r, c] of targets) {
+          const td = tdAt(card, r, c);
+          if (td) td.dataset.raw = subst(st.formula, r, c, b);
+        }
+      } else if (st.do === "fmt") {
+        for (const [r, c] of cells) {
+          const td = tdAt(card, r, c);
+          if (td) td.dataset.fmt = st.fmt === "general" ? "" : st.fmt;
+        }
+      } else if (st.do === "style") {
+        for (const [r, c] of cells) {
+          const td = tdAt(card, r, c);
+          if (td) applySty(td, st.style);
+        }
+      } else if (st.do === "fill") {
+        const horiz = st.dir === "right" || st.dir === "left";
+        const [srcR, srcC] = st.dir === "up" ? b[1] : st.dir === "left" ? [b[0][0], b[1][1]] as [number, number] : b[0];
+        const src = tdAt(card, srcR, srcC)?.dataset.raw ?? "";
+        for (const [r, c] of cells) {
+          if (r === srcR && c === srcC) continue;
+          const td = tdAt(card, r, c);
+          if (td && src) td.dataset.raw = src.startsWith("=") ? offsetRefs(src, horiz ? 0 : r - srcR, horiz ? c - srcC : 0) : src;
+        }
+      } else if (st.do === "sort") {
+        sortCol(b[0][1], st.dir !== "desc");
+      } else if (st.do === "sum") {
+        for (const [r, c] of cells.slice(0, 4)) {
+          const td = tdAt(card, r, c);
+          if (td) autoSum(td);
+        }
+      } else if (st.do === "clear") {
+        clearRange(b[0], b[1]);
+      }
+    }
+    repaint();
+    onChange();
+    return `tool "${tl.name}" applied`;
   };
 
   /* ---- context menu (right-click) — the Excel surface in one place ---- */
@@ -4181,6 +4544,31 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
           if (!fm) continue;
           filters.set(colOf(fm[1]), new Set(fm[2].split("|")));
         }
+      } else if (m[1] === "style") {
+        for (const bit of body.trim().split(/\s+/)) {
+          const eq = bit.indexOf("=");
+          if (eq < 0) continue;
+          const rc = refRC(bit.slice(0, eq));
+          const td = rc ? tdAt(card, rc[0], rc[1]) : null;
+          if (td) applySty(td, bit.slice(eq + 1));
+        }
+      } else if (m[1] === "tool") {
+        // one line per tool — accumulate into data-tools (raw JSON; the
+        // sanitize happens lazily in sheetTools() on read)
+        const cur: unknown[] = (() => { try { return JSON.parse(card.dataset.tools ?? "[]"); } catch { return []; } })();
+        try { const one = JSON.parse(body.trim()); if (one && typeof one === "object") cur.push(one); } catch { /* bad tool line — skip */ }
+        card.dataset.tools = JSON.stringify(cur);
+      } else if (m[1] === "chat") {
+        // one line, the whole bubble array — validated by shape on read
+        try {
+          const arr = JSON.parse(body.trim());
+          if (Array.isArray(arr))
+            card.dataset.chat = JSON.stringify(
+              arr.filter((b) => b && typeof b === "object" && typeof (b as { t?: unknown }).t === "string").slice(-20),
+            );
+        } catch {
+          /* bad chat line — skip */
+        }
       }
     }
     applyView();
@@ -4188,8 +4576,9 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
 
   /* ---- wire the tool gestures into the grid ---- */
   // right-click → the context menu
-  grid!.addEventListener("contextmenu", (e) => {
+  wrap.addEventListener("contextmenu", (e) => {
     const t = e.target as HTMLElement;
+    if (!t.closest(".sheet-grid")) return;
     if (t.closest(".sheet-findbar") || t.closest(".sheet-tools")) return;
     e.preventDefault();
     const td = t.closest<HTMLElement>("td[data-raw]");
@@ -4228,7 +4617,7 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
 
   // column-resize drag on the right edge of a header + resize cursor
   let colResize: { c: number; x0: number; w0: number; th: HTMLElement } | null = null;
-  grid!.addEventListener("mousemove", (e) => {
+  wrap.addEventListener("mousemove", (e) => {
     const th = (e.target as HTMLElement).closest<HTMLElement>("tr.sheet-cols th[data-c]");
     if (th && !colResize) {
       const near = e.offsetX > th.offsetWidth - 5;
@@ -4334,6 +4723,641 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
       return `import failed: ${String(e)}`;
     }
   };
+
+  /* ================= top ribbon — the Excel Home surface =================
+   *  always-visible row of the everyday tools: AutoSum, font styles, fill /
+   *  ink / align, number format, sort/filter, freeze, find — plus the sheet's
+   *  own AI-created tools. Everything drives the same helpers the context
+   *  menu uses, so undo and persistence behave identically. */
+  const ribbon = document.createElement("div");
+  ribbon.className = "sheet-ribbon";
+  ribbon.contentEditable = "false";
+  const rbtn = (label: string, tip: string, fn: () => void, cls = "") => {
+    const b = document.createElement("button");
+    b.className = `sheet-rbtn${cls ? " " + cls : ""}`;
+    b.textContent = label;
+    b.title = tip;
+    b.contentEditable = "false";
+    b.addEventListener("mousedown", (e) => e.preventDefault()); // keep grid focus/selection
+    b.addEventListener("click", (e) => { e.stopPropagation(); fn(); });
+    ribbon.append(b);
+    return b;
+  };
+  const rsep = () => {
+    const d = document.createElement("span");
+    d.className = "sheet-rsep";
+    ribbon.append(d);
+  };
+  /** small popover swatch picker — fill and ink share it */
+  const swatches = (anchor: HTMLElement, fn: (col: string) => void) => {
+    card.querySelectorAll(".sheet-swp").forEach((x) => x.remove());
+    const p = document.createElement("div");
+    p.className = "sheet-swp";
+    p.contentEditable = "false";
+    const cols = ["", "#ffffff", "#ffe08a", "#ffc9c9", "#c9f0d0", "#cfe3ff", "#e6d4ff", "#ffd9b3", "#333333", "#666666", "#e2604c", "#2e7d4f", "#2b5fd9", "#7a4fd0"];
+    for (const col of cols) {
+      const s = document.createElement("button");
+      s.className = "sheet-swc";
+      s.title = col || "none";
+      s.style.background = col || "var(--bg)";
+      if (!col) s.textContent = "∅";
+      s.addEventListener("mousedown", (e) => e.preventDefault());
+      s.addEventListener("click", (e) => { e.stopPropagation(); p.remove(); fn(col); });
+      p.append(s);
+    }
+    anchor.after(p);
+    setTimeout(() => document.addEventListener("mousedown", (e) => {
+      if (!p.contains(e.target as Node)) p.remove();
+    }, { once: true }), 0);
+  };
+  const anchorCell = (): HTMLElement | null => {
+    const b = selBounds();
+    return b ? tdAt(card, b[1][0], b[1][1]) : null;
+  };
+  const targetCells = (): Array<[number, number]> => boundsCells();
+
+  // Σ — the one Excel tool everyone reaches for
+  rbtn("Σ", "AutoSum — total the numbers above/left into the selected cell", () => {
+    const td = anchorCell();
+    if (td) autoSum(td);
+  });
+  rsep();
+  // font group
+  rbtn("B", "bold", () => toggleStyBit("b"), "f-b");
+  rbtn("I", "italic", () => toggleStyBit("i"), "f-i");
+  rbtn("U", "underline", () => toggleStyBit("u"), "f-u");
+  rbtn("S", "strikethrough", () => toggleStyBit("s"), "f-s");
+  const fbtn = rbtn("▨", "fill color — shade the selected cells", () => {});
+  fbtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    swatches(fbtn, (col) => {
+      const cells = targetCells();
+      if (!cells.length) return;
+      pushUndo();
+      for (const [r, c] of cells) {
+        const td = tdAt(card, r, c);
+        if (!td) continue;
+        const o = parseSty(td.dataset.sty ?? "");
+        o.f = col;
+        applySty(td, styStr(o));
+      }
+      onChange();
+    });
+  });
+  const kbtn = rbtn("A̲", "font color — ink the selected cells", () => {});
+  kbtn.classList.add("f-ink");
+  kbtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    swatches(kbtn, (col) => {
+      const cells = targetCells();
+      if (!cells.length) return;
+      pushUndo();
+      for (const [r, c] of cells) {
+        const td = tdAt(card, r, c);
+        if (!td) continue;
+        const o = parseSty(td.dataset.sty ?? "");
+        o.k = col;
+        applySty(td, styStr(o));
+      }
+      onChange();
+    });
+  });
+  rsep();
+  // alignment — one button cycles left→center→right→left on the selection
+  rbtn("≡", "align — cycle left → center → right on the selection", () => {
+    const cells = targetCells();
+    if (!cells.length) return;
+    pushUndo();
+    const cur = parseSty(tdAt(card, cells[0][0], cells[0][1])?.dataset.sty ?? "").a;
+    const nxt = cur === "l" ? "c" : cur === "c" ? "r" : "l";
+    for (const [r, c] of cells) {
+      const td = tdAt(card, r, c);
+      if (!td) continue;
+      const o = parseSty(td.dataset.sty ?? "");
+      o.a = nxt;
+      applySty(td, styStr(o));
+    }
+    onChange();
+  });
+  // number format dropdown
+  const fmtSel = document.createElement("select");
+  fmtSel.className = "sheet-rfmt";
+  fmtSel.title = "number format for the selection";
+  fmtSel.contentEditable = "false";
+  for (const f of ["general", "n0", "n2", "comma", "cur", "pct", "pct0", "date", "time", "text"]) {
+    const o = document.createElement("option");
+    o.value = f;
+    o.textContent = fmtLabel(f);
+    fmtSel.append(o);
+  }
+  fmtSel.addEventListener("mousedown", (e) => e.stopPropagation());
+  fmtSel.addEventListener("change", () => {
+    setFmtOn(targetCells(), fmtSel.value);
+    fmtSel.value = "general";
+  });
+  ribbon.append(fmtSel);
+  rsep();
+  // editing group
+  rbtn("A→Z", "sort the selected column ascending", () => { const b = selBounds(); if (b) { pushUndo(); sortCol(b[0][1], true); } });
+  rbtn("Z→A", "sort the selected column descending", () => { const b = selBounds(); if (b) { pushUndo(); sortCol(b[0][1], false); } });
+  rbtn("⧨", "filter the selected column", () => { const b = selBounds(); if (b) openFilter(b[0][1]); });
+  rbtn("⧉", "remove rows duplicated in the selected column", () => { const b = selBounds(); if (b) dedupe(b[0][1]); });
+  rsep();
+  rbtn("❄", "freeze the top row + first column", () => {
+    pushUndo();
+    const on = !grid!.classList.contains("frz-r");
+    setFreeze(on, on);
+  });
+  rbtn("⌫", "clear the selected cells", () => { const b = selBounds(); if (b) { pushUndo(); clearRange(b[0], b[1]); } });
+  rbtn("🔎", "find & replace", () => openFind());
+
+  /* custom tools — the sheet's own AI-generated step tools */
+  const ctools = document.createElement("span");
+  ctools.className = "sheet-ctools";
+  ribbon.append(ctools);
+  const renderCtools = () => {
+    ctools.querySelectorAll(".sheet-ctool").forEach((x) => x.remove());
+    const anchor = ctools.querySelector(".sheet-ctool-new");
+    for (const tl of sheetTools(card)) {
+      const tb = document.createElement("button");
+      tb.className = "sheet-rbtn sheet-ctool";
+      tb.textContent = tl.icon;
+      tb.title = `${tl.name} — your tool: apply to the current selection`;
+      tb.contentEditable = "false";
+      tb.addEventListener("mousedown", (e) => e.preventDefault());
+      tb.addEventListener("click", (e) => {
+        e.stopPropagation();
+        runSheetTool(tl);
+      });
+      ctools.insertBefore(tb, anchor);
+    }
+  };
+  renderCtools();
+  const rebuildCtools = renderCtools;
+
+  /* the ✦ creator — describe a tool in words, the model drafts the spec,
+   * or capture nothing (sheets' tools are behavior, not placement) */
+  const mkToolBtn = rbtn("✦", "create your own sheet tool — describe it, the AI builds it", () => {});
+  mkToolBtn.classList.add("sheet-ctool-new");
+  ctools.append(mkToolBtn);
+  const openToolMaker = () => {
+    card.querySelectorAll(".sheet-toolpop").forEach((x) => x.remove());
+    const pop = document.createElement("div");
+    pop.className = "sheet-toolpop";
+    pop.contentEditable = "false";
+    pop.innerHTML =
+      `<div class="dt-title">create a sheet tool</div>` +
+      `<div class="dt-sub">describe what it should do to the selected cells — "sum each row", "mark overdue red", "running total"</div>` +
+      `<input class="dt-in" maxlength="140" placeholder="e.g. a running-total column">` +
+      `<div class="dt-row"><button class="dt-go">create</button><button class="dt-x">close</button></div>` +
+      `<div class="dt-msg"></div><div class="dt-list"></div>`;
+    mkToolBtn.after(pop);
+    const inp = pop.querySelector<HTMLInputElement>(".dt-in")!;
+    const msg = pop.querySelector<HTMLElement>(".dt-msg")!;
+    const list = pop.querySelector<HTMLElement>(".dt-list")!;
+    const renderList = () => {
+      list.innerHTML = "";
+      for (const tl of sheetTools(card)) {
+        const row = document.createElement("div");
+        row.className = "dt-tool";
+        row.innerHTML = `<span class="dt-tic">${escH(tl.icon)}</span><span class="dt-tn">${escH(tl.name)}</span>`;
+        const del = document.createElement("button");
+        del.className = "dt-del";
+        del.textContent = "✕";
+        del.title = `remove ${tl.name}`;
+        del.addEventListener("click", (e) => {
+          e.stopPropagation();
+          pushUndo();
+          setSheetTools(card, sheetTools(card).filter((t) => t.name !== tl.name));
+          rebuildCtools();
+          renderList();
+          onChange();
+        });
+        row.append(del);
+        list.append(row);
+      }
+    };
+    renderList();
+    const save = (tl: SheetTool | null, verb: string) => {
+      if (!tl) {
+        msg.textContent = "✕ couldn't build that tool — try rephrasing (needs at least one step)";
+        return;
+      }
+      pushUndo();
+      const tools = sheetTools(card).filter((t) => t.name !== tl.name);
+      tools.push(tl);
+      setSheetTools(card, tools);
+      rebuildCtools();
+      renderList();
+      onChange();
+      msg.textContent = `✓ ${verb} "${tl.name}" — it's on the ribbon now`;
+    };
+    pop.querySelector<HTMLElement>(".dt-go")!.addEventListener("click", () => {
+      const desc = inp.value.trim();
+      if (!desc) { msg.textContent = "describe the tool first"; return; }
+      msg.textContent = "asking the model…";
+      void invoke<string>("sheet_tool_gen", { prompt: desc })
+        .then((raw) => save(sheetToolFromJson(raw ?? ""), "created"))
+        .catch((e) => { msg.textContent = `✕ ${String(e).slice(0, 140)}`; });
+    });
+    inp.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") pop.querySelector<HTMLButtonElement>(".dt-go")!.click();
+    });
+    pop.querySelector<HTMLElement>(".dt-x")!.addEventListener("click", () => pop.remove());
+    setTimeout(() => inp.focus(), 0);
+  };
+  mkToolBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    card.querySelector(".sheet-toolpop") ? card.querySelectorAll(".sheet-toolpop").forEach((x) => x.remove()) : openToolMaker();
+  });
+
+  card.insertBefore(ribbon, wrap);
+
+  /* ================= bottom AI bar — plain-words control of this grid ====
+   *  the user describes the edit ("bold the headers", "sum column B",
+   *  "make a running-total tool", "fill the costs down") — the model
+   *  answers with ```sheet fences that run through the SAME dispatcher as
+   *  the terminal's, so every verb works here. The reply and each action's
+   *  result line land in the dock; each fence also posts an activity trace. */
+  const chat = document.createElement("div");
+  chat.className = "sheet-chat";
+  chat.contentEditable = "false";
+  chat.innerHTML =
+    `<div class="sheet-chat-log" hidden></div>` +
+    `<div class="sheet-chat-bar">` +
+    `<span class="sheet-chat-ic">✦</span>` +
+    `<input class="sheet-chat-in" maxlength="280" spellcheck="false" ` +
+    `placeholder="ask AI — 'bold the headers', 'sum column B', 'chart this', 'a running-total tool'…">` +
+    `</div>`;
+  const chatIn = chat.querySelector<HTMLInputElement>(".sheet-chat-in")!;
+  const chatLog = chat.querySelector<HTMLElement>(".sheet-chat-log")!;
+  const chatHist: { role: string; content: string }[] = [];
+  /* the thread persists on the card itself — a note save re-renders the
+   * callout DOM, and without this the whole conversation would evaporate.
+   * dataset.chat carries the last 20 bubbles across every re-wire. */
+  interface ChatBubble { c: string; t: string }
+  const persistChat = () => {
+    const host = liveCard().querySelector<HTMLElement>(".sheet-chat-log") ?? chatLog;
+    const bubbles: ChatBubble[] = Array.from(host.querySelectorAll<HTMLElement>(".sc-msg"))
+      .map((m) => ({ c: m.className.replace("sc-msg ", ""), t: m.textContent ?? "" }))
+      .filter((b) => b.c !== "wait")
+      .slice(-20);
+    liveCard().dataset.chat = JSON.stringify(bubbles);
+  };
+  const liveCard = (): HTMLElement =>
+    // a mid-flight AI mutation (spawn, new sheet) re-renders the callout and
+    // swaps this element out — later bubbles must land on the replacement
+    // card, not the detached one
+    card.isConnected
+      ? card
+      : (Array.from(document.querySelectorAll<HTMLElement>(".sheet-card")).find(
+          (c) => (c.dataset.topic ?? "") === (card.dataset.topic ?? "sheet"),
+        ) ?? card);
+  const chatAdd = (cls: string, text: string) => {
+    const m = document.createElement("div");
+    m.className = `sc-msg ${cls}`;
+    m.textContent = text;
+    const host = liveCard().querySelector<HTMLElement>(".sheet-chat-log") ?? chatLog;
+    host.append(m);
+    while (host.children.length > 40) host.firstElementChild!.remove();
+    host.hidden = false;
+    host.scrollTop = host.scrollHeight;
+    if (cls !== "wait") persistChat();
+    return m;
+  };
+  try {
+    for (const b of JSON.parse(card.dataset.chat ?? "[]") as ChatBubble[]) {
+      const m = document.createElement("div");
+      m.className = `sc-msg ${b.c}`;
+      m.textContent = b.t;
+      chatLog.append(m);
+      if (b.c === "user" || b.c === "ai")
+        chatHist.push({ role: b.c === "user" ? "user" : "assistant", content: b.t });
+    }
+    if (chatLog.children.length) { chatLog.hidden = false; chatLog.scrollTop = chatLog.scrollHeight; }
+  } catch {
+    /* malformed chat state — start clean */
+  }
+  const gridTsv = () => {
+    const rows: string[] = [];
+    for (let r = 0; r < Math.min(R(), 30); r++) {
+      const vals: string[] = [];
+      for (let c = 0; c < Math.min(C(), 12); c++) vals.push(rawAt(card, r, c));
+      if (vals.some((v) => v.trim())) rows.push(vals.join("\t"));
+    }
+    return rows.join("\n");
+  };
+  interface SheetAi {
+    text: string;
+    sheet: string[];
+    slides: string[];
+    todo: string[];
+    chart: string[];
+    cards: string[];
+    maps: string[];
+    base: string[];
+    browser: string[];
+    laido: string[];
+  }
+  /* `laido` fences carry only the spawnable-widget verbs for the chat — the
+   * sheet can birth a canvas/agenda/graph sibling without a terminal */
+  const runLaidoSpawn = async (body: string): Promise<string | null> => {
+    const m = body.trim().match(/^(?:widget\s+)?(canvas|draw|agenda|due|graph|map-view)\b\s*(.*)$/i);
+    if (!m) return null;
+    const kind = m[1].toLowerCase();
+    const title = (m[2] ?? "").replace(/^new\s+/i, "").replace(/^a\s+/i, "").trim();
+    const e = await import("./editor.js");
+    const c =
+      kind === "canvas" || kind === "draw" ? e.spawnCanvasCard(title || "canvas")
+      : kind === "agenda" || kind === "due" ? e.spawnAgendaCard(title || "agenda")
+      : e.spawnGraphCard(title || "vault map");
+    return `spawned ${kind} card — "${c.dataset.topic ?? c.dataset.title ?? title}"`;
+  };
+  const askSheet = async (q: string) => {
+    chatIn.disabled = true;
+    const pend = chatAdd("wait", "…");
+    const title = card.dataset.topic ?? "sheet";
+    const b = selBounds();
+    const sel = b ? `${cellName(b[0][0], b[0][1])}:${cellName(b[1][0], b[1][1])}` : "none";
+    const others =
+      `sheet "${title}" ${R()}x${C()} — selected ${sel}. Current grid (TSV):\n` +
+      `${gridTsv() || "(empty)"}\nThe user is asking about THIS sheet — aim every ` +
+      `\`\`\`sheet fence at "${title}". Widget requests (chart, deck, todo, ` +
+      `cards, map, base, browser) use their own \`\`\` fences with a ` +
+      `\`new <title>\` verb. canvas/agenda/graph spawn via ` +
+      `\`\`\`laido\nwidget <kind> <title>\`\`\`.`;
+    try {
+      const { runWidgetFence } = await import("./term.js");
+      const r = await invoke<SheetAi>("term_ai", {
+        prompt: q,
+        history: chatHist.slice(-8),
+        others,
+        model: null,
+        persona: null,
+      });
+      chatHist.push({ role: "user", content: q });
+      if (r.text.trim()) chatHist.push({ role: "assistant", content: r.text });
+      pend.remove();
+      let readBack = false;
+      const outs: string[] = [];
+      const kinds: [keyof SheetAi, string][] = [
+        ["sheet", "sheet"], ["slides", "slides"], ["todo", "todo"], ["chart", "chart"],
+        ["cards", "cards"], ["maps", "map"], ["base", "base"], ["browser", "browser"],
+      ];
+      for (const [field, kind] of kinds) {
+        for (const body of (r[field] as string[]) ?? []) {
+          const out = await runWidgetFence(kind, body);
+          const head = body.trim().split("\n")[0];
+          outs.push(`${kind}: ${head} → ${out}`);
+          chatAdd("out", out);
+          const v = (head.split(/\s+/)[0] ?? "").toLowerCase();
+          if (kind === "sheet" && (v === "read" || v === "get")) readBack = true;
+          void window.__TAURI__?.event?.emit("agent:activity", {
+            text: `sheet ✦ ${title}: ${kind} ${head.slice(0, 60)}`,
+          });
+        }
+      }
+      /* "…and apply it to A1:B9" — the model sometimes registers the tool
+       * but forgets the apply fence; the ask named a range, so apply the
+       * tool it just created ourselves */
+      if (/\bapply\b/i.test(q) && !outs.some((o) => /\bapply\b/i.test(o))) {
+        const created = outs.map((o) => o.match(/tool "([^"]+)" saved/)).find(Boolean)?.[1];
+        const range = q.match(/[A-Za-z]{1,3}\d{1,4}\s*:\s*[A-Za-z]{1,3}\d{1,4}/)?.[0]?.replace(/\s+/g, "");
+        if (created && range) {
+          const out = await runWidgetFence("sheet", `apply ${card.dataset.topic ?? ""} ${created} ${range}`);
+          chatAdd("out", out);
+          outs.push(`sheet: apply ${created} ${range} → ${out}`);
+        }
+      }
+      for (const body of r.laido ?? []) {
+        const out = await runLaidoSpawn(body).catch((e) => `✕ ${String(e).slice(0, 80)}`);
+        if (out) {
+          chatAdd(out.startsWith("✕") ? "err" : "out", out);
+          outs.push(`laido → ${out}`);
+        } else {
+          chatAdd("err", `laido verb not handled from a sheet: ${body.trim().slice(0, 60)}`);
+        }
+      }
+      /* the user explicitly asked for a spawnable widget but the model spent
+       * the turn on sheet edits — intent wins: spawn it ourselves so "spawn
+       * a canvas" always lands a canvas */
+      const wantSpawn = q.match(/\b(canvas|agenda|graph)\b/i)?.[1]?.toLowerCase();
+      if (wantSpawn && /\b(spawn|creat|make|new|add|open|draw|give|want|need|show)\w*/i.test(q)) {
+        const sel =
+          wantSpawn === "canvas" ? ".canvas-card" : wantSpawn === "agenda" ? ".agenda-card" : ".graph-card";
+        if (!document.querySelector(sel)) {
+          const e = await import("./editor.js");
+          const c =
+            wantSpawn === "canvas" ? e.spawnCanvasCard("canvas")
+            : wantSpawn === "agenda" ? e.spawnAgendaCard("agenda")
+            : e.spawnGraphCard("vault map");
+          chatAdd("out", `spawned ${wantSpawn} card — "${c.dataset.topic ?? c.dataset.title ?? wantSpawn}"`);
+        }
+      }
+      if (readBack && outs.length) {
+        // "what's the total?" — feed the read back for a spoken answer
+        const r2 = await invoke<SheetAi>("term_ai", {
+          prompt: `sheet read result:\n${outs.join("\n")}\nanswer the original request: ${q}`,
+          history: chatHist.slice(-8),
+          others: "",
+          model: null,
+          persona: null,
+        });
+        if (r2.text.trim()) {
+          chatHist.push({ role: "assistant", content: r2.text });
+          chatAdd("ai", r2.text.trim());
+        } else chatAdd("out", outs.join(" · "));
+      } else if (!outs.length) {
+        chatAdd(r.text.trim() ? "ai" : "err", r.text.trim() || "no action came back — try rephrasing");
+      }
+    } catch (e) {
+      pend.remove();
+      chatAdd("err", `✕ ${String(e).slice(0, 140)}`);
+    } finally {
+      chatIn.disabled = false;
+      chatIn.focus();
+    }
+  };
+  chatIn.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter" && chatIn.value.trim()) {
+      const q = chatIn.value.trim();
+      chatIn.value = "";
+      chatAdd("user", q);
+      void askSheet(q);
+    }
+  });
+  chatIn.addEventListener("mousedown", (e) => e.stopPropagation());
+  card.append(chat);
+
+  /* ================= workbook tabs — this card IS a workbook ============
+   *  one pill per sheet in THIS card: click swaps the active grid in place
+   *  (Excel semantics), drag a pill off the strip and that sheet splits out
+   *  into its own floating card. Inactive sheets live in the stash as
+   *  detached grids + their [!x] meta lines; sheetToMd writes them back as
+   *  `> [!tab] name` segments inside this same callout. */
+  const SHEET_DS_KEYS = ["meta", "tools", "chat", "cf", "freeze", "filter", "view", "source"];
+  // `[!tab]` segments hydrated from markdown — one-time, then data-sheets goes
+  try {
+    const rawSheets = JSON.parse(card.dataset.sheets ?? "{}") as Record<string, string[]>;
+    for (const [name, lines] of Object.entries(rawSheets)) {
+      const rowLines = lines.filter((l) => !l.trim().startsWith("[!"));
+      const meta = lines.filter((l) => l.trim().startsWith("[!"));
+      stashOf(card).set(name, { grid: gridFromLines(rowLines), meta, fresh: true });
+    }
+  } catch {
+    /* malformed sheets payload — ignore */
+  }
+  delete card.dataset.sheets;
+
+  const storeActive = () => {
+    const g = card.querySelector<HTMLElement>(".sheet-grid");
+    if (!g) return;
+    stashOf(card).set(card.dataset.topic ?? "sheet", {
+      grid: g,
+      meta: [...cellMetaLines(g), ...dataMetaLines(card)],
+      fresh: false,
+    });
+    g.remove();
+  };
+  const reseedChat = () => {
+    chatLog.innerHTML = "";
+    chatHist.length = 0;
+    try {
+      for (const b of JSON.parse(card.dataset.chat ?? "[]") as ChatBubble[]) {
+        const m = document.createElement("div");
+        m.className = `sc-msg ${b.c}`;
+        m.textContent = b.t;
+        chatLog.append(m);
+        if (b.c === "user" || b.c === "ai")
+          chatHist.push({ role: b.c === "user" ? "user" : "assistant", content: b.t });
+      }
+      chatLog.hidden = chatLog.children.length === 0;
+      chatLog.scrollTop = chatLog.scrollHeight;
+    } catch {
+      /* malformed chat state — start clean */
+    }
+  };
+  const activateSheet = (name: string) => {
+    name = name.trim() || "sheet";
+    if (name === (card.dataset.topic ?? "")) return;
+    storeActive();
+    // undo snapshots are grid-scoped — a cross-tab restore would inject this
+    // sheet's cells into the other grid, so history resets on a switch
+    undoStk.length = 0;
+    redoStk.length = 0;
+    // soft tool-state reset: the closure maps + card view belong to the
+    // outgoing sheet — but never touch the grids (the stash keeps its DOM)
+    filters.clear();
+    cfRules.clear();
+    for (const k of SHEET_DS_KEYS) delete card.dataset[k];
+    card.classList.remove("sheet-boarded");
+    board?.remove();
+    board = null;
+    const st = stashOf(card).get(name);
+    stashOf(card).delete(name);
+    const g = st ? st.grid : gridFromLines([], 5, 8);
+    const addrow = wrap.querySelector(".sheet-addrow");
+    wrap.insertBefore(g, addrow ?? null);
+    grid = g;
+    if (st?.fresh !== false) wireGridEls(g);
+    card.dataset.topic = name;
+    card.dataset.meta = JSON.stringify(st?.meta ?? []);
+    applyMeta();
+    repaint();
+    renderCtools();
+    clearSelVisual();
+    reseedChat();
+    const titleEl = card.querySelector(".callout-title");
+    if (titleEl) titleEl.textContent = name;
+    renderTabs();
+    onChange();
+  };
+  /* drag a tab out — the sheet leaves this workbook as its own floating
+   *  dedicated card, rows + styles + tools + chat thread all intact */
+  const extractSheet = (name: string, x: number, y: number) => {
+    if (name === (card.dataset.topic ?? "")) {
+      // dragging the active tab: only allowed when siblings stay behind —
+      // stash it, activate a sibling, then extract the stash
+      const other = stashOf(card).keys().next().value;
+      if (other === undefined) return;
+      activateSheet(other);
+    }
+    const st = stashOf(card).get(name);
+    if (!st) return;
+    stashOf(card).delete(name);
+    const rowLines = gridToLines(st.grid);
+    // st.meta already carries cell + dataset lines (storeActive / hydration)
+    const metaLines = st.meta;
+    void import("./editor.js").then((m) => {
+      const nc = buildSheetCard(name);
+      nc.querySelector<HTMLElement>(".sheet-wrap")!.prepend(gridFromLines(rowLines));
+      nc.dataset.meta = JSON.stringify(metaLines);
+      wireSheet(nc);
+      m.enhanceCard(nc);
+      document.querySelector<HTMLElement>("#note-body")!.append(nc);
+      m.popCardFloating(nc, x, y);
+      renderTabs();
+      onChange();
+    });
+  };
+  const tabs = document.createElement("div");
+  tabs.className = "sheet-tabs";
+  tabs.contentEditable = "false";
+  const renderTabs = () => {
+    tabs.innerHTML = "";
+    const names = [card.dataset.topic ?? "sheet", ...stashOf(card).keys()];
+    for (const nm of names) {
+      const on = nm === (card.dataset.topic ?? "sheet");
+      const t = document.createElement("button");
+      t.className = "sheet-tab" + (on ? " on" : "");
+      t.textContent = nm;
+      t.title = on ? `active sheet` : `switch to "${nm}" — or drag me off into its own card`;
+      let sx = 0, sy = 0, moved = false, ghost: HTMLElement | null = null;
+      t.addEventListener("pointerdown", (e) => {
+        e.stopPropagation();
+        sx = e.clientX; sy = e.clientY; moved = false;
+        try { t.setPointerCapture(e.pointerId); } catch { /* synthetic pointers have no capture */ }
+      });
+      t.addEventListener("pointermove", (e) => {
+        if (!e.buttons) return;
+        if (!moved && Math.hypot(e.clientX - sx, e.clientY - sy) > 10) {
+          moved = true;
+          ghost = document.createElement("div");
+          ghost.className = "sheet-tab-ghost";
+          ghost.textContent = t.textContent;
+          document.body.append(ghost);
+          t.classList.add("drag");
+        }
+        if (ghost) {
+          ghost.style.left = `${e.clientX + 8}px`;
+          ghost.style.top = `${e.clientY + 10}px`;
+        }
+      });
+      t.addEventListener("pointerup", (e) => {
+        const g = ghost; ghost = null;
+        t.classList.remove("drag");
+        if (g) g.remove();
+        if (!moved) activateSheet(nm);
+        else extractSheet(nm, e.clientX, e.clientY);
+      });
+      tabs.append(t);
+    }
+    const plus = document.createElement("button");
+    plus.className = "sheet-tab sheet-tab-new";
+    plus.textContent = "+";
+    plus.title = "new sheet in this workbook";
+    plus.addEventListener("click", (e) => {
+      e.stopPropagation();
+      let i = names.length + 1;
+      while (names.includes(`sheet${i}`)) i++;
+      activateSheet(`sheet${i}`);
+    });
+    tabs.append(plus);
+  };
+  renderTabs();
+  card.insertBefore(tabs, chat);
 
   apis.set(card, {
     title: () => card.dataset.topic ?? "sheet",
@@ -4470,6 +5494,65 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
     },
     exportFile: (path) => doExport(path),
     importFile: (path, sheet) => doImport(path, sheet),
+    setStyle: (cells, spec) => setStyleOn(Array.isArray(cells) ? cells : [], S(spec)),
+    autoSum: (r, c) => {
+      const td = tdAt(card, intIdx(r), intIdx(c));
+      if (td) autoSum(td);
+    },
+    listTools: () => sheetTools(card),
+    addTool: (spec) => {
+      const tl = sheetToolFromJson(typeof spec === "string" ? spec : JSON.stringify(spec));
+      if (!tl) return "✕ tool spec needs {name, icon, steps:[…]} — at least one valid step";
+      const tools = sheetTools(card).filter((t) => t.name !== tl.name);
+      tools.push(tl);
+      setSheetTools(card, tools);
+      rebuildCtools();
+      onChange();
+      return `tool "${tl.name}" saved to "${card.dataset.topic ?? "sheet"}"`;
+    },
+    delTool: (name) => {
+      name = S(name).trim();
+      const tools = sheetTools(card);
+      const keep = tools.filter((t) => t.name !== name);
+      if (keep.length === tools.length) return false;
+      setSheetTools(card, keep);
+      rebuildCtools();
+      onChange();
+      return true;
+    },
+    applyTool: (name, a, b) => {
+      const tl = sheetTools(card).find((t) => t.name === S(name).trim());
+      if (!tl) return `✕ no tool named "${S(name)}"`;
+      const bounds: [[number, number], [number, number]] | undefined =
+        Array.isArray(a) && Array.isArray(b)
+          ? [[intIdx(a[0]), intIdx(a[1])], [intIdx(b[0]), intIdx(b[1])]]
+          : undefined;
+      if (bounds && (bounds[0][0] < 0 || bounds[0][1] < 0 || bounds[1][0] < 0 || bounds[1][1] < 0))
+        return "✕ bad range";
+      if (bounds) {
+        // inverted corners — B4:B2 should stamp B2:B4, not an empty range
+        const [x, y] = bounds;
+        bounds[0] = [Math.min(x[0], y[0]), Math.min(x[1], y[1])];
+        bounds[1] = [Math.max(x[0], y[0]), Math.max(x[1], y[1])];
+      }
+      return runSheetTool(tl, bounds);
+    },
+    tabs: () => [card.dataset.topic ?? "sheet", ...stashOf(card).keys()],
+    activateTab: (name) => activateSheet(name),
+    readTab: (name) => {
+      const n = S(name).toLowerCase();
+      const st =
+        stashOf(card).get(name) ??
+        [...stashOf(card)].find(([k]) => k.toLowerCase() === n)?.[1];
+      if (!st) return null; // not a tab of this workbook
+      return Array.from(st.grid.querySelectorAll<HTMLElement>("tr[data-r]"))
+        .map((tr) =>
+          Array.from(tr.querySelectorAll<HTMLElement>("td[data-raw]"))
+            .map((td) => td.dataset.raw ?? "")
+            .join("\t"),
+        )
+        .join("\n");
+    },
   });
 }
 

@@ -669,6 +669,31 @@ function writeState(card: HTMLElement, patch: Record<string, number>) {
   localStorage.setItem(stateKey(card), JSON.stringify(merged));
 }
 
+/** pop a card out of the text flow at a client point — the same math the
+ *  titlebar-drag drop uses, so sheet tabs and other callers float cards
+ *  exactly like a hand-dragged drop. Position persists via writeState. */
+export function popCardFloating(card: HTMLElement, clientX: number, clientY: number) {
+  const editor = body();
+  const er = editor.getBoundingClientRect();
+  const x = Math.round(Math.max(0, clientX - er.left + editor.scrollLeft - 40));
+  const y = Math.round(Math.max(0, clientY - er.top + editor.scrollTop - 20));
+  if (!card.classList.contains("sized")) {
+    card.classList.add("sized");
+    const r = card.getBoundingClientRect();
+    writeState(card, { w: Math.round(r.width), h: Math.round(r.height) });
+    card.style.width = `${Math.round(r.width)}px`;
+    card.style.height = `${Math.round(r.height)}px`;
+  }
+  card.classList.add("floating");
+  card.style.left = `${x}px`;
+  card.style.top = `${y}px`;
+  card.style.zIndex = String(++genZ);
+  writeState(card, { x, y, z: genZ });
+  scheduleFlow();
+  drawCardLinks();
+  markEdited();
+}
+
 function saveCardBox(card: HTMLElement) {
   const cs = getComputedStyle(card);
   writeState(card, {
@@ -1214,7 +1239,7 @@ function toggleCardSpeech(card: HTMLElement, btn: HTMLElement) {
   window.speechSynthesis.speak(u);
 }
 
-function enhanceCard(card: HTMLElement) {
+export function enhanceCard(card: HTMLElement) {
   normalizeCard(card);
   if (!card.dataset.cid) card.dataset.cid = `c${Math.random().toString(36).slice(2, 9)}`;
   card.contentEditable = "true";

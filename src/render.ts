@@ -280,12 +280,24 @@ function sheetCallout(block: string[]): string {
   // `> [!fmt]/[!cf]/[!freeze]/[!hide]/[!w]/[!filter]` lines are sheet metadata —
   // formats, rules, widths, filters — they ride along in data-meta for
   // wireSheet to reapply, never render as cells
-  const metaLines = block
-    .slice(1)
+  // `[!tab] name` splits the body into workbook segments — lines before the
+  // first marker belong to the active sheet; each later segment is one
+  // inactive sheet's body (rows + its own [!x] meta, kept verbatim)
+  const segs: Record<string, string[]> = {};
+  const active: string[] = [];
+  let cur: string[] | null = null;
+  for (const l of block.slice(1)) {
+    const tm = l.trim().match(/^\[!tab\]\s*(.*)$/i);
+    if (tm) {
+      cur = segs[(tm[1] ?? "").trim() || `sheet${Object.keys(segs).length + 1}`] = [];
+      continue;
+    }
+    (cur ?? active).push(l);
+  }
+  const metaLines = active
     .map((l) => l.trim())
     .filter((l) => /^\[!\w+\]/.test(l));
-  const rows = block
-    .slice(1)
+  const rows = active
     .map((l) => l.trim())
     .filter((l) => l !== "" && !/^\[!\w+\]/.test(l))
     .map(parseSheetLine);
@@ -308,8 +320,9 @@ function sheetCallout(block: string[]): string {
     )
     .join("");
   const raw = "> " + block.join("\n> ");
+  const sheetsAttr = Object.keys(segs).length ? ` data-sheets="${attr(JSON.stringify(segs))}"` : "";
   return (
-    `<div class="callout sheet-card" data-kind="sheet" data-topic="${attr(topic)}" data-md="${attr(raw)}" data-meta="${attr(JSON.stringify(metaLines))}">` +
+    `<div class="callout sheet-card" data-kind="sheet" data-topic="${attr(topic)}" data-md="${attr(raw)}" data-meta="${attr(JSON.stringify(metaLines))}"${sheetsAttr}>` +
     `<div class="callout-head"><span class="callout-title">${esc(topic)}</span></div>` +
     `<div class="sheet-wrap"><table class="sheet-grid">${headRow}${bodyRows}</table></div>` +
     `</div>`
@@ -622,7 +635,7 @@ export function renderMarkdown(src: string, depth = 0): string {
           return /^\[!(slide|theme|transition|tool)\b/.test(c);
         if (kind === "sheet")
           return (
-            /^\[!(fmt|cf|freeze|hide|w|filter)\b/.test(c) ||
+            /^\[!(fmt|cf|freeze|hide|w|filter|style|tool|chat|tab)\b/.test(c) ||
             /^\[!view\]\s+(kanban|calendar)\s/i.test(c)
           );
         return false;

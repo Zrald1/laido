@@ -363,15 +363,33 @@ export function fromSheetRange(source: string): Pick<ChartModel, "labels" | "ser
   if (!m) return null;
   const [, title, range] = m;
   const cards = Array.from(document.querySelectorAll<HTMLElement>(".sheet-card"));
-  const card =
-    cards.find((c) => (c.dataset.topic ?? "").toLowerCase() === title.trim().toLowerCase()) ??
-    cards.find((c) => (c.dataset.topic ?? "").toLowerCase().includes(title.trim().toLowerCase()));
+  const want = title.trim().toLowerCase();
+  let card =
+    cards.find((c) => (c.dataset.topic ?? "").toLowerCase() === want) ??
+    cards.find((c) => (c.dataset.topic ?? "").toLowerCase().includes(want));
+  // workbook tab? find the card that hosts it — read the stash without
+  // flipping the user's visible sheet
+  let tabName = "";
+  if (!card) {
+    const host = cards.find((c) =>
+      sheetApi(c)?.tabs?.().some((t) => t.toLowerCase() === want),
+    );
+    if (host) {
+      card = host;
+      tabName = title.trim();
+    }
+  }
   const api = card ? sheetApi(card) : null;
   if (!api) return null;
-  const read = api.read().split("\n").map((l) => l.split("\t"));
+  const tsv = tabName ? api.readTab?.(tabName) : api.read();
+  if (tsv == null) return null;
+  const read = tsv.split("\n").map((l) => l.split("\t"));
   // read() returns raws — a formula cell ("=A1*2") would chart as NaN → 0;
-  // the displayed value is what the user actually sees in the grid
-  const cellAt = (r: number, c: number) => api.display?.(r, c) ?? read[r]?.[c] ?? "";
+  // the displayed value is what the user actually sees in the grid (stashed
+  // tabs have no live display — raws it is)
+  const cellAt = tabName
+    ? (r: number, c: number) => read[r]?.[c] ?? ""
+    : (r: number, c: number) => api.display?.(r, c) ?? read[r]?.[c] ?? "";
   const colNum = (s: string) => {
     let n = 0;
     for (const ch of s.toUpperCase()) n = n * 26 + (ch.charCodeAt(0) - 64);
@@ -386,6 +404,17 @@ export function fromSheetRange(source: string): Pick<ChartModel, "labels" | "ser
     const r0 = Number(rm[2]) - 1;
     const c1 = colNum(rm[3]);
     const r1 = Number(rm[4]) - 1;
+    /* single-column range — there is no labels column. Chart the values
+     * themselves as the series; the left neighbour supplies labels when it
+     * exists (B2:B5 of costs → labels from column A's items) */
+    if (c0 === c1) {
+      series.push([]);
+      for (let r = r0; r <= r1; r++) {
+        labels.push((c0 > 0 ? cellAt(r, c0 - 1) : "") || `${r + 1}`);
+        series[0].push(Number(cellAt(r, c0)) || 0);
+      }
+      return { labels, series };
+    }
     for (let c = c0 + 1; c <= c1; c++) series.push([]);
     for (let r = r0; r <= r1; r++) {
       labels.push(cellAt(r, c0));
@@ -397,6 +426,15 @@ export function fromSheetRange(source: string): Pick<ChartModel, "labels" | "ser
   if (cm) {
     const c0 = colNum(cm[1]);
     const c1 = colNum(cm[2]);
+    if (c0 === c1) {
+      series.push([]);
+      for (let r = 0; r < read.length; r++) {
+        if (!cellAt(r, c0)) continue;
+        labels.push((c0 > 0 ? cellAt(r, c0 - 1) : "") || `${r + 1}`);
+        series[0].push(Number(cellAt(r, c0)) || 0);
+      }
+      return { labels, series };
+    }
     for (let c = c0 + 1; c <= c1; c++) series.push([]);
     for (let r = 0; r < read.length; r++) {
       if (!cellAt(r, c0) && series.every((_s, k) => !cellAt(r, c0 + 1 + k))) continue;
@@ -481,6 +519,12 @@ export function wireChart(card: HTMLElement) {
     sel.value = m.type;
     srcEl.textContent = m.source ? `◔ ${m.source}` : `${m.labels.length} pts inline`;
     srcEl.classList.toggle("live", !!m.source);
+    // while bound, refresh the inline snapshot — unbind or a lost source
+    // freezes at the last-seen numbers instead of going blank
+    if (m.source && m.labels.length) {
+      card.dataset.clabels = m.labels.join("\u0001");
+      card.dataset.cseries = JSON.stringify(m.series);
+    }
   };
 
   // live binding: any sheet edit repaints — the listener removes itself once

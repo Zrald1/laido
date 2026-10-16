@@ -238,6 +238,65 @@ pub async fn deck_tool_gen(app: AppHandle, prompt: String) -> Result<String, Str
     }
 }
 
+/// system prompt for `sheet_tool_gen` — the AI invents a reusable sheet
+/// tool as a sequence of steps applied to the current selection. Strict
+/// JSON the frontend validates field-by-field before it runs.
+const SHEET_TOOL_SYSTEM: &str = "You design reusable tools for a spreadsheet's toolbar. \
+The user describes a tool; you reply with ONE JSON object — no prose, no markdown fences.\n\
+Schema: {\"name\":\"short label\",\"icon\":\"one glyph like Σ or ✚\",\"steps\":[<step>,...]}\n\
+Each step is one of:\n\
+ {\"do\":\"formula\",\"formula\":\"=EXPR\",\"each\":true|false} — write a formula. Placeholders: \
+{r} this row number, {c} this column letter, {r1}{c1} selection top-left, {r2}{c2} selection \
+bottom-right, {R} row count, {C} col count. each=true stamps every selected cell; false writes \
+only the anchor cell.\n\
+ {\"do\":\"fmt\",\"fmt\":\"general|n0|n2|comma|cur|pct|pct0|date|time|text\"} — number format.\n\
+ {\"do\":\"style\",\"style\":\"b,i,u,s,f:#fill,k:#ink,a:l|c|r\"} — bold/ital/underline/strike + \
+fill/ink/align; any subset.\n\
+ {\"do\":\"fill\",\"dir\":\"down|right|up|left\"} — extend the edge cell's formula over the range.\n\
+ {\"do\":\"sort\",\"dir\":\"asc|desc\"} — sort by the selection's first column.\n\
+ {\"do\":\"sum\"} — AutoSum each selected cell. {\"do\":\"clear\"} — empty the selection.\n\
+Rules: 1-8 steps; pick steps that actually accomplish the described task; formulas must be valid \
+Excel syntax the sheet supports (SUM AVERAGE IF COUNT MIN MAX ROUND VLOOKUP INDEX MATCH etc).\n\
+CRITICAL: {r} is only the ROW NUMBER — ={r}*1.1 computes \"row×1.1\", nonsense. To transform each \
+cell's own value, reference the cell itself as {c}{r} (column letter + row): \
+\"add 10%\" → ={c}{r}*1.1, \"double it\" → ={c}{r}*2, \"flag low numbers\" → =IF({c}{r}<10,\"low\",\"ok\").\n\
+Examples — \"running total\": formula =SUM(A$1:A{r}) each=true on a new column; \
+\"mark overdue red\": style f:#ffc9c9; \"row totals\": formula =SUM({c1}{r}:{c2}{r}); \
+\"percent of total\": formula ={c}{r}/SUM({c}$1:{c}${R}) + fmt pct.";
+
+/// generate a reusable sheet tool spec from a natural-language description —
+/// returns the model's raw reply; the sheet validates/sanitizes it client-side.
+/// Leaves the mandatory activity trace either way.
+#[tauri::command]
+pub async fn sheet_tool_gen(app: AppHandle, prompt: String) -> Result<String, String> {
+    let p = prompt.trim();
+    if p.is_empty() {
+        return Err("describe the tool first".into());
+    }
+    let p: String = p.chars().take(600).collect();
+    let model = load_settings().model_rewrite;
+    match chat_retry(&model, Some(SHEET_TOOL_SYSTEM), &p, 1600).await {
+        Ok(raw) => {
+            let _ = app.emit(
+                "agent:activity",
+                Activity {
+                    text: format!("✦ sheet tool drafted — {}", p.chars().take(48).collect::<String>()),
+                },
+            );
+            Ok(raw)
+        }
+        Err(e) => {
+            let _ = app.emit(
+                "agent:activity",
+                Activity {
+                    text: format!("✕ sheet tool failed: {e}"),
+                },
+            );
+            Err(e)
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn llm_models() -> Result<Vec<String>, String> {
     let s = load_settings();

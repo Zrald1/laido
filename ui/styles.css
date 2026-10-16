@@ -2695,3 +2695,95 @@ td.base-sumlab{color:var(--dim,#94897a);font-size:10.5px;border-top:1px solid va
 /* audit 31 — board column sums + sticky palette hints */
 .bb-sum{font-size:9px;color:var(--accent,#a05a2c);padding:0 2px}
 .pl-item.stk .pl-ic{color:var(--accent,#a05a2c)}
+
+/* ================= sheet ribbon — the always-visible Excel Home bar ========= */
+.sheet-ribbon {
+  display: flex; align-items: center; gap: 3px; flex-wrap: wrap;
+  margin: 0 0 5px; padding: 4px 6px;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 8px;
+}
+.sheet-rbtn {
+  padding: 2px 7px; border: 1px solid transparent; border-radius: 5px;
+  background: none; color: var(--text); font-size: 11.5px; cursor: pointer;
+  line-height: 1.5; min-width: 22px;
+}
+.sheet-rbtn:hover { border-color: var(--line); background: var(--card-bg); color: var(--accent); }
+.sheet-rbtn.f-b { font-weight: 700; }
+.sheet-rbtn.f-i { font-style: italic; }
+.sheet-rbtn.f-u { text-decoration: underline; }
+.sheet-rbtn.f-s { text-decoration: line-through; }
+.sheet-rbtn.f-ink { border-bottom: 3px solid var(--accent); padding-bottom: 0; }
+.sheet-rsep { width: 1px; height: 16px; background: var(--line); margin: 0 3px; }
+.sheet-rfmt {
+  padding: 2px 4px; border: 1px solid var(--line); border-radius: 5px;
+  background: var(--card-bg); color: var(--text); font-size: 11px; max-width: 110px;
+}
+.sheet-ctools { display: inline-flex; gap: 3px; margin-left: 4px; padding-left: 6px; border-left: 1px dashed var(--line); }
+.sheet-ctools:empty { display: none; }
+.sheet-rbtn.sheet-ctool { background: var(--card-bg); border-color: var(--line); }
+.sheet-rbtn.sheet-ctool-new { color: var(--accent); font-size: 12px; }
+/* color-swatch popover for fill/ink */
+.sheet-swp {
+  position: absolute; z-index: 70; display: grid; grid-template-columns: repeat(7, 18px);
+  gap: 3px; padding: 6px; background: var(--bg-2); border: 1px solid var(--line);
+  border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.3);
+}
+.sheet-swc {
+  width: 18px; height: 18px; border: 1px solid var(--line); border-radius: 4px;
+  cursor: pointer; font-size: 9px; color: var(--text-dim); padding: 0;
+}
+.sheet-swc:hover { transform: scale(1.15); border-color: var(--accent); }
+/* the AI tool creator popover — scoped under .sheet-toolpop to avoid collisions */
+.sheet-toolpop {
+  position: absolute; z-index: 70; width: 260px; padding: 10px;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.35); font-size: 12px;
+}
+.sheet-toolpop .dt-title { font-weight: 700; margin-bottom: 3px; }
+.sheet-toolpop .dt-sub { color: var(--text-dim); font-size: 10.5px; margin-bottom: 7px; line-height: 1.35; }
+.sheet-toolpop .dt-in {
+  width: 100%; box-sizing: border-box; padding: 5px 8px; margin-bottom: 7px;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--card-bg); color: var(--text);
+}
+.sheet-toolpop .dt-row { display: flex; gap: 6px; }
+.sheet-toolpop .dt-go, .sheet-toolpop .dt-x {
+  padding: 3px 12px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--card-bg); color: var(--text); font-size: 11px; cursor: pointer;
+}
+.sheet-toolpop .dt-go { background: var(--accent); color: #fff; border-color: var(--accent); }
+.sheet-toolpop .dt-msg { margin-top: 6px; font-size: 10.5px; color: var(--text-dim); min-height: 12px; }
+.sheet-toolpop .dt-list { margin-top: 4px; max-height: 120px; overflow: auto; }
+.sheet-toolpop .dt-tool { display: flex; align-items: center; gap: 6px; padding: 3px 2px; border-top: 1px dashed var(--line); }
+.sheet-toolpop .dt-tn { flex: 1; }
+.sheet-toolpop .dt-del { border: none; background: none; color: var(--text-dim); cursor: pointer; padding: 0 3px; }
+.sheet-toolpop .dt-del:hover { color: #d05050; }
+
+/* ---- sheet AI dock — scrollable chat pinned under the grid ---- */
+.sheet-chat { display:flex; flex-direction:column; flex:0 0 auto; border-top:1px solid rgba(0,0,0,.08); background:rgba(0,0,0,.025); }
+.sheet-chat-bar { display:flex; align-items:center; gap:6px; padding:5px 8px; }
+.sheet-chat-ic { font-size:12px; color:var(--accent,#7a5c2e); flex:0 0 auto; }
+.sheet-chat-in { flex:1 1 auto; min-width:0; border:0; background:transparent; font:12px/1.4 inherit; color:inherit; outline:none; padding:2px 0; }
+.sheet-chat-in::placeholder { color:rgba(0,0,0,.35); }
+.sheet-chat-in:disabled { opacity:.55; }
+.sheet-chat-log { max-height:132px; overflow-y:auto; padding:6px 8px 2px; display:flex; flex-direction:column; gap:4px; border-bottom:1px solid rgba(0,0,0,.06); scrollbar-width:thin; }
+.sheet-chat-log::-webkit-scrollbar { width:5px; }
+.sheet-chat-log::-webkit-scrollbar-thumb { background:rgba(0,0,0,.15); border-radius:3px; }
+.sc-msg { font:11.5px/1.4 'Segoe UI',system-ui,sans-serif; padding:3px 8px; border-radius:8px; max-width:92%; white-space:pre-wrap; word-break:break-word; }
+.sc-msg.user { align-self:flex-end; background:var(--accent,#7a5c2e); color:#fff; border-bottom-right-radius:2px; }
+.sc-msg.ai { align-self:flex-start; background:rgba(0,0,0,.06); color:inherit; border-bottom-left-radius:2px; }
+.sc-msg.out { align-self:flex-start; background:rgba(90,140,60,.12); color:inherit; border-left:2px solid rgba(90,140,60,.55); border-radius:4px; font-family:Consolas,monospace; font-size:11px; }
+.sc-msg.err { align-self:flex-start; background:rgba(160,40,30,.12); color:#8c1e14; border-left:2px solid #a02818; border-radius:4px; }
+.sc-msg.wait { align-self:flex-start; background:rgba(0,0,0,.05); opacity:.7; }
+/* ---- sheet tabs — navigate & pop out sibling grids ---- */
+.sheet-tabs { display:flex; align-items:flex-end; gap:2px; flex:0 0 auto; padding:3px 6px 0; border-top:1px solid rgba(0,0,0,.06); overflow-x:auto; scrollbar-width:none; }
+.sheet-tabs::-webkit-scrollbar { display:none; }
+.sheet-tab { border:1px solid rgba(0,0,0,.12); border-bottom:0; background:rgba(0,0,0,.03); border-radius:6px 6px 0 0; padding:2px 10px; font:10.5px/1.5 inherit; color:inherit; cursor:pointer; white-space:nowrap; }
+.sheet-tab.on { background:var(--paper,#fff); font-weight:600; border-color:rgba(0,0,0,.2); }
+.sheet-tab:hover { background:rgba(0,0,0,.06); }
+.sheet-tab.on:hover { background:var(--paper,#fff); }
+.sheet-tab.drag { opacity:.4; }
+.sheet-tab-new { border:1px dashed rgba(0,0,0,.2); border-bottom:0; background:transparent; color:rgba(0,0,0,.45); }
+.sheet-tab-ghost { position:fixed; z-index:9999; pointer-events:none; background:var(--paper,#fff); border:1px solid rgba(0,0,0,.25); border-radius:6px; padding:2px 10px; font:11px/1.5 inherit; box-shadow:0 3px 10px rgba(0,0,0,.25); }
+@keyframes sheetFlash { 0%,100% { box-shadow:0 0 0 0 rgba(122,92,46,0); } 30% { box-shadow:0 0 0 3px rgba(122,92,46,.55); } }
+.sheet-card.sheet-flash { animation:sheetFlash .9s ease; }
+.sheet-card { position:relative; }

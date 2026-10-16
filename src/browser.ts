@@ -315,7 +315,7 @@ export function wireBrowser(card: HTMLElement) {
 
 /** append a bookmark line to `bookmarks.laido`, creating + deduping */
 async function clipBookmark(title: string, url: string): Promise<string> {
-  const name = "bookmarks";
+  const name = "bookmarks.laido";
   let cur = "";
   try {
     cur = await invoke<string>("vault_read", { name });

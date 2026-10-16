@@ -1,7 +1,7 @@
 import { invoke } from "./ipc.js";
 import { addActivity } from "./log.js";
 import { currentNote, spawnTerminalCard, spawnSheetCard, spawnDeckCard, insertClip, spawnCardsCard, loadNote } from "./editor.js";
-import { sheetApi, cellName } from "./sheet.js";
+import { sheetApi, cellName, refRC, expandRange, isStyleSpec } from "./sheet.js";
 import { deckApi, parseSlideLine, parseElLine, emptySlide, DECK_LAYOUTS, DECK_THEMES, DECK_TRANSITIONS } from "./slides.js";
 import { todoApi } from "./todo.js";
 import { spawnTodoCard, spawnBrowserCard } from "./editor.js";
@@ -116,823 +116,937 @@ const pruneSessions = () => {
 /** wire one terminal widget card: the log, the input line, the confirm
  *  chips, the AI loop and the skill save. The session history rebuilds
  *  from the persisted log so a reloaded terminal remembers its thread. */
-export function wireTerminal(card: HTMLElement) {
-  if (!card?.dataset) return;
-  const log = card.querySelector<HTMLElement>(".term-log");
-  const input = card.querySelector<HTMLInputElement>(".term-input");
-  if (!log || !input || card.dataset.wired) return;
-  card.dataset.wired = "1";
-  const history: Array<{ role: string; content: string }> = [];
-  const searched = new Set<string>();
-  let steps = 0;
-  let busy = false;
-  let spawnRetries = 0;
+/** locate a sheet card by title — exact, then fuzzy, then the only sheet
+ *  on the note when the model omits or garbles the title */
+const findSheet = (name: string): HTMLElement | null => {
+  const all = Array.from(document.querySelectorAll<HTMLElement>(".sheet-card"));
+  if (!all.length) return null;
+  const n = name.trim().toLowerCase();
+  if (!n) return all.length === 1 ? all[0] : null;
+  const hit =
+    all.find((c) => (c.dataset.topic ?? "").toLowerCase() === n) ??
+    all.find((c) => {
+      const t = (c.dataset.topic ?? "").toLowerCase();
+      return fuzzyHit(n, t);
+    });
+  if (hit) return hit;
+  /* workbook tabs — a stashed sheet's name isn't on any card's topic; the
+   * matching card activates that tab in place and gets returned */
+  for (const c of all) {
+    const tabs = sheetApi(c)?.tabs?.() ?? [];
+    const nm = tabs.find((t) => t.toLowerCase() === n) ??
+      tabs.find((t) => t.toLowerCase().includes(n) || n.includes(t.toLowerCase()));
+    if (nm) {
+      sheetApi(c)?.activateTab?.(nm);
+      return c;
+    }
+  }
+  /* no catch-all for a wrong title — "set revenue A1=x" must NOT write to
+   * the lone "costs" sheet. Title-less forms (tool/apply/tooldel) carry
+   * their own explicit single-sheet fallbacks. */
+  return null;
+};
 
-  const line = (cls: string, text: string) => {
-    const d = document.createElement("div");
-    d.className = `term-line ${cls}`;
-    d.dataset.t = cls;
-    d.dataset.raw = text;
-    d.textContent = text;
-    log.append(d);
-    log.scrollTop = log.scrollHeight;
-    return d;
+/** strict existence — exact card topic or workbook tab name only. `new`
+ * uses this so a same-titled sheet is detected without the fuzzy catch. */
+const strictSheet = (name: string): HTMLElement | null => {
+  const n = name.trim().toLowerCase();
+  if (!n) return null;
+  for (const c of Array.from(document.querySelectorAll<HTMLElement>(".sheet-card"))) {
+    if ((c.dataset.topic ?? "").toLowerCase() === n) return c;
+    if (sheetApi(c)?.tabs?.().some((t) => t.toLowerCase() === n)) return c;
+  }
+  return null;
+};
+
+/* fuzzy title match — "budget 2024" finds the "budget" card, partial
+ * prefixes work, but a coincidental substring ("nodb" ⊃ "db") must not. */
+const fuzzyHit = (n: string, t: string): boolean =>
+  t === n ||
+  n.startsWith(t) ||
+  t.startsWith(n) ||
+  n.includes(` ${t}`) ||
+  t.includes(` ${n}`);
+
+const refOf = (s: string): [number, number] | null => {
+  const mm = s.trim().match(/^([A-Za-z]{1,3})(\d{1,4})$/);
+  if (!mm) return null;
+  let c = 0;
+  for (const ch of mm[1].toUpperCase()) c = c * 26 + (ch.charCodeAt(0) - 64);
+  return [Number(mm[2]) - 1, c - 1];
+};
+
+
+/** execute one ` ```sheet ` fence — the AI's read/write channel into the
+ *  grids. Verbs: new · read · set · append · addrow · addcol · delrow ·
+ *  delcol · clear · sort. Returns a result line that feeds back to it. */
+const SHEET_VERBS = new Set([
+  "new", "create", "read", "get", "set", "append", "addrow", "addcol", "delrow", "delcol",
+  "clear", "sort", "format", "fmt", "dedupe", "freeze", "hide", "unhide", "cf", "filter",
+  "view", "style", "autosum", "sum", "tools", "tool", "addtool", "tooldel", "rmtool",
+  "apply", "applytool", "stamp", "export", "import", "save", "load",
+]);
+export const sheetTool = async (body: string, depth = 0): Promise<string> => {
+  const lines = body
+    .split("\n")
+    .map((l) => l.replace(/\s+$/, ""))
+    .filter((l) => l.trim() !== "");
+  if (!lines.length) return "✕ empty sheet command";
+  const hm = lines[0].trim().match(/^(\S+)\s*(.*)$/);
+  const verb = (hm?.[1] ?? "").toLowerCase();
+  const rest = (hm?.[2] ?? "").trim();
+  /* the model often packs several commands in one fence body
+   * (tool spec on line 1, apply on line 2) — any later line that starts
+   * with a verb is its own command; data rows (B2=5, |cells|, {json})
+   * stay with the head verb */
+  const extra: string[] = [];
+  const rows: string[] = [];
+  for (const l of lines.slice(1)) {
+    const first = (l.trim().split(/\s+/)[0] ?? "").toLowerCase();
+    if (depth === 0 && SHEET_VERBS.has(first)) extra.push(l.trim());
+    else rows.push(l);
+  }
+  const runExtra = async (head: string): Promise<string> => {
+    for (const l of extra) head += "\n" + (await sheetTool(l, 1));
+    return head;
   };
+  const single = async (): Promise<string> => {
 
-  // the persisted log is the thread — rebuild it so the AI remembers
-  for (const l of Array.from(log.querySelectorAll<HTMLElement>(".term-line"))) {
-    const t = l.dataset.t ?? "out";
-    const raw = l.dataset.raw ?? "";
-    if (t === "ask") history.push({ role: "user", content: raw });
-    else if (t === "ai") history.push({ role: "assistant", content: raw });
-    else if (t === "cmd") history.push({ role: "user", content: `ran: ! ${raw}` });
-    else if (t === "out" && raw.trim()) history.push({ role: "user", content: `output: ${raw}` });
+  if (verb === "new" || verb === "create") {
+    const dm = rest.match(/(\d{1,2})\s*[x×]\s*(\d{1,2})/i);
+    const r = Math.min(50, Math.max(1, Number(dm?.[1] ?? 6)));
+    const c = Math.min(26, Math.max(1, Number(dm?.[2] ?? 4)));
+    const title = (dm ? rest.replace(dm[0], "") : rest).trim() || "sheet";
+    // idempotent — a same-titled sheet already on the note means the model
+    // wants THAT grid, not a duplicate card
+    if (strictSheet(title)) return `sheet "${title}" is already on the note — set/append to fill it`;
+    const card = spawnSheetCard(title, r, c);
+    /* `new budget\n| h1 | h2 |\n| a | b |` — body rows seed the grid.
+     * a row of pure ref=value pairs places by ref, else rows land
+     * sequentially from A1 */
+    const api0 = sheetApi(card);
+    if (rows.length && api0?.setCells) {
+      const cells: Array<[number, number, string]> = [];
+      rows.forEach((l, ri) => {
+        const segs = l
+          .split(/\t|\|/)
+          .map((s) => s.trim())
+          .filter((s, i, arr) => !(s === "" && (i === 0 || i === arr.length - 1)));
+        const allRefs =
+          segs.length > 0 &&
+          segs.every((s) => {
+            const e = s.indexOf("=");
+            return e > 0 && refOf(s.slice(0, e));
+          });
+        segs.forEach((s, ci) => {
+          if (allRefs) {
+            const e = s.indexOf("=");
+            const ref = refOf(s.slice(0, e))!;
+            cells.push([ref[0], ref[1], s.slice(e + 1).trim()]);
+          } else cells.push([ri, ci, s]);
+        });
+      });
+      if (cells.length) api0.setCells(cells);
+    }
+    return `created sheet "${title}" (${r}x${c})` +
+      (rows.length ? ` — ${rows.length} row${rows.length === 1 ? "" : "s"} seeded` : "");
+  }
+  if (verb === "read" || verb === "get") {
+    const api = findSheet(rest) ? sheetApi(findSheet(rest)!) : null;
+    if (!api) return `✕ no sheet found named "${rest || "?"}"`;
+    return `sheet "${api.title()}" ${api.rows()}x${api.cols()} (raw TSV):\n${api.read()}`;
+  }
+  // export budget | export budget csv | export budget C:/out/budget.xlsx
+  if (verb === "export" || verb === "save") {
+    const { title, path, fmt } = pullXferArgs(rest, ["xlsx", "csv", "tsv"]);
+    let card = findSheet(title);
+    if (!card && !title) card = document.querySelector<HTMLElement>(".sheet-card") ?? null;
+    const api = card ? sheetApi(card) : null;
+    if (!api?.exportFile) return `✕ no sheet found named "${title || "?"}"`;
+    return api.exportFile(path ?? (fmt ? `exports/${api.title()}.${fmt}` : undefined));
+  }
+  // import budget C:/in.xlsx sheet=Sheet2 | import C:/in.csv
+  if (verb === "import" || verb === "load") {
+    const { title, path, sheet } = pullXferArgs(rest, ["xlsx", "csv", "tsv"]);
+    let card = title ? findSheet(title) : null;
+    if (!card) {
+      const stem = path?.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "") || title || "sheet";
+      card = spawnSheetCard(title || stem, 6, 4);
+    }
+    const api = sheetApi(card);
+    if (!api?.importFile) return "✕ sheet import unavailable";
+    return api.importFile(path, sheet);
+  }
+  if (verb === "set") {
+    // `set <title> A1=x B2=y` — pairs may ride inline after the title; the
+    // title is the words before the first ref= token (later lines still work)
+    const im = rest.match(/\b[A-Za-z]{1,3}\d{1,4}\s*=/);
+    const inline = im
+      ? rest.slice(im.index).split(/(?=\b[A-Za-z]{1,3}\d{1,4}\s*=)/)
+      : [];
+    const card = findSheet(im ? rest.slice(0, im.index).trim() : rest);
+    const api = card ? sheetApi(card) : null;
+    if (!api) return `✕ no sheet found named "${rest || "?"}"`;
+    let wrote = 0;
+    const bad: string[] = [];
+    const cells: Array<[number, number, string]> = [];
+    for (const l of [...inline, ...rows]) {
+      // a row may pack several cells — "A1=x | B1=y" or tab-separated
+      for (const seg of l.split(/\t|\|/)) {
+        const eq = seg.indexOf("=");
+        if (eq < 1) {
+          bad.push(seg.slice(0, 24));
+          continue;
+        }
+        const ref = refOf(seg.slice(0, eq));
+        if (!ref) {
+          bad.push(seg.slice(0, 24));
+          continue;
+        }
+        cells.push([ref[0], ref[1], seg.slice(eq + 1).trim()]);
+        wrote++;
+      }
+    }
+    api.setCells(cells);
+    return `wrote ${wrote} cell${wrote === 1 ? "" : "s"} to "${api.title()}"` +
+      (bad.length ? ` — skipped malformed: ${bad.join(", ")}` : "");
+  }
+  if (verb === "append") {
+    const card = findSheet(rest);
+    const api = card ? sheetApi(card) : null;
+    if (!api) return `✕ no sheet found named "${rest || "?"}"`;
+    if (!rows.length) return "✕ append needs rows (one per line, cells split by | or tab)";
+    // the model sometimes writes append rows as ref=value pairs
+    // ("A10=depth (m) | B10=B3") — a row that is ALL ref=value pairs lands
+    // as cell writes, not as literal "A10=…" text inside a cell
+    const refPair = (seg: string) => {
+      const eq = seg.indexOf("=");
+      return eq > 0 ? refOf(seg.slice(0, eq)) : null;
+    };
+    let placed = 0;
+    const placedCells: Array<[number, number, string]> = [];
+    for (const l of rows) {
+      const segs = l.split(/\t|\|/).map((s) => s.trim());
+      if (segs.length && segs.every((s) => refPair(s))) {
+        for (const s of segs) {
+          const eq = s.indexOf("=");
+          const ref = refOf(s.slice(0, eq))!;
+          placedCells.push([ref[0], ref[1], s.slice(eq + 1).trim()]);
+          placed++;
+        }
+      } else {
+        api.addRow(segs);
+      }
+    }
+    if (placed) api.setCells(placedCells);
+    return `appended ${rows.length} row${rows.length === 1 ? "" : "s"} to "${api.title()}"`;
+  }
+  if (verb === "addrow" || verb === "addcol") {
+    const card = findSheet(rest);
+    const api = card ? sheetApi(card) : null;
+    if (!api) return `✕ no sheet found named "${rest || "?"}"`;
+    if (verb === "addrow") api.addRow();
+    else api.addCol();
+    return `${verb === "addrow" ? "row" : "column"} added to "${api.title()}"`;
+  }
+  if (verb === "delrow" || verb === "delcol" || verb === "sort" || verb === "clear") {
+    // these carry their target at the END of the line — "delrow budget 3",
+    // "delcol budget B", "sort budget B desc", "clear budget [A1:B2]"
+    const tm = rest.match(/^(.*?)\s+(\S+)$/);
+    let title = rest;
+    let arg = "";
+    if (verb === "clear") {
+      const rm = rest.match(/^(.*?)\s*([A-Za-z]{1,3}\d{1,4}(?::[A-Za-z]{1,3}\d{1,4})?)$/);
+      if (rm) {
+        title = rm[1];
+        arg = rm[2];
+      }
+    } else if (verb === "sort") {
+      const sm = rest.match(/^(.*?)\s+([A-Za-z]{1,3})\s*(desc|asc)?$/i);
+      if (sm) {
+        title = sm[1];
+        arg = sm[2] + (sm[3] ? ` ${sm[3]}` : "");
+      }
+    } else if (tm) {
+      title = tm[1];
+      arg = tm[2];
+    }
+    const card = findSheet(title);
+    const api = card ? sheetApi(card) : null;
+    if (!api) return `✕ no sheet found named "${title || "?"}"`;
+    if (verb === "delrow") {
+      const n = Number(arg);
+      if (!n || n < 1 || n > api.rows()) return `✕ row ${arg} out of range (1..${api.rows()})`;
+      api.delRow(n - 1);
+      return `deleted row ${n} from "${api.title()}"`;
+    }
+    if (verb === "delcol") {
+      const mm = arg.match(/^[A-Za-z]{1,3}$/);
+      if (!mm) return `✕ column "${arg}" isn't a letter`;
+      let c = 0;
+      for (const ch of arg.toUpperCase()) c = c * 26 + (ch.charCodeAt(0) - 64);
+      if (c > api.cols()) return `✕ column ${arg} out of range (A..${cellName(0, api.cols() - 1).replace(/\d/, "")})`;
+      api.delCol(c - 1);
+      return `deleted column ${arg.toUpperCase()} from "${api.title()}"`;
+    }
+    if (verb === "clear") {
+      if (!arg) {
+        api.clear();
+        return `cleared all of "${api.title()}"`;
+      }
+      const [a, b] = arg.split(":");
+      const ra = refOf(a);
+      const rb = refOf(b ?? a);
+      if (!ra || !rb) return `✕ bad range "${arg}"`;
+      api.clear(ra, rb);
+      return `cleared ${arg.toUpperCase()} of "${api.title()}"`;
+    }
+    // sort — needs a column letter; the api doesn't expose sort (it's a
+    // user-gesture op) so reorder via read+set
+    const sm = arg.match(/^([A-Za-z]{1,3})\s*(desc|asc)?$/i);
+    if (!sm) return `✕ sort needs a column letter — "sort ${api.title()} B"`;
+    let c = 0;
+    for (const ch of sm[1].toUpperCase()) c = c * 26 + (ch.charCodeAt(0) - 64);
+    const desc = /^desc$/i.test(sm[2] ?? "");
+    const grid = api.read().split("\n").map((l) => l.split("\t"));
+    const key = (row: string[]) => {
+      const v = row[c - 1] ?? "";
+      const n = Number(v.replace(/[$,\s]/g, ""));
+      return { num: isNaN(n) ? null : n, s: v.toLowerCase() };
+    };
+    grid.sort((x, y) => {
+      const ka = key(x);
+      const kb = key(y);
+      const cmp =
+        ka.num !== null && kb.num !== null
+          ? ka.num - kb.num
+          : ka.num !== null
+            ? -1
+            : kb.num !== null
+              ? 1
+              : ka.s.localeCompare(kb.s);
+      return desc ? -cmp : cmp;
+    });
+    api.setAll(grid);
+    return `sorted "${api.title()}" by column ${sm[1].toUpperCase()} ${desc ? "descending" : "ascending"}`;
+  }
+  if (verb === "format" || verb === "fmt") {
+    // "format budget B1:B9 cur" / "format budget B pct" — number formats.
+    // the model often says "format … b" meaning BOLD — a spec that isn't a
+    // number-format name but parses as a style spec routes to the font layer
+    const fm = rest.match(/^(.*?)\s+([A-Za-z]{1,3}\d{0,4}(?::[A-Za-z]{1,3}\d{0,4})?)\s+(\S+)$/);
+    if (!fm) return `✕ format needs <title> <range> <fmt> — e.g. "format budget B1:B9 cur"`;
+    if (isStyleSpec(fm[3])) {
+      const card = findSheet(fm[1]);
+      const api = card ? sheetApi(card) : null;
+      if (!api?.setStyle) return `✕ no sheet found named "${fm[1]}"`;
+      const cells = expandRange(fm[2]);
+      if (!cells.length) return `✕ bad range "${fm[2]}"`;
+      api.setStyle(cells, fm[3]);
+      return `styled ${cells.length} cells on "${api.title()}" → ${fm[3]}`;
+    }
+    const card = findSheet(fm[1]);
+    const api = card ? sheetApi(card) : null;
+    if (!api?.setFmt) return `✕ no sheet found named "${fm[1]}"`;
+    const cells: Array<[number, number]> = [];
+    const spec = fm[2];
+    const parts = spec.split(":");
+    const ra = refOf(parts[0]);
+    const rb = parts[1] ? refOf(parts[1]) : ra;
+    // a bare column letter means the whole column
+    const colOnly = spec.match(/^([A-Za-z]{1,3})$/);
+    if (colOnly) {
+      let c = 0;
+      for (const ch of colOnly[1].toUpperCase()) c = c * 26 + (ch.charCodeAt(0) - 64);
+      for (let r = 0; r < api.rows(); r++) cells.push([r, c - 1]);
+    } else if (ra && rb) {
+      for (let r = Math.min(ra[0], rb[0]); r <= Math.max(ra[0], rb[0]); r++)
+        for (let c = Math.min(ra[1], rb[1]); c <= Math.max(ra[1], rb[1]); c++) cells.push([r, c]);
+    } else return `✕ bad range "${spec}"`;
+    api.setFmt(cells, fm[3]);
+    return `formatted ${cells.length} cells in "${api.title()}" as ${fm[3]}`;
+  }
+  if (verb === "dedupe") {
+    const tm = rest.match(/^(.*?)\s+([A-Za-z]{1,3})$/);
+    if (!tm) return `✕ dedupe needs <title> <col> — "dedupe budget B"`;
+    const card = findSheet(tm[1]);
+    const api = card ? sheetApi(card) : null;
+    if (!api?.dedupe) return `✕ no sheet found named "${tm[1]}"`;
+    let c = 0;
+    for (const ch of tm[2].toUpperCase()) c = c * 26 + (ch.charCodeAt(0) - 64);
+    const n = api.dedupe(c - 1);
+    return `removed ${n} duplicate row${n === 1 ? "" : "s"} from "${api.title()}" by column ${tm[2].toUpperCase()}`;
+  }
+  if (verb === "freeze") {
+    // "freeze budget r1" / "freeze budget cA" / "freeze budget rc" / "freeze budget off"
+    const tm = rest.match(/^(.*?)\s*(\boff\b|rc|r1|c[A-Za-z])?$/i);
+    const card = findSheet(tm?.[1] ?? rest);
+    const api = card ? sheetApi(card) : null;
+    if (!api?.freeze) return `✕ no sheet found named "${rest}"`;
+    const mode = (tm?.[2] ?? "").toLowerCase();
+    const r = mode === "r1" || mode === "rc";
+    const c = mode === "ca" || mode === "rc" || /^c[a-z]$/i.test(mode);
+    api.freeze(r, c);
+    return r || c ? `froze ${r ? "row 1" : ""}${r && c ? " + " : ""}${c ? "column A" : ""} of "${api.title()}"` : `unfroze "${api.title()}"`;
+  }
+  if (verb === "hide" || verb === "unhide") {
+    if (verb === "unhide") {
+      const card = findSheet(rest);
+      const api = card ? sheetApi(card) : null;
+      if (!api?.unhide) return `✕ no sheet found named "${rest}"`;
+      api.unhide();
+      return `unhid all of "${api.title()}"`;
+    }
+    // "hide budget r3" / "hide budget cB" / "hide budget 3" / "hide budget B"
+    const tm = rest.match(/^(.*?)\s+([rc]?[A-Za-z0-9]+)$/i);
+    if (!tm) return `✕ hide needs <title> <r3|cB>`;
+    const card = findSheet(tm[1]);
+    const api = card ? sheetApi(card) : null;
+    if (!api?.hideRow) return `✕ no sheet found named "${tm[1]}"`;
+    const m2 = tm[2].match(/^([rc]?)([A-Za-z]*)([0-9]*)$/i);
+    if (m2?.[1]?.toLowerCase() === "r" || (!m2?.[2] && m2?.[3])) {
+      api.hideRow(Number(m2![3] || m2![2]) - 1);
+      return `hid row ${m2![3] || m2![2]} of "${api.title()}"`;
+    }
+    const L = (m2?.[2] || "").toUpperCase();
+    let c = 0;
+    for (const ch of L) c = c * 26 + (ch.charCodeAt(0) - 64);
+    api.hideCol!(c - 1);
+    return `hid column ${L} of "${api.title()}"`;
+  }
+  if (verb === "cf") {
+    // "cf budget B > 100 #ffe08a" / "cf budget B dup #ffc9c9" / "cf budget B clear"
+    const cm = rest.match(/^(.*?)\s+([A-Za-z]{1,3})\s+([!=<>]{1,2}|between|contains|top|dup|clear)\s*(\S*)\s*(#\w{3,8}|\w+)?$/i);
+    if (!cm) return `✕ cf needs <title> <col> <op> <val> <color> — "cf budget B > 100 #ffe08a"`;
+    const card = findSheet(cm[1]);
+    const api = card ? sheetApi(card) : null;
+    if (!api?.addCf) return `✕ no sheet found named "${cm[1]}"`;
+    let c = 0;
+    for (const ch of cm[2].toUpperCase()) c = c * 26 + (ch.charCodeAt(0) - 64);
+    if (cm[3].toLowerCase() === "clear") {
+      api.clearCf!(c - 1);
+      return `cleared conditional rules on ${api.title()} col ${cm[2].toUpperCase()}`;
+    }
+    const color = (cm[5] ?? "#ffe08a").startsWith("#") ? cm[5]! : "#ffe08a";
+    api.addCf(c - 1, cm[3].toLowerCase(), cm[4] ?? "", color);
+    return `highlight rule on "${api.title()}" col ${cm[2].toUpperCase()}: ${cm[3]}${cm[4] ?? ""} → ${color}`;
+  }
+  if (verb === "filter") {
+    // "filter budget B apple|pear" / "filter budget B off" / "filter budget"
+    const card0 = findSheet(rest);
+    if (card0 && sheetApi(card0)?.filterState) {
+      // bare "filter <title>" reports the current state
+      return `filters on "${sheetApi(card0)!.title()}" — ${sheetApi(card0)!.filterState!()}`;
+    }
+    const fm = rest.match(/^(.*?)\s+([A-Za-z]{1,3})\s+(.+)$/);
+    if (!fm) return `✕ filter needs <title> <col> <v1|v2|off>`;
+    const card = findSheet(fm[1]);
+    const api = card ? sheetApi(card) : null;
+    if (!api?.filter) return `✕ no sheet found named "${fm[1]}"`;
+    let c = 0;
+    for (const ch of fm[2].toUpperCase()) c = c * 26 + (ch.charCodeAt(0) - 64);
+    if (/^off|clear|all$/i.test(fm[3].trim())) {
+      api.filter(c - 1, null);
+      return `cleared the filter on "${api.title()}" col ${fm[2].toUpperCase()}`;
+    }
+    api.filter(c - 1, fm[3].split("|").map((s) => s.trim()));
+    return `filtered "${api.title()}" col ${fm[2].toUpperCase()} to: ${fm[3]}`;
+  }
+  if (verb === "view") {
+    // "view budget kanban C" | "view budget grid" | "view budget" (report)
+    const vm = rest.match(/^(.*?)\s+(kanban\s+[A-Za-z]{1,3}|calendar\s+[A-Za-z]{1,3}|grid)$/i);
+    if (vm) {
+      const card = findSheet(vm[1]);
+      const api = card ? sheetApi(card) : null;
+      if (!api?.view) return `✕ no sheet found named "${vm[1]}"`;
+      const v = api.view(vm[2].replace(/\s+/g, " "));
+      return `view on "${api.title()}" → ${v}`;
+    }
+    const card = findSheet(rest);
+    if (card && sheetApi(card)?.view)
+      return `"${sheetApi(card)!.title()}" view: ${sheetApi(card)!.view!()}`;
+    return `✕ view needs <title> kanban <col>|grid`;
+  }
+  if (verb === "style") {
+    // "style budget B2:D9 b,i,f:#ffe08a" / "style budget A1:C1 a:c" — the
+    // Excel font layer: b/i/u/s flags, f:fill, k:ink, a:align
+    const m = rest.match(/^(.*?)\s+([A-Za-z]{1,3}\d+(?::[A-Za-z]{1,3}\d+)?)\s+(\S+)\s*$/i);
+    if (!m) return `✕ style needs <title> <range> <spec> — "style budget B2:D9 b,i,f:#ffe08a"`;
+    const card = findSheet(m[1]);
+    const api = card ? sheetApi(card) : null;
+    if (!api?.setStyle) return `✕ no sheet found named "${m[1]}"`;
+    const cells = expandRange(m[2]);
+    if (!cells.length) return `✕ bad range "${m[2]}"`;
+    api.setStyle(cells, m[3]);
+    return `styled ${cells.length} cells on "${api.title()}" → ${m[3]}`;
+  }
+  if (verb === "autosum" || verb === "sum") {
+    // "autosum budget B10" — Σ into that cell (detects the range above)
+    const m = rest.match(/^(.*?)\s+([A-Za-z]{1,3}\d+)\s*$/);
+    if (!m) return `✕ autosum needs <title> <cell> — "autosum budget B10"`;
+    const card = findSheet(m[1]);
+    const api = card ? sheetApi(card) : null;
+    if (!api?.autoSum) return `✕ no sheet found named "${m[1]}"`;
+    const rc = refRC(m[2]);
+    api.autoSum(rc?.[0] ?? 0, rc?.[1] ?? 0);
+    return `autosummed ${m[2].toUpperCase()} on "${api.title()}"`;
+  }
+  if (verb === "tools") {
+    const card = findSheet(rest);
+    const api = card ? sheetApi(card) : null;
+    if (!api?.listTools) return `✕ no sheet found named "${rest}"`;
+    const tl = api.listTools();
+    return tl.length
+      ? `tools in "${api.title()}":\n` + tl.map((t) => `· ${t.icon} ${t.name} — ${t.steps.length} step${t.steps.length === 1 ? "" : "s"}`).join("\n")
+      : `no custom tools in "${api.title()}" — make one with the 'tool' verb`;
+  }
+  if (verb === "tool" || verb === "addtool") {
+    // `tool <title> {"name":"x","icon":"Σ","steps":[{…}]}` — spec on the
+    // head line or following rows. The model often writes `tool markit {…}`
+    // (tool name where the title belongs) — when exactly one sheet is on
+    // the note, that guess is unambiguous; use it.
+    const hm2 = rest.match(/^(.*?)\s+(\{[\s\S]*)$/);
+    const spec = hm2 ? hm2[2] : rest.includes("{") ? rest : rows.join("\n");
+    const title = hm2 ? hm2[1] : rows.length ? "" : rest;
+    let card = findSheet(title.trim());
+    if (!card) {
+      const sheets = Array.from(document.querySelectorAll<HTMLElement>(".sheet-card"));
+      if (sheets.length === 1) card = sheets[0];
+    }
+    const api = card ? sheetApi(card) : null;
+    if (!api?.addTool) return `✕ tool <title> {json} — sheet "${title.trim() || "?"}" not found`;
+    return api.addTool(spec);
+  }
+  if (verb === "tooldel" || verb === "rmtool") {
+    // both title and tool name may have spaces — try each split; the one
+    // whose suffix names a real tool in a real sheet wins
+    const words = rest.split(/\s+/).filter(Boolean);
+    for (let k = words.length - 1; k >= 1; k--) {
+      const card = findSheet(words.slice(0, k).join(" "));
+      const api = card ? sheetApi(card) : null;
+      if (!api?.listTools) continue;
+      const name = words.slice(k).join(" ");
+      if (api.listTools().some((t) => t.name === name))
+        return api.delTool!(name) ? `removed tool "${name}"` : `✕ no tool named "${name}"`;
+    }
+    const sheets = Array.from(document.querySelectorAll<HTMLElement>(".sheet-card"));
+    for (const c of sheets) {
+      const api = sheetApi(c);
+      if (api?.listTools?.().some((t) => t.name === rest))
+        return api.delTool!(rest) ? `removed tool "${rest}"` : `✕ no tool named "${rest}"`;
+    }
+    return `✕ tooldel <title> <tool name>`;
+  }
+  if (verb === "apply" || verb === "applytool" || verb === "stamp") {
+    // "apply budget running total [A2:F9]" — run a saved tool on a range
+    // (or the current selection when the range is omitted)
+    const words = rest.split(/\s+/).filter(Boolean);
+    const rm = rest.match(/\s+([A-Za-z]{1,3}\d+(?::[A-Za-z]{1,3}\d+)?)\s*$/);
+    let bounds: [[number, number], [number, number]] | undefined;
+    let wordsEnd = words.length;
+    if (rm) {
+      const mm = rm[1].match(/^([A-Za-z]{1,3})(\d+)(?::([A-Za-z]{1,3})(\d+))?$/);
+      if (mm) {
+        const colOf = (L: string) => { let c = 0; for (const ch of L.toUpperCase()) c = c * 26 + (ch.charCodeAt(0) - 64); return c - 1; };
+        // single cell or range — normalize so B4:B2 still stamps B2:B4
+        const a: [number, number] = [Number(mm[2]) - 1, colOf(mm[1])];
+        const b: [number, number] = mm[3] ? [Number(mm[4]) - 1, colOf(mm[3])] : a;
+        bounds = [[Math.min(a[0], b[0]), Math.min(a[1], b[1])], [Math.max(a[0], b[0]), Math.max(a[1], b[1])]];
+        wordsEnd = rest.slice(0, rm.index).trim().split(/\s+/).filter(Boolean).length;
+      }
+    }
+    const head = words.slice(0, wordsEnd);
+    for (let k = head.length - 1; k >= 1; k--) {
+      const card = findSheet(head.slice(0, k).join(" "));
+      const api = card ? sheetApi(card) : null;
+      if (!api?.listTools) continue;
+      const name = head.slice(k).join(" ");
+      if (api.listTools().some((t) => t.name === name))
+        return api.applyTool!(name, ...(bounds ?? [])) as string;
+    }
+    // title omitted or misplaced — `apply markit A1:C1`, `apply markit
+    // budget A1:C1` — on a one-sheet note any prefix or suffix of the head
+    // that names a real tool is unambiguous
+    const sheets = Array.from(document.querySelectorAll<HTMLElement>(".sheet-card"));
+    if (sheets.length === 1) {
+      const api = sheetApi(sheets[0]);
+      const tools = api?.listTools?.() ?? [];
+      for (let k = 0; k < head.length; k++) {
+        for (const name of [head.slice(k).join(" "), head.slice(0, k + 1).join(" ")]) {
+          if (tools.some((t) => t.name === name))
+            return api!.applyTool!(name, ...(bounds ?? [])) as string;
+        }
+      }
+    }
+    return `✕ apply <title> <tool name> [A1:B9]`;
+  }
+  return `✕ unknown sheet verb "${verb}" — new · read · set · append · addrow · addcol · delrow · delcol · clear · sort · format · dedupe · freeze · hide · unhide · cf · filter · view · style · autosum · tool · tools · tooldel · apply`;
+  };
+  return runExtra(await single());
+};
+
+/** ```map``` fence — outlines that draw as trees; rows are indented
+ *  `- ` bullets (2 spaces = one level deeper) */
+const mapTool = async (body: string): Promise<string> => {
+  const lines = body
+    .split("\n")
+    .map((l) => l.replace(/\s+$/, ""))
+    .filter((l) => l.trim() !== "");
+  if (!lines.length) return "✕ empty map command";
+  const hm = lines[0].trim().match(/^(\S+)\s*(.*)$/);
+  const verb = (hm?.[1] ?? "").toLowerCase();
+  const rest = (hm?.[2] ?? "").trim();
+  const splitMap = (): [HTMLElement | null, string] =>
+    probeTitle(".map-card", rest.split(/\s+/).filter(Boolean));
+  if (verb === "new" || verb === "create") {
+    const card = spawnMapCard(rest || "map");
+    const made = mapApi(card)!.add(lines.slice(1));
+    return `map "${card.dataset.topic}" — ${made} nodes`;
+  }
+  if (verb === "add") {
+    const [card, tail] = splitMap();
+    if (!card) return `✕ no map found — create one: map new <title>`;
+    const rows = [...(tail ? [tail] : []), ...lines.slice(1)];
+    const made = mapApi(card)!.add(rows);
+    return `+${made} nodes → "${card.dataset.topic}"`;
+  }
+  if (verb === "list" || verb === "read") {
+    const [card] = splitMap();
+    return card ? mapApi(card)!.list() : `✕ no map found named "${rest}"`;
+  }
+  if (verb === "del" || verb === "delete") {
+    const [card, tail] = splitMap();
+    return card && tail && mapApi(card)!.del(tail)
+      ? `removed "${tail}" from "${card.dataset.topic}"`
+      : `✕ del needs a map + a node prefix`;
+  }
+  if (verb === "rename") {
+    const m2 = rest.match(/\s→\s|\s->\s/);
+    const arrow = m2 ? m2[0] : null;
+    if (!arrow) return `✕ rename needs <map> <prefix> -> <new text>`;
+    const idx = rest.indexOf(arrow);
+    const left = rest.slice(0, idx).trim();
+    const right = rest.slice(idx + arrow.length).trim();
+    const w = left.split(/\s+/).filter(Boolean);
+    const [card, prefix] = probeTitle(".map-card", w);
+    if (card && prefix && mapApi(card)!.rename(prefix, right))
+      return `renamed → "${right}" in "${card.dataset.topic}"`;
+    return `✕ rename needs a map + prefix + -> + new text`;
+  }
+  return `✕ unknown map verb "${verb}" — new/add/del/rename/list`;
+};
+
+/** k=v field scanner for base specs — a value ends at the NEXT k=
+ *  boundary (or `|`/EOL), so `q=a view=b` parses both fields */
+const kvSpec = (text: string): Record<string, string> => {
+  const out: Record<string, string> = {};
+  const hits = [...text.matchAll(/(?:^|[\s|])(q|cols|sort|group|view|in)\s*[:=]\s*/gi)];
+  for (let i = 0; i < hits.length; i++) {
+    const from = hits[i].index! + hits[i][0].length;
+    const to = hits[i + 1]?.index ?? text.length;
+    const v = text.slice(from, to).split("|")[0].trim();
+    out[hits[i][1].toLowerCase()] = v; // explicit `q=` clears the field
+  }
+  return out;
+};
+
+/** ```base``` fence — property-query views over the vault. The whole
+ *  widget is its query + view, so the verbs are just that.
+ *    new <title> [q=…]        — a base card; optional filter right away
+ *    set <title> k=v …        — q / cols / sort / group / view / in fields
+ *    read|list [title]        — the current result rows as text */
+const baseTool = async (body: string): Promise<string> => {
+  const lines = body
+    .split("\n")
+    .map((l) => l.replace(/\s+$/, ""))
+    .filter((l) => l.trim() !== "");
+  if (!lines.length) return "✕ empty base command";
+  const hm = lines[0].trim().match(/^(\S+)\s*(.*)$/);
+  const verb = (hm?.[1] ?? "").toLowerCase();
+  const rest = (hm?.[2] ?? "").trim();
+  const findBase = (name: string): HTMLElement | null => {
+    const all = Array.from(document.querySelectorAll<HTMLElement>(".base-card"));
+    if (!all.length) return null;
+    const n = name.trim().toLowerCase();
+    if (!n) return all.length === 1 ? all[0] : null;
+    // wrong names must error, not silently land on the only base card
+    return (
+      all.find((c) => (c.dataset.title ?? "").toLowerCase() === n) ??
+      all.find((c) => {
+        const t = (c.dataset.title ?? "").toLowerCase();
+        return fuzzyHit(n, t);
+      }) ??
+      null
+    );
+  };
+  if (verb === "new" || verb === "create") {
+    // `new <title> [q=…] [view=…]` — the title ends at the first k=v field
+    const tm = rest.match(/^(.*?)\s+((?:q|cols|sort|group|view|in)\s*[:=].*)$/i);
+    const card = spawnBaseCard((tm ? tm[1] : rest) || "base");
+    const patch = kvSpec([tm?.[2] ?? "", ...lines.slice(1)].join("\n"));
+    if (Object.keys(patch).length) baseApi(card)?.set(patch);
+    return `created base "${card.dataset.title}"${patch.q ? ` — q="${patch.q}"` : ""}`;
+  }
+  if (verb === "set" || verb === "filter" || verb === "view") {
+    // `set <title> q=status:done view=board` — title words end at first k=
+    const m = rest.match(/^(.*?)\s+((?:q|cols|sort|group|view|in)\s*[:=].*)$/i);
+    // `view <title> table` — the bare-word form maps to view=<word>
+    const vw = !m && verb === "view" ? rest.match(/^(.*?)\s+(\w+)$/) : null;
+    const [card, spec] = m ? [findBase(m[1]), m[2]]
+      : vw ? [findBase(vw[1]), `view=${vw[2]}`]
+      : [findBase(rest), ""];
+    if (!card) return `✕ no base found named "${rest || "?"}"`;
+    const patch = kvSpec([spec, ...lines.slice(1)].join("\n"));
+    if (!Object.keys(patch).length)
+      return `✕ set needs fields — q= · cols= · sort= · group= · view=table|board|list|calendar · in=folder`;
+    baseApi(card)?.set(patch);
+    return `base "${card.dataset.title}" → ${Object.entries(patch).map(([k, v]) => `${k}=${v}`).join(" ")}`;
+  }
+  if (verb === "read" || verb === "list" || verb === "rows") {
+    const card = findBase(rest);
+    if (!card) return `✕ no base found named "${rest || "?"}"`;
+    const api = baseApi(card);
+    const out = api?.read() ?? "";
+    return out || `base "${card.dataset.title}" — no rows yet (query: ${api?.query() || "none"})`;
+  }
+  return `✕ unknown base verb "${verb}" — new · set · read`;
+};
+
+/** ```cards``` fence — build decks, quiz sessions, rate cards.
+ *  Convention: the deck title is a fuzzy PREFIX of the arg words —
+ *  `add verbs tener :: to have` finds deck "verbs". */
+const cardsTool = async (body: string): Promise<string> => {
+  const lines = body
+    .split("\n")
+    .map((l) => l.replace(/\s+$/, ""))
+    .filter((l) => l.trim() !== "");
+  if (!lines.length) return "✕ empty cards command";
+  const hm = lines[0].trim().match(/^(\S+)\s*(.*)$/);
+  const verb = (hm?.[1] ?? "").toLowerCase();
+  const rest = (hm?.[2] ?? "").trim();
+
+  // split `rest` into [deck, leftover] — title is a word-prefix of the args
+  const splitDeck = (): [HTMLElement | null, string] =>
+    probeTitle(".cards-card", rest.split(/\s+/).filter(Boolean));
+
+  // new <title> + body rows "front :: back"
+  if (verb === "new" || verb === "create") {
+    const card = spawnCardsCard(rest || "cards");
+    const api = cardsApi(card)!;
+    let made = 0;
+    for (const l of lines.slice(1)) {
+      const i = l.indexOf("::");
+      if (i >= 0) {
+        api.add(l.slice(0, i).trim(), l.slice(i + 2).trim());
+        made++;
+      }
+    }
+    return `deck "${card.dataset.topic}" — ${made} cards`;
   }
 
-  /** the note context for card-landing commands — in a sticky window the
-   *  cards land inside the sticky itself (its own research:done listener) */
-  const noteName = () =>
-    currentNote() || (document.body.classList.contains("sticky-mode") ? "sticky" : "");
-
-  const emitCard = (topic: string, md: string) => {
-    void window.__TAURI__.event.emit("research:done", {
-      note: noteName(),
-      topic,
-      callout: md,
-      kind: "rag",
-      quiet: true,
-      anchor: null,
-    });
-  };
-
-  const resolveTarget = async (rest: string, hybrid: boolean) => {
-    const m = rest.match(/^@?([\w-]+)\s+(.+)$/);
-    const pseudo = ["all-files", "my-notes", "everything"];
-    if (m && (pseudo.includes(m[1]) || (await matchDoc(m[1])))) {
-      // resolve the slug so a fuzzy name token still scopes correctly
-      const hit = pseudo.includes(m[1]) ? m[1] : (await matchDoc(m[1]))?.slug ?? m[1];
-      return { target: hit, query: m[2] };
+  // add <title> [front :: back] — extra "front :: back" rows also land
+  if (verb === "add") {
+    const [card, tail] = splitDeck();
+    if (!card) return `✕ no cards deck found — create one: cards new <title>`;
+    const api = cardsApi(card)!;
+    const rows = [...(tail.includes("::") ? [tail] : []), ...lines.slice(1)];
+    let made = 0;
+    for (const l of rows) {
+      const i = l.indexOf("::");
+      if (i >= 0) {
+        api.add(l.slice(0, i).trim(), l.slice(i + 2).trim());
+        made++;
+      }
     }
-    return { target: hybrid ? "everything" : "all-files", query: rest };
-  };
+    return made ? `+${made} cards → "${card.dataset.topic}"` : "✕ no `front :: back` rows given";
+  }
 
-  const parseTargetN = (rest: string, defN: number) => {
-    let target = "my-notes";
-    let n = defN;
-    const parts = rest.trim().split(/\s+/).filter(Boolean);
-    if (parts[0] && !/^\d+$/.test(parts[0])) {
-      target = parts[0].replace(/^@/, "");
-      parts.shift();
-    }
-    if (parts[0] && /^\d+$/.test(parts[0])) n = Number(parts[0]) || defN;
-    return { target, n };
-  };
+  if (verb === "list" || verb === "read") {
+    const [card] = splitDeck();
+    return card ? cardsApi(card)!.list() : `✕ no cards deck found named "${rest}"`;
+  }
+  if (verb === "due" || verb === "review") {
+    const [card] = splitDeck();
+    return card ? cardsApi(card)!.due() : `✕ no cards deck found named "${rest}"`;
+  }
+  if (verb === "del" || verb === "delete") {
+    const [card, tail] = splitDeck();
+    return card && tail ? cardsApi(card)!.del(tail) : "✕ del needs a deck and a front prefix";
+  }
+  if (verb === "rate" || verb === "grade") {
+    const g = rest.match(/\s(again|hard|good|easy|[0-3])\s*$/i);
+    if (!g) return "✕ rate needs a trailing grade: again|hard|good|easy";
+    const grade = { again: 0, hard: 1, good: 2, easy: 3 }[g[1].toLowerCase()];
+    const noGrade = rest.slice(0, g.index).trim();
+    const w = noGrade.split(/\s+/).filter(Boolean);
+    const [card, front] = probeTitle(".cards-card", w);
+    if (card && front)
+      return cardsApi(card)!.rate(front, (grade ?? Number(g[1])) as 0 | 1 | 2 | 3);
+    return "✕ rate needs a deck + front prefix + grade";
+  }
+  return `✕ unknown cards verb "${verb}" — new/add/del/list/due/rate`;
+};
 
-  /** Laido commands inside the widget — typed by the user or proposed by
-   *  the AI (```laido``` fences); results land as cards on the note */
-  const runLaido = async (cmd: string): Promise<string> => {
-    const m = cmd.trim().match(LAIDO_RE);
-    if (!m) {
-      line("err", `unknown command: ${cmd}`);
-      return "";
+/** ```browser``` fence — open/read/navigate web pages on the note */
+const browserTool = async (body: string): Promise<string> => {
+  const lines = body
+    .split("\n")
+    .map((l) => l.replace(/\s+$/, ""))
+    .filter((l) => l.trim() !== "");
+  if (!lines.length) return "✕ empty browser command";
+  const hm = lines[0].trim().match(/^(\S+)\s*(.*)$/);
+  const verb = (hm?.[1] ?? "").toLowerCase();
+  const rest = (hm?.[2] ?? "").trim();
+
+  // open <url-or-search> [title] — spawn a card and navigate it
+  if (verb === "open" || verb === "new") {
+    if (!rest) return "✕ open needs a url or search phrase";
+    const words = rest.split(/\s+/);
+    const urlish = words[0];
+    const title = words.slice(1).join(" ");
+    const stem = urlish.match(/^https?:\/\/([^/?#]+)/)?.[1] ?? urlish;
+    const card = spawnBrowserCard(title || stem, "");
+    const api = browserApi(card);
+    const out = api ? await api.navigate(urlish) : "card created";
+    return `opened "${card.dataset.topic}" — ${out}`;
+  }
+
+  // verbs that can take either a card title or a bare url
+  // read <title|url> — the page's extracted text (the AI's eyes)
+  if (verb === "read" || verb === "get") {
+    if (!rest) return "✕ read needs a url or a browser card title";
+    const card = findBrowser(rest);
+    if (card) {
+      const api = browserApi(card)!;
+      const text = api.read();
+      if (!text) {
+        // card exists but hasn't fetched yet — navigate+read it now
+        const u = api.url();
+        if (!u) return `✕ browser "${api.title()}" has no page`;
+        await api.navigate(u);
+      }
+      const txt = api.read();
+      return txt
+        ? `browser "${api.title()}" (${api.url()}) — page text:\n${txt.slice(0, 12000)}`
+        : `✕ no page text on "${api.title()}"`;
     }
-    const verb = m[1].toLowerCase();
-    const rest = m[2].trim();
-    const note = noteName();
-    if (!note) {
-      line("err", "no note open — open one first");
-      return "";
+    // bare url — fetch straight to context, no card needed
+    if (!/^(https?:\/\/|[\w-]+\.[\w-]+)/i.test(rest)) {
+      return `✕ no browser card found named "${rest}"`;
     }
     try {
-      switch (verb) {
-        case "research": {
-          if (!rest) throw new Error("give the research a topic");
-          await invoke("agent_run", { name: note, text: `@research ${rest}`, anchor: null });
-          line("ai", "researching — the card lands on your note");
-          break;
-        }
-        case "ask": {
-          if (!rest) throw new Error("give the ask a question");
-          const { target, query } = await resolveTarget(rest, true);
-          await invoke("rag_ask", {
-            note, target, query, quiet: true, anchor: null, question: query, web: true,
-          });
-          line("ai", `✓ answered from ${target} — the card is on your note`);
-          break;
-        }
-        case "document": {
-          if (!rest) throw new Error("give the document a question");
-          const { target, query } = await resolveTarget(rest, false);
-          await invoke("rag_ask", {
-            note, target, query, quiet: true, anchor: null, question: query, web: false,
-          });
-          line("ai", `✓ answered from ${target}`);
-          break;
-        }
-        case "summary": {
-          const md = await invoke<string>("note_summary", { name: note, instruction: rest || null });
-          emitCard(`summary: ${note}`, md);
-          line("ai", "✓ summarized — the card is on your note");
-          break;
-        }
-        case "related": {
-          const rows = await invoke<Array<{ name: string; score: number }>>("related_notes", { name: note });
-          const body = rows.length
-            ? rows
-                .map((r) => `- [[${r.name.replace(/\.(laido|md)$/, "")}]] · ${Math.round(r.score * 100)}%`)
-                .join("\n")
-            : "no related notes yet — keep writing";
-          emitCard("related", `> [!ai] related: ${note}\n> ${body.split("\n").join("\n> ")}`);
-          line("ai", "✓ related notes carded");
-          break;
-        }
-        case "recall": {
-          const { target, n } = parseTargetN(rest, 6);
-          const md = await invoke<string>("rag_quiz", { target, n });
-          emitCard(`recall: ${target}`, md);
-          line("ai", "✓ recall carded");
-          break;
-        }
-        case "tasks": {
-          const { target, n } = parseTargetN(rest, 8);
-          const md = await invoke<string>("rag_tasks", { target, n });
-          emitCard(`tasks: ${target}`, md);
-          line("ai", "✓ tasks carded");
-          break;
-        }
-        case "loop": {
-          let q = rest;
-          let loops = 3;
-          const nm = q.match(/^(\d{1,2})\s+/);
-          if (nm) {
-            loops = Math.max(1, Math.min(10, Number(nm[1])));
-            q = q.slice(nm[0].length).trim();
-          }
-          let target: string | null = null;
-          const tm = q.match(/^(@?[\w-]+)\s+(.+)$/);
-          if (tm) {
-            const cand = tm[1].replace(/^@/, "");
-            const pseudo = ["all-files", "my-notes", "everything"];
-            const files = await invoke<Array<{ slug: string }>>("rag_list").catch(() => []);
-            if (pseudo.includes(cand) || files.some((f) => f.slug === cand)) {
-              target = cand;
-              q = tm[2].trim();
-            }
-          }
-          if (!q) throw new Error("give the loop a research query");
-          await invoke("loop_run", { note, query: q, loops, target, anchor: null });
-          line("ai", `🔁 loop started — up to ${loops} rounds`);
-          break;
-        }
-        case "skill": {
-          const name = rest.split(/\s+/)[0];
-          if (!name) throw new Error("name the skill to run");
-          await invoke("skill_run", { note, name, quiet: true });
-          line("ai", `✓ skill ${name} ran — its cards land on your note`);
-          break;
-        }
-        case "widget":
-        case "canvas":
-        case "agenda":
-        case "graph": {
-          // fence-less spawnables — canvas/agenda/graph have no tool fence
-          // (freeform strokes / computed views); the fence only births them.
-          // `widget canvas t` and bare `canvas t` both work — the model
-          // writes either
-          const bare = verb !== "widget";
-          const sp = rest.match(/^(\S+)\s*(.*)$/);
-          const kind = bare ? verb : (sp?.[1] ?? "").toLowerCase();
-          const title = (bare ? rest : sp?.[2]?.trim() || "")
-            .replace(/^new\s+/i, "").replace(/^a\s+/i, "").trim() || "";
-          const card =
-            kind === "canvas" || kind === "draw" ? spawnCanvasCard(title || "canvas")
-            : kind === "agenda" || kind === "due" ? spawnAgendaCard(title || "agenda")
-            : kind === "graph" || kind === "map-view" ? spawnGraphCard(title || "vault map")
-            : null;
-          if (!card) throw new Error(`unknown widget "${kind}" — canvas · agenda · graph (sheet/slides/todo/chart/cards/map/base spawn from their own fence 'new')`);
-          line("ai", `✓ ${kind} card spawned — "${card.dataset.topic ?? card.dataset.title ?? (title || kind)}"`);
-          break;
-        }
-      }
-    } catch (err) {
-      line("err", `✕ ${String(err)}`);
-    }
-    return "ok";
-  };
-
-  const showOutput = (r: TermResult) => {
-    for (const l of r.output.split("\n").filter((l) => l.trim() !== "").slice(-14)) {
-      line("out", l);
-    }
-    if (!r.ok && r.code !== null) line("out", `(exit ${r.code})`);
-  };
-
-  const runShell = async (cmd: string): Promise<string> => {
-    line("cmd", cmd);
-    const r = await invoke<TermResult>("term_run", { cmd, confirm: false });
-    if (r.needs_confirm) {
-      const row = document.createElement("div");
-      row.className = "term-line confirm";
-      const span = document.createElement("span");
-      span.textContent = cmd;
-      const run = document.createElement("button");
-      run.className = "term-btn";
-      run.textContent = "Run";
-      const skip = document.createElement("button");
-      skip.className = "term-btn ghost";
-      skip.textContent = "Skip";
-      row.append(span, run, skip);
-      log.append(row);
-      log.scrollTop = log.scrollHeight;
-      return await new Promise<string>((resolve) => {
-        run.addEventListener("click", async () => {
-          row.remove();
-          const rr = await invoke<TermResult>("term_run", { cmd, confirm: true });
-          showOutput(rr);
-          resolve(rr.output);
-        });
-        skip.addEventListener("click", () => {
-          row.remove();
-          line("out", "(skipped)");
-          resolve("");
-        });
+      const p = await invoke<{ title: string; final_url: string; text: string }>("page_fetch", {
+        url: rest,
       });
+      return `${p.title || p.final_url} — page text:\n${p.text.slice(0, 12000)}`;
+    } catch (e) {
+      return `✕ fetch failed: ${String(e)}`;
     }
-    showOutput(r);
-    return r.output;
-  };
+  }
 
-  /** every other live chat widget on this sheet — with its id, so the AI can
-   *  name them in send proposals; empty chats are listed too so nothing on
-   *  the sheet is invisible to the others */
-  const othersDigest = () => {
-    const parts: string[] = [];
-    for (const c of Array.from(document.querySelectorAll<HTMLElement>(".term-card"))) {
-      if (c === card) continue;
-      const lines = Array.from(
-        c.querySelectorAll<HTMLElement>('.term-line[data-t="ask"], .term-line[data-t="ai"]'),
-      )
-        .map((l) => (l.dataset.raw ?? "").slice(0, 80))
-        .filter(Boolean)
-        .slice(-4);
-      const id = c.dataset.chatId ?? "?";
-      parts.push(`chat ${id}: ${lines.length ? lines.join(" | ") : "(fresh, no messages yet)"}`);
-    }
-    // sheets are listed too — the AI reads/edits them with `sheet` fences
-    for (const s of Array.from(document.querySelectorAll<HTMLElement>(".sheet-card"))) {
-      const api = sheetApi(s);
-      const title = s.dataset.topic ?? "sheet";
-      if (!api) {
-        parts.push(`sheet "${title}" (loading)`);
-        continue;
-      }
-      const peek: string[] = [];
-      for (let r = 0; r < Math.min(api.rows(), 10) && peek.length < 14; r++)
-        for (let c = 0; c < api.cols() && peek.length < 14; c++) {
-          const raw = api.raw(r, c);
-          if (raw.trim()) peek.push(`${cellName(r, c)}=${raw.slice(0, 24)}`);
-        }
-      parts.push(
-        `sheet "${title}" ${api.rows()}x${api.cols()}: ${peek.join(", ") || "(empty)"} — use a \`\`\`sheet fence to read it fully or edit it`,
-      );
-    }
-    // decks are listed too — `slides` fences read/edit them
-    for (const d of Array.from(document.querySelectorAll<HTMLElement>(".deck-card"))) {
-      const api = deckApi(d);
-      const title = d.dataset.topic ?? "deck";
-      if (!api) {
-        parts.push(`deck "${title}" (loading)`);
-        continue;
-      }
-      parts.push(
-        `deck "${title}" ${api.count()} slides — use a \`\`\`slides fence to read/edit it`,
-      );
-    }
-    // todo lists too — `todo` fences read/edit them
-    for (const td of Array.from(document.querySelectorAll<HTMLElement>(".todo-card"))) {
-      const api = todoApi(td);
-      const title = td.dataset.topic ?? "todo";
-      if (!api) {
-        parts.push(`todo "${title}" (loading)`);
-        continue;
-      }
-      const open = api.items().filter((i) => !i.done).length;
-      parts.push(
-        `todo "${title}" ${open} open / ${api.items().length} total — use a \`\`\`todo fence to read/edit it`,
-      );
-    }
-    // browser cards — `browser` fences navigate them or read the page text
-    for (const bc of Array.from(document.querySelectorAll<HTMLElement>(".browser-card"))) {
-      const api = browserApi(bc);
-      const title = bc.dataset.topic ?? "browser";
-      if (!api) {
-        parts.push(`browser "${title}" (loading)`);
-        continue;
-      }
-      // a peek at the page text puts real context in the prompt — the
-      // agent can answer without burning a fence call just to look
-      const peek = api.read().trim().replace(/\s+/g, " ").slice(0, 180);
-      parts.push(
-        `browser "${title}" at ${api.url() || "about:blank"} (${api.mode()})` +
-          (peek ? ` — page text starts: "${peek}…"` : " (no page loaded yet)") +
-          ` — use a \`\`\`browser fence to navigate/read it`,
-      );
-    }
-    // chart cards — `chart` fences draw them, bind them to sheet ranges
-    for (const cc of Array.from(document.querySelectorAll<HTMLElement>(".chart-card"))) {
-      const api = chartApi(cc);
-      const title = cc.dataset.topic ?? "chart";
-      if (!api) {
-        parts.push(`chart "${title}" (loading)`);
-        continue;
-      }
-      const src = cc.dataset.csrc ? ` ← live from ${cc.dataset.csrc}` : " (inline data)";
-      parts.push(
-        `chart "${title}" ${cc.dataset.ctype || "bar"}${src} — use a \`\`\`chart fence to set data/type/source`,
-      );
-    }
-    // flashcards — `cards` fences build decks and quiz them
-    for (const cc of Array.from(document.querySelectorAll<HTMLElement>(".cards-card"))) {
-      const api = cardsApi(cc);
-      const title = cc.dataset.topic ?? "cards";
-      if (!api) {
-        parts.push(`cards "${title}" (loading)`);
-        continue;
-      }
-      const n = api.cards().length;
-      const dueLine = api.due();
-      const dueN = dueLine === "nothing due" ? 0 : dueLine.split("\n").length;
-      parts.push(`cards "${title}" — ${n} cards, ${dueN} due — use a \`\`\`cards fence to add/list/rate`);
-    }
-    // mind maps — `map` fences build outlines that draw as trees
-    for (const mc of Array.from(document.querySelectorAll<HTMLElement>(".map-card"))) {
-      const api = mapApi(mc);
-      const title = mc.dataset.topic ?? "map";
-      const n = api ? api.list().split("\n").filter((l) => l.trim()).length : 0;
-      parts.push(`map "${title}" — ${n} nodes — use a \`\`\`map fence to add/read`);
-    }
-    // base cards — property-query views; `base` fences set/read them
-    for (const bc of Array.from(document.querySelectorAll<HTMLElement>(".base-card"))) {
-      const api = baseApi(bc);
-      const title = bc.dataset.title ?? "base";
-      if (!api) {
-        parts.push(`base "${title}" (loading)`);
-        continue;
-      }
-      parts.push(
-        `base "${title}" ${api.view()} view${api.query() ? ` q="${api.query()}"` : ""} — ${api.rows().length} rows — use a \`\`\`base fence to set/read it`,
-      );
-    }
-    return parts.join("\n");
-  };
+  if (verb === "navigate" || verb === "go" || verb === "goto") {
+    // navigate <title> <url> — url is the last token
+    const sp = rest.split(/\s+/);
+    const url = sp.pop() ?? "";
+    const card = findBrowser(sp.join(" "));
+    if (!card) return `✕ no browser found named "${sp.join(" ") || "?"}"`;
+    return `→ ${await browserApi(card)!.navigate(url)}`;
+  }
+  if (verb === "back" || verb === "forward" || verb === "fwd") {
+    const card = findBrowser(rest);
+    if (!card) return `✕ no browser found named "${rest || "?"}"`;
+    const api = browserApi(card)!;
+    return verb === "back" ? api.back() : api.forward();
+  }
 
-  /** locate a sheet card by title — exact, then fuzzy, then the only sheet
-   *  on the note when the model omits or garbles the title */
-  const findSheet = (name: string): HTMLElement | null => {
-    const all = Array.from(document.querySelectorAll<HTMLElement>(".sheet-card"));
-    if (!all.length) return null;
-    const n = name.trim().toLowerCase();
-    if (!n) return all.length === 1 ? all[0] : null;
-    return (
-      all.find((c) => (c.dataset.topic ?? "").toLowerCase() === n) ??
-      all.find((c) => {
-        const t = (c.dataset.topic ?? "").toLowerCase();
-        return t.includes(n) || n.includes(t);
-      }) ??
-      (all.length === 1 ? all[0] : null)
-    );
-  };
+  // clip <title> [sel|today] — capture page text into the note (or the
+  // daily note for `today`; `sel` clips the reader selection only)
+  if (verb === "clip") {
+    const words = rest.split(/\s+/).filter(Boolean);
+    const flag = words.length > 1 ? words.pop()! : "";
+    const sel = flag === "sel" || flag === "selection";
+    const today = flag === "today" || flag === "daily";
+    const name = flag ? words.join(" ") : rest;
+    const card = findBrowser(name);
+    if (!card) return `✕ no browser found named "${name || "?"}"`;
+    const c = browserApi(card)!.clip(sel);
+    if (!c) return `✕ nothing to clip${sel ? " — select text in the reader first" : ""}`;
+    if (today) return await clipToDaily(c.title, c.url, c.text);
+    insertClip(c.title, c.url, c.text);
+    return `clipped ${c.text.length} chars from "${c.title}" → note`;
+  }
 
-  /** `<verb> <title…> <tail…>` — the card title is a word-prefix of the arg
-   *  list. A probe only matches a card when the probe equals or word-prefixes
-   *  the card's topic — never the reverse (a probe that *contains* the topic
-   *  has eaten the tail). The fuzzy finders above must not be used here:
-   *  their contains/only-card fallbacks match at the longest probe and leave
-   *  an empty tail — which broke `add <title> <content>` fences whenever one
-   *  card existed. Longest probe wins; a lone card takes the whole rest. */
-  const probeTitle = (sel: string, words: string[]): [HTMLElement | null, string] => {
-    const all = Array.from(document.querySelectorAll<HTMLElement>(sel));
-    const topic = (c: HTMLElement) => (c.dataset.topic ?? "").toLowerCase();
-    for (let i = words.length; i >= 0; i--) {
-      const n = words.slice(0, i).join(" ").toLowerCase();
-      const hit = n ? all.find((c) => topic(c) === n || topic(c).startsWith(n + " ")) : null;
-      if (hit) return [hit, words.slice(i).join(" ")];
-    }
-    if (all.length === 1) return [all[0], words.join(" ")];
-    return [null, words.join(" ")];
-  };
+  // bookmark <title> — save the card's page to bookmarks.laido
+  if (verb === "bookmark" || verb === "bm") {
+    const card = findBrowser(rest);
+    if (!card) return `✕ no browser found named "${rest || "?"}"`;
+    return await browserApi(card)!.bookmark();
+  }
 
-  /** locate a browser card by title/url — same fuzzy logic as findSheet */
-  const findBrowser = (name: string): HTMLElement | null => {
+  // links <title> — the page's extracted links; the agent's navigation map
+  if (verb === "links") {
+    const card = findBrowser(rest);
+    if (!card) return `✕ no browser found named "${rest || "?"}"`;
+    const api = browserApi(card)!;
+    const links = api.links();
+    if (!links.length)
+      return `✕ no links on "${api.title()}" — load a page first`;
+    return `links on "${api.title()}" (${api.url()}):\n` +
+      links.slice(0, 40).map(([t, u]) => `${t} → ${u}`).join("\n");
+  }
+
+  if (verb === "list") {
     const all = Array.from(document.querySelectorAll<HTMLElement>(".browser-card"));
-    if (!all.length) return null;
-    const n = name.trim().toLowerCase();
-    if (!n) return all.length === 1 ? all[0] : null;
-    return (
-      all.find((c) => (c.dataset.topic ?? "").toLowerCase() === n) ??
-      all.find((c) => (c.dataset.url ?? "").toLowerCase() === n) ??
-      all.find((c) => {
-        const t = (c.dataset.topic ?? "").toLowerCase();
-        const u = (c.dataset.url ?? "").toLowerCase();
-        return t.includes(n) || n.includes(t) || u.includes(n);
-      }) ??
-      (all.length === 1 ? all[0] : null)
-    );
+    if (!all.length) return "no browser cards open";
+    return all
+      .map((c) => `"${c.dataset.topic}" — ${c.dataset.url || "about:blank"}`)
+      .join("\n");
+  }
+  return `✕ unknown browser verb "${verb}" — open/read/links/navigate/back/forward/clip/bookmark/list`;
+};
+
+/** locate a chart card by title — same fuzzy logic as findSheet */
+const findChart = (name: string): HTMLElement | null => {
+  const all = Array.from(document.querySelectorAll<HTMLElement>(".chart-card"));
+  if (!all.length) return null;
+  const n = name.trim().toLowerCase();
+  if (!n) return all.length === 1 ? all[0] : null;
+  return (
+    all.find((c) => (c.dataset.topic ?? "").toLowerCase() === n) ??
+    all.find((c) => {
+      const t = (c.dataset.topic ?? "").toLowerCase();
+      return fuzzyHit(n, t);
+    }) ??
+    null
+  );
+};
+
+/** ```chart``` fence — draw viz cards; data inline or live from a sheet */
+const CHART_VERBS = new Set([
+  "new", "create", "set", "source", "bind", "type", "read", "get", "unbind", "freeze", "export",
+]);
+const chartTool = async (body: string, depth = 0): Promise<string> => {
+  const lines = body
+    .split("\n")
+    .map((l) => l.replace(/\s+$/, ""))
+    .filter((l) => l.trim() !== "");
+  if (!lines.length) return "✕ empty chart command";
+  const hm = lines[0].trim().match(/^(\S+)\s*(.*)$/);
+  const verb = (hm?.[1] ?? "").toLowerCase();
+  const rest = (hm?.[2] ?? "").trim();
+  /* packed fence bodies — a later line that starts with a chart verb and
+   * names a real chart is its own command (`new cx\nbind cx s A:B`) */
+  const isChartCmd = (l: string): boolean => {
+    const w = l.trim().split(/\s+/);
+    const v = (w[0] ?? "").toLowerCase();
+    if (!CHART_VERBS.has(v)) return false;
+    if (v === "new" || v === "create") return true;
+    return findChart(w.slice(1).join(" ")) != null;
   };
-
-  /** ```note``` fence — the model creates/reads/appends vault notes.
-   *  This is how reports, briefings and saved research get written. */
-  const noteTool = async (body: string): Promise<string> => {
-    const lines = body.split("\n");
-    const hm = (lines[0] ?? "").trim().match(/^(\S+)\s*(.*)$/);
-    const verb = (hm?.[1] ?? "").toLowerCase();
-    const rest = (hm?.[2] ?? "").trim();
-    const noteName = (s: string) =>
-      s.trim().replace(/\.(md|laido)$/i, "").replace(/[<>:"\\|?*#^\[\]]/g, "-");
-    if (verb === "new" || verb === "write" || verb === "create") {
-      const name = noteName(rest);
-      if (!name) return "✕ note new needs a name";
-      const md = lines.slice(1).join("\n");
-      await invoke("vault_write", { name: `${name}.laido`, content: md + "\n" });
-      addActivity(`wrote note "${name}" (${md.split("\n").length} lines)`);
-      return `note "${name}" written — open it from the palette or \`@today\`-style`;
-    }
-    if (verb === "append") {
-      const name = noteName(rest);
-      if (!name) return "✕ note append needs a name";
-      const md = lines.slice(1).join("\n");
-      let cur = "";
-      try {
-        cur = await invoke<string>("vault_read", { name: `${name}.laido` });
-      } catch { /* fresh note */ }
-      await invoke("vault_write", {
-        name: `${name}.laido`,
-        content: cur.trimEnd() + "\n\n" + md + "\n",
-      });
-      addActivity(`appended ${md.split("\n").length} lines to "${name}"`);
-      return `appended to "${name}"`;
-    }
-    if (verb === "read" || verb === "get") {
-      const name = noteName(rest);
-      try {
-        return await invoke<string>("vault_read", { name: `${name}.laido` });
-      } catch {
-        return `✕ no note named "${name}"`;
-      }
-    }
-    if (verb === "list") {
-      const files = await invoke<Array<{ name: string }>>("vault_list").catch(() => []);
-      return files.map((f) => f.name).join("\n") || "(empty vault)";
-    }
-    if (verb === "open") {
-      const name = noteName(rest);
-      void loadNote(`${name}.laido`);
-      return `opened "${name}"`;
-    }
-    return `✕ unknown note verb "${verb}" — new/append/read/list/open`;
-  };
-
-  /** ```map``` fence — outlines that draw as trees; rows are indented
-   *  `- ` bullets (2 spaces = one level deeper) */
-  const mapTool = async (body: string): Promise<string> => {
-    const lines = body
-      .split("\n")
-      .map((l) => l.replace(/\s+$/, ""))
-      .filter((l) => l.trim() !== "");
-    if (!lines.length) return "✕ empty map command";
-    const hm = lines[0].trim().match(/^(\S+)\s*(.*)$/);
-    const verb = (hm?.[1] ?? "").toLowerCase();
-    const rest = (hm?.[2] ?? "").trim();
-    const splitMap = (): [HTMLElement | null, string] =>
-      probeTitle(".map-card", rest.split(/\s+/).filter(Boolean));
-    if (verb === "new" || verb === "create") {
-      const card = spawnMapCard(rest || "map");
-      const made = mapApi(card)!.add(lines.slice(1));
-      return `map "${card.dataset.topic}" — ${made} nodes`;
-    }
-    if (verb === "add") {
-      const [card, tail] = splitMap();
-      if (!card) return `✕ no map found — create one: map new <title>`;
-      const rows = [...(tail ? [tail] : []), ...lines.slice(1)];
-      const made = mapApi(card)!.add(rows);
-      return `+${made} nodes → "${card.dataset.topic}"`;
-    }
-    if (verb === "list" || verb === "read") {
-      const [card] = splitMap();
-      return card ? mapApi(card)!.list() : `✕ no map found named "${rest}"`;
-    }
-    if (verb === "del" || verb === "delete") {
-      const [card, tail] = splitMap();
-      return card && tail && mapApi(card)!.del(tail)
-        ? `removed "${tail}" from "${card.dataset.topic}"`
-        : `✕ del needs a map + a node prefix`;
-    }
-    if (verb === "rename") {
-      const m2 = rest.match(/\s→\s|\s->\s/);
-      const arrow = m2 ? m2[0] : null;
-      if (!arrow) return `✕ rename needs <map> <prefix> -> <new text>`;
-      const idx = rest.indexOf(arrow);
-      const left = rest.slice(0, idx).trim();
-      const right = rest.slice(idx + arrow.length).trim();
-      const w = left.split(/\s+/).filter(Boolean);
-      const [card, prefix] = probeTitle(".map-card", w);
-      if (card && prefix && mapApi(card)!.rename(prefix, right))
-        return `renamed → "${right}" in "${card.dataset.topic}"`;
-      return `✕ rename needs a map + prefix + -> + new text`;
-    }
-    return `✕ unknown map verb "${verb}" — new/add/del/rename/list`;
-  };
-
-  /** k=v field scanner for base specs — a value ends at the NEXT k=
-   *  boundary (or `|`/EOL), so `q=a view=b` parses both fields */
-  const kvSpec = (text: string): Record<string, string> => {
-    const out: Record<string, string> = {};
-    const hits = [...text.matchAll(/(?:^|[\s|])(q|cols|sort|group|view|in)\s*[:=]\s*/gi)];
-    for (let i = 0; i < hits.length; i++) {
-      const from = hits[i].index! + hits[i][0].length;
-      const to = hits[i + 1]?.index ?? text.length;
-      const v = text.slice(from, to).split("|")[0].trim();
-      if (v) out[hits[i][1].toLowerCase()] = v;
-    }
-    return out;
-  };
-
-  /** ```base``` fence — property-query views over the vault. The whole
-   *  widget is its query + view, so the verbs are just that.
-   *    new <title> [q=…]        — a base card; optional filter right away
-   *    set <title> k=v …        — q / cols / sort / group / view / in fields
-   *    read|list [title]        — the current result rows as text */
-  const baseTool = async (body: string): Promise<string> => {
-    const lines = body
-      .split("\n")
-      .map((l) => l.replace(/\s+$/, ""))
-      .filter((l) => l.trim() !== "");
-    if (!lines.length) return "✕ empty base command";
-    const hm = lines[0].trim().match(/^(\S+)\s*(.*)$/);
-    const verb = (hm?.[1] ?? "").toLowerCase();
-    const rest = (hm?.[2] ?? "").trim();
-    const findBase = (name: string): HTMLElement | null => {
-      const all = Array.from(document.querySelectorAll<HTMLElement>(".base-card"));
-      if (!all.length) return null;
-      const n = name.trim().toLowerCase();
-      if (!n) return all.length === 1 ? all[0] : null;
-      return (
-        all.find((c) => (c.dataset.title ?? "").toLowerCase() === n) ??
-        all.find((c) => {
-          const t = (c.dataset.title ?? "").toLowerCase();
-          return t.includes(n) || n.includes(t);
-        }) ??
-        (all.length === 1 ? all[0] : null)
-      );
-    };
-    if (verb === "new" || verb === "create") {
-      // `new <title> [q=…] [view=…]` — the title ends at the first k=v field
-      const tm = rest.match(/^(.*?)\s+((?:q|cols|sort|group|view|in)\s*[:=].*)$/i);
-      const card = spawnBaseCard((tm ? tm[1] : rest) || "base");
-      const patch = kvSpec([tm?.[2] ?? "", ...lines.slice(1)].join("\n"));
-      if (Object.keys(patch).length) baseApi(card)?.set(patch);
-      return `created base "${card.dataset.title}"${patch.q ? ` — q="${patch.q}"` : ""}`;
-    }
-    if (verb === "set" || verb === "filter" || verb === "view") {
-      // `set <title> q=status:done view=board` — title words end at first k=
-      const m = rest.match(/^(.*?)\s+((?:q|cols|sort|group|view|in)\s*[:=].*)$/i);
-      const [card, spec] = m ? [findBase(m[1]), m[2]] : [findBase(rest), ""];
-      if (!card) return `✕ no base found named "${rest || "?"}"`;
-      const patch = kvSpec([spec, ...lines.slice(1)].join("\n"));
-      if (!Object.keys(patch).length)
-        return `✕ set needs fields — q= · cols= · sort= · group= · view=table|board|list|calendar · in=folder`;
-      baseApi(card)?.set(patch);
-      return `base "${card.dataset.title}" → ${Object.entries(patch).map(([k, v]) => `${k}=${v}`).join(" ")}`;
-    }
-    if (verb === "read" || verb === "list" || verb === "rows") {
-      const card = findBase(rest);
-      if (!card) return `✕ no base found named "${rest || "?"}"`;
-      const api = baseApi(card);
-      const out = api?.read() ?? "";
-      return out || `base "${card.dataset.title}" — no rows yet (query: ${api?.query() || "none"})`;
-    }
-    return `✕ unknown base verb "${verb}" — new · set · read`;
-  };
-
-  /** ```cards``` fence — build decks, quiz sessions, rate cards.
-   *  Convention: the deck title is a fuzzy PREFIX of the arg words —
-   *  `add verbs tener :: to have` finds deck "verbs". */
-  const cardsTool = async (body: string): Promise<string> => {
-    const lines = body
-      .split("\n")
-      .map((l) => l.replace(/\s+$/, ""))
-      .filter((l) => l.trim() !== "");
-    if (!lines.length) return "✕ empty cards command";
-    const hm = lines[0].trim().match(/^(\S+)\s*(.*)$/);
-    const verb = (hm?.[1] ?? "").toLowerCase();
-    const rest = (hm?.[2] ?? "").trim();
-
-    // split `rest` into [deck, leftover] — title is a word-prefix of the args
-    const splitDeck = (): [HTMLElement | null, string] =>
-      probeTitle(".cards-card", rest.split(/\s+/).filter(Boolean));
-
-    // new <title> + body rows "front :: back"
-    if (verb === "new" || verb === "create") {
-      const card = spawnCardsCard(rest || "cards");
-      const api = cardsApi(card)!;
-      let made = 0;
-      for (const l of lines.slice(1)) {
-        const i = l.indexOf("::");
-        if (i >= 0) {
-          api.add(l.slice(0, i).trim(), l.slice(i + 2).trim());
-          made++;
-        }
-      }
-      return `deck "${card.dataset.topic}" — ${made} cards`;
-    }
-
-    // add <title> [front :: back] — extra "front :: back" rows also land
-    if (verb === "add") {
-      const [card, tail] = splitDeck();
-      if (!card) return `✕ no cards deck found — create one: cards new <title>`;
-      const api = cardsApi(card)!;
-      const rows = [...(tail.includes("::") ? [tail] : []), ...lines.slice(1)];
-      let made = 0;
-      for (const l of rows) {
-        const i = l.indexOf("::");
-        if (i >= 0) {
-          api.add(l.slice(0, i).trim(), l.slice(i + 2).trim());
-          made++;
-        }
-      }
-      return made ? `+${made} cards → "${card.dataset.topic}"` : "✕ no `front :: back` rows given";
-    }
-
-    if (verb === "list" || verb === "read") {
-      const [card] = splitDeck();
-      return card ? cardsApi(card)!.list() : `✕ no cards deck found named "${rest}"`;
-    }
-    if (verb === "due" || verb === "review") {
-      const [card] = splitDeck();
-      return card ? cardsApi(card)!.due() : `✕ no cards deck found named "${rest}"`;
-    }
-    if (verb === "del" || verb === "delete") {
-      const [card, tail] = splitDeck();
-      return card && tail ? cardsApi(card)!.del(tail) : "✕ del needs a deck and a front prefix";
-    }
-    if (verb === "rate" || verb === "grade") {
-      const g = rest.match(/\s(again|hard|good|easy|[0-3])\s*$/i);
-      if (!g) return "✕ rate needs a trailing grade: again|hard|good|easy";
-      const grade = { again: 0, hard: 1, good: 2, easy: 3 }[g[1].toLowerCase()];
-      const noGrade = rest.slice(0, g.index).trim();
-      const w = noGrade.split(/\s+/).filter(Boolean);
-      const [card, front] = probeTitle(".cards-card", w);
-      if (card && front)
-        return cardsApi(card)!.rate(front, (grade ?? Number(g[1])) as 0 | 1 | 2 | 3);
-      return "✕ rate needs a deck + front prefix + grade";
-    }
-    return `✕ unknown cards verb "${verb}" — new/add/del/list/due/rate`;
-  };
-
-  /** ```browser``` fence — open/read/navigate web pages on the note */
-  const browserTool = async (body: string): Promise<string> => {
-    const lines = body
-      .split("\n")
-      .map((l) => l.replace(/\s+$/, ""))
-      .filter((l) => l.trim() !== "");
-    if (!lines.length) return "✕ empty browser command";
-    const hm = lines[0].trim().match(/^(\S+)\s*(.*)$/);
-    const verb = (hm?.[1] ?? "").toLowerCase();
-    const rest = (hm?.[2] ?? "").trim();
-
-    // open <url-or-search> [title] — spawn a card and navigate it
-    if (verb === "open" || verb === "new") {
-      if (!rest) return "✕ open needs a url or search phrase";
-      const words = rest.split(/\s+/);
-      const urlish = words[0];
-      const title = words.slice(1).join(" ");
-      const stem = urlish.match(/^https?:\/\/([^/?#]+)/)?.[1] ?? urlish;
-      const card = spawnBrowserCard(title || stem, "");
-      const api = browserApi(card);
-      const out = api ? await api.navigate(urlish) : "card created";
-      return `opened "${card.dataset.topic}" — ${out}`;
-    }
-
-    // verbs that can take either a card title or a bare url
-    // read <title|url> — the page's extracted text (the AI's eyes)
-    if (verb === "read" || verb === "get") {
-      if (!rest) return "✕ read needs a url or a browser card title";
-      const card = findBrowser(rest);
-      if (card) {
-        const api = browserApi(card)!;
-        const text = api.read();
-        if (!text) {
-          // card exists but hasn't fetched yet — navigate+read it now
-          const u = api.url();
-          if (!u) return `✕ browser "${api.title()}" has no page`;
-          await api.navigate(u);
-        }
-        const txt = api.read();
-        return txt
-          ? `browser "${api.title()}" (${api.url()}) — page text:\n${txt.slice(0, 12000)}`
-          : `✕ no page text on "${api.title()}"`;
-      }
-      // bare url — fetch straight to context, no card needed
-      if (!/^(https?:\/\/|[\w-]+\.[\w-]+)/i.test(rest)) {
-        return `✕ no browser card found named "${rest}"`;
-      }
-      try {
-        const p = await invoke<{ title: string; final_url: string; text: string }>("page_fetch", {
-          url: rest,
-        });
-        return `${p.title || p.final_url} — page text:\n${p.text.slice(0, 12000)}`;
-      } catch (e) {
-        return `✕ fetch failed: ${String(e)}`;
-      }
-    }
-
-    if (verb === "navigate" || verb === "go" || verb === "goto") {
-      // navigate <title> <url> — url is the last token
-      const sp = rest.split(/\s+/);
-      const url = sp.pop() ?? "";
-      const card = findBrowser(sp.join(" "));
-      if (!card) return `✕ no browser found named "${sp.join(" ") || "?"}"`;
-      return `→ ${await browserApi(card)!.navigate(url)}`;
-    }
-    if (verb === "back" || verb === "forward" || verb === "fwd") {
-      const card = findBrowser(rest);
-      if (!card) return `✕ no browser found named "${rest || "?"}"`;
-      const api = browserApi(card)!;
-      return verb === "back" ? api.back() : api.forward();
-    }
-
-    // clip <title> [sel|today] — capture page text into the note (or the
-    // daily note for `today`; `sel` clips the reader selection only)
-    if (verb === "clip") {
-      const words = rest.split(/\s+/).filter(Boolean);
-      const flag = words.length > 1 ? words.pop()! : "";
-      const sel = flag === "sel" || flag === "selection";
-      const today = flag === "today" || flag === "daily";
-      const name = flag ? words.join(" ") : rest;
-      const card = findBrowser(name);
-      if (!card) return `✕ no browser found named "${name || "?"}"`;
-      const c = browserApi(card)!.clip(sel);
-      if (!c) return `✕ nothing to clip${sel ? " — select text in the reader first" : ""}`;
-      if (today) return await clipToDaily(c.title, c.url, c.text);
-      insertClip(c.title, c.url, c.text);
-      return `clipped ${c.text.length} chars from "${c.title}" → note`;
-    }
-
-    // bookmark <title> — save the card's page to bookmarks.laido
-    if (verb === "bookmark" || verb === "bm") {
-      const card = findBrowser(rest);
-      if (!card) return `✕ no browser found named "${rest || "?"}"`;
-      return await browserApi(card)!.bookmark();
-    }
-
-    // links <title> — the page's extracted links; the agent's navigation map
-    if (verb === "links") {
-      const card = findBrowser(rest);
-      if (!card) return `✕ no browser found named "${rest || "?"}"`;
-      const api = browserApi(card)!;
-      const links = api.links();
-      if (!links.length)
-        return `✕ no links on "${api.title()}" — load a page first`;
-      return `links on "${api.title()}" (${api.url()}):\n` +
-        links.slice(0, 40).map(([t, u]) => `${t} → ${u}`).join("\n");
-    }
-
-    if (verb === "list") {
-      const all = Array.from(document.querySelectorAll<HTMLElement>(".browser-card"));
-      if (!all.length) return "no browser cards open";
-      return all
-        .map((c) => `"${c.dataset.topic}" — ${c.dataset.url || "about:blank"}`)
-        .join("\n");
-    }
-    return `✕ unknown browser verb "${verb}" — open/read/links/navigate/back/forward/clip/bookmark/list`;
-  };
-
-  /** locate a chart card by title — same fuzzy logic as findSheet */
-  const findChart = (name: string): HTMLElement | null => {
-    const all = Array.from(document.querySelectorAll<HTMLElement>(".chart-card"));
-    if (!all.length) return null;
-    const n = name.trim().toLowerCase();
-    if (!n) return all.length === 1 ? all[0] : null;
-    return (
-      all.find((c) => (c.dataset.topic ?? "").toLowerCase() === n) ??
-      all.find((c) => {
-        const t = (c.dataset.topic ?? "").toLowerCase();
-        return t.includes(n) || n.includes(t);
-      }) ??
-      (all.length === 1 ? all[0] : null)
-    );
-  };
-
-  /** ```chart``` fence — draw viz cards; data inline or live from a sheet */
-  const chartTool = async (body: string): Promise<string> => {
-    const lines = body
-      .split("\n")
-      .map((l) => l.replace(/\s+$/, ""))
-      .filter((l) => l.trim() !== "");
-    if (!lines.length) return "✕ empty chart command";
-    const hm = lines[0].trim().match(/^(\S+)\s*(.*)$/);
-    const verb = (hm?.[1] ?? "").toLowerCase();
-    const rest = (hm?.[2] ?? "").trim();
+  const extra: string[] = [];
+  const cmdRows: string[] = [];
+  for (const l of lines.slice(1)) (depth === 0 && isChartCmd(l) ? extra : cmdRows).push(l.trim());
+  const single = async (): Promise<string> => {
 
     // new <title> [type] — spawn a chart card
     if (verb === "new") {
@@ -941,7 +1055,7 @@ export function wireTerminal(card: HTMLElement) {
       const api = chartApi(card);
       if (m && api) api.setType(m[1].toLowerCase());
       // data rows may follow on the same fence
-      const rows = lines.slice(1).map((l) => l.split("|").map((s) => s.trim()));
+      const rows = cmdRows.map((l) => l.split("|").map((s) => s.trim()));
       if (rows.length && api) api.setRows(rows);
       return `chart "${card.dataset.topic}" created${rows.length ? ` with ${rows.length} points` : ""}`;
     }
@@ -950,7 +1064,7 @@ export function wireTerminal(card: HTMLElement) {
     if (verb === "set") {
       const card = findChart(rest);
       if (!card) return `✕ no chart found named "${rest || "?"}"`;
-      const rows = lines.slice(1).map((l) => l.split("|").map((s) => s.trim()));
+      const rows = cmdRows.map((l) => l.split("|").map((s) => s.trim()));
       if (!rows.length) return "✕ set needs `label | v` rows below it";
       chartApi(card)!.setRows(rows);
       return `chart "${card.dataset.topic}" set — ${rows.length} points`;
@@ -1012,68 +1126,86 @@ export function wireTerminal(card: HTMLElement) {
       return `exported → ${out}`;
     }
 
-    return `✕ unknown chart verb "${verb}" — new/set/source/type/read/unbind/export`;
+  return `✕ unknown chart verb "${verb}" — new/set/source/type/read/unbind/export`;
   };
+  let out = await single();
+  for (const l of extra) out += "\n" + (await chartTool(l, 1));
+  return out;
+};
 
-  const refOf = (s: string): [number, number] | null => {
-    const mm = s.trim().match(/^([A-Za-z]{1,3})(\d{1,4})$/);
-    if (!mm) return null;
-    let c = 0;
-    for (const ch of mm[1].toUpperCase()) c = c * 26 + (ch.charCodeAt(0) - 64);
-    return [Number(mm[2]) - 1, c - 1];
+
+/** locate a deck card by title — same fuzzy logic as findSheet */
+const findDeck = (name: string): HTMLElement | null => {
+  const all = Array.from(document.querySelectorAll<HTMLElement>(".deck-card"));
+  if (!all.length) return null;
+  const n = name.trim().toLowerCase();
+  if (!n) return all.length === 1 ? all[0] : null;
+  return (
+    all.find((c) => (c.dataset.topic ?? "").toLowerCase() === n) ??
+    all.find((c) => {
+      const t = (c.dataset.topic ?? "").toLowerCase();
+      return fuzzyHit(n, t);
+    }) ??
+    null
+  );
+};
+
+/** execute one ` ```slides ` fence — the AI's read/write channel into
+ *  decks. Slide numbers are 1-based for the model; the api is 0-based.
+ *  Verbs:
+ *    new <title> [theme]          — a deck card on the note
+ *    read <title>                 — every slide's fields back as text
+ *    outline <title>              — body rows build slides: `layout | field | field`
+ *    addslide <title> <layout>    — one blank slide of a layout
+ *    delslide <title> <n>         — remove slide n (decks keep ≥1 slide)
+ *    move <title> <n> <m>         — move slide n to position m
+ *    layout <title> <n> <layout>  — change a slide's layout
+ *    set <title> <n> + body lines — the markdown-ish slide body
+ *      (`# title` `## sub` `- bullet` `img: path | caption` `~ note`
+ *       `bg: #hex` `> quote` `by: name` `col: a ; b ;; c ; d`)
+ *    append <title> <n> <text>    — add one bullet to slide n
+ *    theme <title> <name>         — deck theme (light·dark·navy·forest·
+ *                                  sunset·mono·paper·coral)
+ *    transition <title> <fx>      — none·fade·push·wipe·zoom
+ *    bg <title> <n> <color>       — per-slide background
+ *    note <title> <n> <text>      — speaker notes
+ *    duplicate <title> <n>        — copy slide n
+ *  Layouts: title · section · bullets · twocol · image · quote ·
+ *  bigfact · blank. `outline` field order: `title | T | Sub`,
+ *  `section/bigfact | T | Sub`, `quote | text | by`,
+ *  `image | T | img-path | caption`, `twocol | T | a ; b | c ; d`,
+ *  `bullets/blank | T | item | item …`. */
+const DECK_VERBS = new Set([
+  "new", "create", "read", "get", "export", "save", "import", "load", "outline",
+  "addslide", "add", "delslide", "delete", "move", "layout", "set", "append",
+  "theme", "transition", "bg", "note", "duplicate", "dup", "els", "elements",
+  "el", "insert", "elset", "eldel", "tools", "tool", "addtool", "tooldel", "rmtool", "stamp",
+]);
+const deckTool = async (body: string, depth = 0): Promise<string> => {
+  const lines = body
+    .split("\n")
+    .map((l) => l.replace(/\s+$/, ""))
+    .filter((l) => l.trim() !== "");
+  if (!lines.length) return "✕ empty slides command";
+  const hm = lines[0].trim().match(/^(\S+)\s*(.*)$/);
+  const verb = (hm?.[1] ?? "").toLowerCase();
+  const rest = (hm?.[2] ?? "").trim();
+  /* packed fence bodies — a later line that starts with a deck verb and
+   * names a real deck is its own command (`tool d {…}` + `stamp d 1 t`).
+   * Slide-content lines never match: `# t` `- b` `layout: x` `col: y`
+   * carry their own sigils; a stray `note to self` only dispatches if
+   * its tail resolves to a real deck title */
+  const isDeckCmd = (l: string): boolean => {
+    const w = l.trim().split(/\s+/);
+    const v = (w[0] ?? "").toLowerCase();
+    if (!DECK_VERBS.has(v)) return false;
+    if (v === "new" || v === "create") return true;
+    return findDeck(w.slice(1).join(" ")) != null;
   };
-
-  /** locate a deck card by title — same fuzzy logic as findSheet */
-  const findDeck = (name: string): HTMLElement | null => {
-    const all = Array.from(document.querySelectorAll<HTMLElement>(".deck-card"));
-    if (!all.length) return null;
-    const n = name.trim().toLowerCase();
-    if (!n) return all.length === 1 ? all[0] : null;
-    return (
-      all.find((c) => (c.dataset.topic ?? "").toLowerCase() === n) ??
-      all.find((c) => {
-        const t = (c.dataset.topic ?? "").toLowerCase();
-        return t.includes(n) || n.includes(t);
-      }) ??
-      (all.length === 1 ? all[0] : null)
-    );
-  };
-
-  /** execute one ` ```slides ` fence — the AI's read/write channel into
-   *  decks. Slide numbers are 1-based for the model; the api is 0-based.
-   *  Verbs:
-   *    new <title> [theme]          — a deck card on the note
-   *    read <title>                 — every slide's fields back as text
-   *    outline <title>              — body rows build slides: `layout | field | field`
-   *    addslide <title> <layout>    — one blank slide of a layout
-   *    delslide <title> <n>         — remove slide n (decks keep ≥1 slide)
-   *    move <title> <n> <m>         — move slide n to position m
-   *    layout <title> <n> <layout>  — change a slide's layout
-   *    set <title> <n> + body lines — the markdown-ish slide body
-   *      (`# title` `## sub` `- bullet` `img: path | caption` `~ note`
-   *       `bg: #hex` `> quote` `by: name` `col: a ; b ;; c ; d`)
-   *    append <title> <n> <text>    — add one bullet to slide n
-   *    theme <title> <name>         — deck theme (light·dark·navy·forest·
-   *                                  sunset·mono·paper·coral)
-   *    transition <title> <fx>      — none·fade·push·wipe·zoom
-   *    bg <title> <n> <color>       — per-slide background
-   *    note <title> <n> <text>      — speaker notes
-   *    duplicate <title> <n>        — copy slide n
-   *  Layouts: title · section · bullets · twocol · image · quote ·
-   *  bigfact · blank. `outline` field order: `title | T | Sub`,
-   *  `section/bigfact | T | Sub`, `quote | text | by`,
-   *  `image | T | img-path | caption`, `twocol | T | a ; b | c ; d`,
-   *  `bullets/blank | T | item | item …`. */
-  const deckTool = async (body: string): Promise<string> => {
-    const lines = body
-      .split("\n")
-      .map((l) => l.replace(/\s+$/, ""))
-      .filter((l) => l.trim() !== "");
-    if (!lines.length) return "✕ empty slides command";
-    const hm = lines[0].trim().match(/^(\S+)\s*(.*)$/);
-    const verb = (hm?.[1] ?? "").toLowerCase();
-    const rest = (hm?.[2] ?? "").trim();
-    const rows = lines.slice(1);
+  const extra: string[] = [];
+  const rows: string[] = [];
+  for (const l of lines.slice(1)) (depth === 0 && isDeckCmd(l) ? extra : rows).push(l.trim());
+  const single = async (): Promise<string> => {
     const deckOf = (title: string) => {
       const c = findDeck(title);
       return c ? deckApi(c) : undefined;
@@ -1387,410 +1519,598 @@ export function wireTerminal(card: HTMLElement) {
       return hit.a.stamp(i - 1, name, ...(box ?? []));
     }
 
-    return `✕ unknown slides verb "${verb}" — new · read · outline · addslide · delslide · move · layout · set · append · theme · transition · bg · note · duplicate · el · els · elset · eldel · stamp · tool · tools · tooldel`;
+  return `✕ unknown slides verb "${verb}" — new · read · outline · addslide · delslide · move · layout · set · append · theme · transition · bg · note · duplicate · el · els · elset · eldel · stamp · tool · tools · tooldel`;
+  };
+  let out = await single();
+  for (const l of extra) out += "\n" + (await deckTool(l, 1));
+  return out;
+};
+
+/** locate a todo card by title — same fuzzy logic as findSheet */
+const findTodo = (name: string): HTMLElement | null => {
+  const all = Array.from(document.querySelectorAll<HTMLElement>(".todo-card"));
+  if (!all.length) return null;
+  const n = name.trim().toLowerCase();
+  if (!n) return all.length === 1 ? all[0] : null;
+  return (
+    all.find((c) => (c.dataset.topic ?? "").toLowerCase() === n) ??
+    all.find((c) => {
+      const t = (c.dataset.topic ?? "").toLowerCase();
+      return fuzzyHit(n, t);
+    }) ??
+    null
+  );
+};
+
+/** execute one ` ```todo ` fence — the AI's task channel. Task numbers are
+ *  1-based for the model; the api is 0-based.
+ *    new <title>                  — a task-list card on the note
+ *    list [title]                 — every task back as text (all cards when empty)
+ *    add <title> <text> [@when]   — a task; when: today·tomorrow·+Nd·fri·YYYY-MM-DD
+ *    done <title> <n> · open <title> <n> · del <title> <n>
+ *    clear <title>                — remove completed tasks
+ *    today                        — everything due today across all lists */
+const todoTool = async (body: string): Promise<string> => {
+  const lines = body
+    .split("\n")
+    .map((l) => l.replace(/\s+$/, ""))
+    .filter((l) => l.trim() !== "");
+  if (!lines.length) return "✕ empty todo command";
+  const hm = lines[0].trim().match(/^(\S+)\s*(.*)$/);
+  const verb = (hm?.[1] ?? "").toLowerCase();
+  const rest = (hm?.[2] ?? "").trim();
+  const rows = lines.slice(1);
+  const todoOf = (title: string) => {
+    const c = findTodo(title);
+    return c ? todoApi(c) : undefined;
   };
 
-  /** locate a todo card by title — same fuzzy logic as findSheet */
-  const findTodo = (name: string): HTMLElement | null => {
-    const all = Array.from(document.querySelectorAll<HTMLElement>(".todo-card"));
-    if (!all.length) return null;
-    const n = name.trim().toLowerCase();
-    if (!n) return all.length === 1 ? all[0] : null;
-    return (
-      all.find((c) => (c.dataset.topic ?? "").toLowerCase() === n) ??
-      all.find((c) => {
-        const t = (c.dataset.topic ?? "").toLowerCase();
-        return t.includes(n) || n.includes(t);
-      }) ??
-      (all.length === 1 ? all[0] : null)
-    );
+  if (verb === "new" || verb === "create") {
+    spawnTodoCard(rest || "tasks");
+    // extra rows become tasks right away
+    const api = todoApi(findTodo(rest || "tasks")!);
+    rows.forEach((t) => api?.add(t));
+    return `created todo "${rest || "tasks"}"${rows.length ? ` + ${rows.length} tasks` : ""}`;
+  }
+  if (verb === "today") {
+    const now = new Date();
+    const iso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    const hits: string[] = [];
+    for (const td of Array.from(document.querySelectorAll<HTMLElement>(".todo-card"))) {
+      const a = todoApi(td);
+      if (!a) continue;
+      const due = a.items().filter((i) => !i.done && i.when && i.when <= iso);
+      if (due.length)
+        hits.push(`${a.title()}: ${due.map((i) => `${i.text}${i.when < iso ? " (overdue)" : ""}`).join(" · ")}`);
+    }
+    return hits.length ? `due today/overdue:\n${hits.join("\n")}` : "nothing due today";
+  }
+  if (verb === "list" || verb === "read") {
+    if (!rest) {
+      // every card
+      const all = Array.from(document.querySelectorAll<HTMLElement>(".todo-card"))
+        .map((c) => todoApi(c))
+        .filter(Boolean);
+      if (!all.length) return "no todo lists on this note";
+      return all.map((a) => `== ${a!.title()} ==\n${a!.list() || "(empty)"}`).join("\n");
+    }
+    const a = todoOf(rest);
+    if (!a) return `✕ no todo list named "${rest}"`;
+    return `== ${a.title()} ==\n${a.list() || "(empty)"}`;
+  }
+  if (verb === "add") {
+    // `add <title> <text> [@when]` — title is a word-prefix of the arg list
+    const [card, text] = probeTitle(".todo-card", rest.split(/\s+/).filter(Boolean));
+    const api = card ? todoApi(card) : undefined;
+    if (!api) return `✕ no todo list found — create one first: \`new <title>\``;
+    if (!text) return `✕ add <list> <task text> [@when]`;
+    const i = api.add(text);
+    return `added task ${i} to "${api.title()}"`;
+  }
+  if (verb === "done" || verb === "check" || verb === "open" || verb === "undone" || verb === "del" || verb === "clear") {
+    const nm = rest.match(/^(.*?)\s+(\d+)$/);
+    const isClear = verb === "clear";
+    const a = isClear ? todoOf(rest) : nm ? todoOf(nm[1]) : undefined;
+    if (!a) return `✕ no todo list named "${isClear ? rest : nm?.[1] ?? rest}"`;
+    if (isClear) {
+      const n = a.clearDone();
+      return `cleared ${n} done task${n === 1 ? "" : "s"} from "${a.title()}"`;
+    }
+    const i = Number(nm![2]);
+    if (!(i >= 1 && i <= a.items().length)) return `✕ ${verb} <list> <n> — 1..${a.items().length}`;
+    if (verb === "del") {
+      a.del(i - 1);
+      return `deleted task ${i} from "${a.title()}"`;
+    }
+    const done = verb === "done" || verb === "check";
+    a.setDone(i - 1, done);
+    return `task ${i} in "${a.title()}" → ${done ? "done ✓" : "reopened"}`;
+  }
+  return `✕ unknown todo verb "${verb}" — new · list · add · done · open · del · clear · today`;
+};
+
+
+/** `<verb> <title…> <tail…>` — the card title is a word-prefix of the arg
+ *  list. A probe only matches a card when the probe equals or word-prefixes
+ *  the card's topic — never the reverse (a probe that *contains* the topic
+ *  has eaten the tail). The fuzzy finders above must not be used here:
+ *  their contains/only-card fallbacks match at the longest probe and leave
+ *  an empty tail — which broke `add <title> <content>` fences whenever one
+ *  card existed. Longest probe wins; a lone card takes the whole rest. */
+const probeTitle = (sel: string, words: string[]): [HTMLElement | null, string] => {
+  const all = Array.from(document.querySelectorAll<HTMLElement>(sel));
+  const topic = (c: HTMLElement) => (c.dataset.topic ?? "").toLowerCase();
+  for (let i = words.length; i >= 0; i--) {
+    const n = words.slice(0, i).join(" ").toLowerCase();
+    const hit = n ? all.find((c) => topic(c) === n || topic(c).startsWith(n + " ")) : null;
+    if (hit) return [hit, words.slice(i).join(" ")];
+  }
+  if (all.length === 1) return [all[0], words.join(" ")];
+  return [null, words.join(" ")];
+};
+
+/** locate a browser card by title/url — same fuzzy logic as findSheet */
+const findBrowser = (name: string): HTMLElement | null => {
+  const all = Array.from(document.querySelectorAll<HTMLElement>(".browser-card"));
+  if (!all.length) return null;
+  const n = name.trim().toLowerCase();
+  if (!n) return all.length === 1 ? all[0] : null;
+  return (
+    all.find((c) => (c.dataset.topic ?? "").toLowerCase() === n) ??
+    all.find((c) => (c.dataset.url ?? "").toLowerCase() === n) ??
+    all.find((c) => {
+      const t = (c.dataset.topic ?? "").toLowerCase();
+      const u = (c.dataset.url ?? "").toLowerCase();
+      return fuzzyHit(n, t) || u.includes(n);
+    }) ??
+    null
+  );
+};
+
+
+/** one entry point for every widget fence — the terminal's dispatch
+ *  loop and the sheet's AI chat bar both route through here, so asking a
+ *  sheet to "chart this" or "make a deck of it" reaches the same verbs. */
+export const runWidgetFence = async (kind: string, body: string): Promise<string> => {
+  switch (kind) {
+    case "sheet": return sheetTool(body);
+    case "slides":
+    case "deck": return deckTool(body);
+    case "todo": return todoTool(body);
+    case "chart": return chartTool(body);
+    case "cards": return cardsTool(body);
+    case "map": return mapTool(body);
+    case "base": return baseTool(body);
+    case "browser": return browserTool(body);
+    default: return `✕ no handler for ${kind} fences`;
+  }
+};
+
+export function wireTerminal(card: HTMLElement) {
+  if (!card?.dataset) return;
+  const log = card.querySelector<HTMLElement>(".term-log");
+  const input = card.querySelector<HTMLInputElement>(".term-input");
+  if (!log || !input || card.dataset.wired) return;
+  card.dataset.wired = "1";
+  const history: Array<{ role: string; content: string }> = [];
+  const searched = new Set<string>();
+  let steps = 0;
+  let busy = false;
+  let spawnRetries = 0;
+
+  const line = (cls: string, text: string) => {
+    const d = document.createElement("div");
+    d.className = `term-line ${cls}`;
+    d.dataset.t = cls;
+    d.dataset.raw = text;
+    d.textContent = text;
+    log.append(d);
+    log.scrollTop = log.scrollHeight;
+    return d;
   };
 
-  /** execute one ` ```todo ` fence — the AI's task channel. Task numbers are
-   *  1-based for the model; the api is 0-based.
-   *    new <title>                  — a task-list card on the note
-   *    list [title]                 — every task back as text (all cards when empty)
-   *    add <title> <text> [@when]   — a task; when: today·tomorrow·+Nd·fri·YYYY-MM-DD
-   *    done <title> <n> · open <title> <n> · del <title> <n>
-   *    clear <title>                — remove completed tasks
-   *    today                        — everything due today across all lists */
-  const todoTool = async (body: string): Promise<string> => {
-    const lines = body
-      .split("\n")
-      .map((l) => l.replace(/\s+$/, ""))
-      .filter((l) => l.trim() !== "");
-    if (!lines.length) return "✕ empty todo command";
-    const hm = lines[0].trim().match(/^(\S+)\s*(.*)$/);
+  // the persisted log is the thread — rebuild it so the AI remembers
+  for (const l of Array.from(log.querySelectorAll<HTMLElement>(".term-line"))) {
+    const t = l.dataset.t ?? "out";
+    const raw = l.dataset.raw ?? "";
+    if (t === "ask") history.push({ role: "user", content: raw });
+    else if (t === "ai") history.push({ role: "assistant", content: raw });
+    else if (t === "cmd") history.push({ role: "user", content: `ran: ! ${raw}` });
+    else if (t === "out" && raw.trim()) history.push({ role: "user", content: `output: ${raw}` });
+  }
+
+  /** the note context for card-landing commands — in a sticky window the
+   *  cards land inside the sticky itself (its own research:done listener) */
+  const noteName = () =>
+    currentNote() || (document.body.classList.contains("sticky-mode") ? "sticky" : "");
+
+  const emitCard = (topic: string, md: string) => {
+    void window.__TAURI__.event.emit("research:done", {
+      note: noteName(),
+      topic,
+      callout: md,
+      kind: "rag",
+      quiet: true,
+      anchor: null,
+    });
+  };
+
+  const resolveTarget = async (rest: string, hybrid: boolean) => {
+    const m = rest.match(/^@?([\w-]+)\s+(.+)$/);
+    const pseudo = ["all-files", "my-notes", "everything"];
+    if (m && (pseudo.includes(m[1]) || (await matchDoc(m[1])))) {
+      // resolve the slug so a fuzzy name token still scopes correctly
+      const hit = pseudo.includes(m[1]) ? m[1] : (await matchDoc(m[1]))?.slug ?? m[1];
+      return { target: hit, query: m[2] };
+    }
+    return { target: hybrid ? "everything" : "all-files", query: rest };
+  };
+
+  const parseTargetN = (rest: string, defN: number) => {
+    let target = "my-notes";
+    let n = defN;
+    const parts = rest.trim().split(/\s+/).filter(Boolean);
+    if (parts[0] && !/^\d+$/.test(parts[0])) {
+      target = parts[0].replace(/^@/, "");
+      parts.shift();
+    }
+    if (parts[0] && /^\d+$/.test(parts[0])) n = Number(parts[0]) || defN;
+    return { target, n };
+  };
+
+  /** Laido commands inside the widget — typed by the user or proposed by
+   *  the AI (```laido``` fences); results land as cards on the note */
+  const runLaido = async (cmd: string): Promise<string> => {
+    const m = cmd.trim().match(LAIDO_RE);
+    if (!m) {
+      line("err", `unknown command: ${cmd}`);
+      return "";
+    }
+    const verb = m[1].toLowerCase();
+    const rest = m[2].trim();
+    const note = noteName();
+    if (!note) {
+      line("err", "no note open — open one first");
+      return "";
+    }
+    try {
+      switch (verb) {
+        case "research": {
+          if (!rest) throw new Error("give the research a topic");
+          await invoke("agent_run", { name: note, text: `@research ${rest}`, anchor: null });
+          line("ai", "researching — the card lands on your note");
+          break;
+        }
+        case "ask": {
+          if (!rest) throw new Error("give the ask a question");
+          const { target, query } = await resolveTarget(rest, true);
+          await invoke("rag_ask", {
+            note, target, query, quiet: true, anchor: null, question: query, web: true,
+          });
+          line("ai", `✓ answered from ${target} — the card is on your note`);
+          break;
+        }
+        case "document": {
+          if (!rest) throw new Error("give the document a question");
+          const { target, query } = await resolveTarget(rest, false);
+          await invoke("rag_ask", {
+            note, target, query, quiet: true, anchor: null, question: query, web: false,
+          });
+          line("ai", `✓ answered from ${target}`);
+          break;
+        }
+        case "summary": {
+          const md = await invoke<string>("note_summary", { name: note, instruction: rest || null });
+          emitCard(`summary: ${note}`, md);
+          line("ai", "✓ summarized — the card is on your note");
+          break;
+        }
+        case "related": {
+          const rows = await invoke<Array<{ name: string; score: number }>>("related_notes", { name: note });
+          const body = rows.length
+            ? rows
+                .map((r) => `- [[${r.name.replace(/\.(laido|md)$/, "")}]] · ${Math.round(r.score * 100)}%`)
+                .join("\n")
+            : "no related notes yet — keep writing";
+          emitCard("related", `> [!ai] related: ${note}\n> ${body.split("\n").join("\n> ")}`);
+          line("ai", "✓ related notes carded");
+          break;
+        }
+        case "recall": {
+          const { target, n } = parseTargetN(rest, 6);
+          const md = await invoke<string>("rag_quiz", { target, n });
+          emitCard(`recall: ${target}`, md);
+          line("ai", "✓ recall carded");
+          break;
+        }
+        case "tasks": {
+          const { target, n } = parseTargetN(rest, 8);
+          const md = await invoke<string>("rag_tasks", { target, n });
+          emitCard(`tasks: ${target}`, md);
+          line("ai", "✓ tasks carded");
+          break;
+        }
+        case "loop": {
+          let q = rest;
+          let loops = 3;
+          const nm = q.match(/^(\d{1,2})\s+/);
+          if (nm) {
+            loops = Math.max(1, Math.min(10, Number(nm[1])));
+            q = q.slice(nm[0].length).trim();
+          }
+          let target: string | null = null;
+          const tm = q.match(/^(@?[\w-]+)\s+(.+)$/);
+          if (tm) {
+            const cand = tm[1].replace(/^@/, "");
+            const pseudo = ["all-files", "my-notes", "everything"];
+            const files = await invoke<Array<{ slug: string }>>("rag_list").catch(() => []);
+            if (pseudo.includes(cand) || files.some((f) => f.slug === cand)) {
+              target = cand;
+              q = tm[2].trim();
+            }
+          }
+          if (!q) throw new Error("give the loop a research query");
+          await invoke("loop_run", { note, query: q, loops, target, anchor: null });
+          line("ai", `🔁 loop started — up to ${loops} rounds`);
+          break;
+        }
+        case "skill": {
+          const name = rest.split(/\s+/)[0];
+          if (!name) throw new Error("name the skill to run");
+          await invoke("skill_run", { note, name, quiet: true });
+          line("ai", `✓ skill ${name} ran — its cards land on your note`);
+          break;
+        }
+        case "widget":
+        case "canvas":
+        case "agenda":
+        case "graph": {
+          // fence-less spawnables — canvas/agenda/graph have no tool fence
+          // (freeform strokes / computed views); the fence only births them.
+          // `widget canvas t` and bare `canvas t` both work — the model
+          // writes either
+          const bare = verb !== "widget";
+          const sp = rest.match(/^(\S+)\s*(.*)$/);
+          const kind = bare ? verb : (sp?.[1] ?? "").toLowerCase();
+          const title = (bare ? rest : sp?.[2]?.trim() || "")
+            .replace(/^new\s+/i, "").replace(/^a\s+/i, "").trim() || "";
+          const card =
+            kind === "canvas" || kind === "draw" ? spawnCanvasCard(title || "canvas")
+            : kind === "agenda" || kind === "due" ? spawnAgendaCard(title || "agenda")
+            : kind === "graph" || kind === "map-view" ? spawnGraphCard(title || "vault map")
+            : null;
+          if (!card) throw new Error(`unknown widget "${kind}" — canvas · agenda · graph (sheet/slides/todo/chart/cards/map/base spawn from their own fence 'new')`);
+          line("ai", `✓ ${kind} card spawned — "${card.dataset.topic ?? card.dataset.title ?? (title || kind)}"`);
+          break;
+        }
+      }
+    } catch (err) {
+      line("err", `✕ ${String(err)}`);
+    }
+    return "ok";
+  };
+
+  const showOutput = (r: TermResult) => {
+    for (const l of r.output.split("\n").filter((l) => l.trim() !== "").slice(-14)) {
+      line("out", l);
+    }
+    if (!r.ok && r.code !== null) line("out", `(exit ${r.code})`);
+  };
+
+  const runShell = async (cmd: string): Promise<string> => {
+    line("cmd", cmd);
+    const r = await invoke<TermResult>("term_run", { cmd, confirm: false });
+    if (r.needs_confirm) {
+      const row = document.createElement("div");
+      row.className = "term-line confirm";
+      const span = document.createElement("span");
+      span.textContent = cmd;
+      const run = document.createElement("button");
+      run.className = "term-btn";
+      run.textContent = "Run";
+      const skip = document.createElement("button");
+      skip.className = "term-btn ghost";
+      skip.textContent = "Skip";
+      row.append(span, run, skip);
+      log.append(row);
+      log.scrollTop = log.scrollHeight;
+      return await new Promise<string>((resolve) => {
+        run.addEventListener("click", async () => {
+          row.remove();
+          const rr = await invoke<TermResult>("term_run", { cmd, confirm: true });
+          showOutput(rr);
+          resolve(rr.output);
+        });
+        skip.addEventListener("click", () => {
+          row.remove();
+          line("out", "(skipped)");
+          resolve("");
+        });
+      });
+    }
+    showOutput(r);
+    return r.output;
+  };
+
+  /** every other live chat widget on this sheet — with its id, so the AI can
+   *  name them in send proposals; empty chats are listed too so nothing on
+   *  the sheet is invisible to the others */
+  const othersDigest = () => {
+    const parts: string[] = [];
+    for (const c of Array.from(document.querySelectorAll<HTMLElement>(".term-card"))) {
+      if (c === card) continue;
+      const lines = Array.from(
+        c.querySelectorAll<HTMLElement>('.term-line[data-t="ask"], .term-line[data-t="ai"]'),
+      )
+        .map((l) => (l.dataset.raw ?? "").slice(0, 80))
+        .filter(Boolean)
+        .slice(-4);
+      const id = c.dataset.chatId ?? "?";
+      parts.push(`chat ${id}: ${lines.length ? lines.join(" | ") : "(fresh, no messages yet)"}`);
+    }
+    // sheets are listed too — the AI reads/edits them with `sheet` fences
+    for (const s of Array.from(document.querySelectorAll<HTMLElement>(".sheet-card"))) {
+      const api = sheetApi(s);
+      const title = s.dataset.topic ?? "sheet";
+      if (!api) {
+        parts.push(`sheet "${title}" (loading)`);
+        continue;
+      }
+      const peek: string[] = [];
+      for (let r = 0; r < Math.min(api.rows(), 10) && peek.length < 14; r++)
+        for (let c = 0; c < api.cols() && peek.length < 14; c++) {
+          const raw = api.raw(r, c);
+          if (raw.trim()) peek.push(`${cellName(r, c)}=${raw.slice(0, 24)}`);
+        }
+      const tabs = api.tabs?.() ?? [];
+      const tabNote = tabs.length > 1 ? ` [workbook tabs: ${tabs.join(", ")}]` : "";
+      parts.push(
+        `sheet "${title}" ${api.rows()}x${api.cols()}${tabNote}: ${peek.join(", ") || "(empty)"} — use a \`\`\`sheet fence to read it fully or edit it`,
+      );
+    }
+    // decks are listed too — `slides` fences read/edit them
+    for (const d of Array.from(document.querySelectorAll<HTMLElement>(".deck-card"))) {
+      const api = deckApi(d);
+      const title = d.dataset.topic ?? "deck";
+      if (!api) {
+        parts.push(`deck "${title}" (loading)`);
+        continue;
+      }
+      parts.push(
+        `deck "${title}" ${api.count()} slides — use a \`\`\`slides fence to read/edit it`,
+      );
+    }
+    // todo lists too — `todo` fences read/edit them
+    for (const td of Array.from(document.querySelectorAll<HTMLElement>(".todo-card"))) {
+      const api = todoApi(td);
+      const title = td.dataset.topic ?? "todo";
+      if (!api) {
+        parts.push(`todo "${title}" (loading)`);
+        continue;
+      }
+      const open = api.items().filter((i) => !i.done).length;
+      parts.push(
+        `todo "${title}" ${open} open / ${api.items().length} total — use a \`\`\`todo fence to read/edit it`,
+      );
+    }
+    // browser cards — `browser` fences navigate them or read the page text
+    for (const bc of Array.from(document.querySelectorAll<HTMLElement>(".browser-card"))) {
+      const api = browserApi(bc);
+      const title = bc.dataset.topic ?? "browser";
+      if (!api) {
+        parts.push(`browser "${title}" (loading)`);
+        continue;
+      }
+      // a peek at the page text puts real context in the prompt — the
+      // agent can answer without burning a fence call just to look
+      const peek = api.read().trim().replace(/\s+/g, " ").slice(0, 180);
+      parts.push(
+        `browser "${title}" at ${api.url() || "about:blank"} (${api.mode()})` +
+          (peek ? ` — page text starts: "${peek}…"` : " (no page loaded yet)") +
+          ` — use a \`\`\`browser fence to navigate/read it`,
+      );
+    }
+    // chart cards — `chart` fences draw them, bind them to sheet ranges
+    for (const cc of Array.from(document.querySelectorAll<HTMLElement>(".chart-card"))) {
+      const api = chartApi(cc);
+      const title = cc.dataset.topic ?? "chart";
+      if (!api) {
+        parts.push(`chart "${title}" (loading)`);
+        continue;
+      }
+      const src = cc.dataset.csrc ? ` ← live from ${cc.dataset.csrc}` : " (inline data)";
+      parts.push(
+        `chart "${title}" ${cc.dataset.ctype || "bar"}${src} — use a \`\`\`chart fence to set data/type/source`,
+      );
+    }
+    // flashcards — `cards` fences build decks and quiz them
+    for (const cc of Array.from(document.querySelectorAll<HTMLElement>(".cards-card"))) {
+      const api = cardsApi(cc);
+      const title = cc.dataset.topic ?? "cards";
+      if (!api) {
+        parts.push(`cards "${title}" (loading)`);
+        continue;
+      }
+      const n = api.cards().length;
+      const dueLine = api.due();
+      const dueN = dueLine === "nothing due" ? 0 : dueLine.split("\n").length;
+      parts.push(`cards "${title}" — ${n} cards, ${dueN} due — use a \`\`\`cards fence to add/list/rate`);
+    }
+    // mind maps — `map` fences build outlines that draw as trees
+    for (const mc of Array.from(document.querySelectorAll<HTMLElement>(".map-card"))) {
+      const api = mapApi(mc);
+      const title = mc.dataset.topic ?? "map";
+      const n = api ? api.list().split("\n").filter((l) => l.trim()).length : 0;
+      parts.push(`map "${title}" — ${n} nodes — use a \`\`\`map fence to add/read`);
+    }
+    // base cards — property-query views; `base` fences set/read them
+    for (const bc of Array.from(document.querySelectorAll<HTMLElement>(".base-card"))) {
+      const api = baseApi(bc);
+      const title = bc.dataset.title ?? "base";
+      if (!api) {
+        parts.push(`base "${title}" (loading)`);
+        continue;
+      }
+      parts.push(
+        `base "${title}" ${api.view()} view${api.query() ? ` q="${api.query()}"` : ""} — ${api.rows().length} rows — use a \`\`\`base fence to set/read it`,
+      );
+    }
+    return parts.join("\n");
+  };
+
+
+  /** ```note``` fence — the model creates/reads/appends vault notes.
+   *  This is how reports, briefings and saved research get written. */
+  const noteTool = async (body: string): Promise<string> => {
+    const lines = body.split("\n");
+    const hm = (lines[0] ?? "").trim().match(/^(\S+)\s*(.*)$/);
     const verb = (hm?.[1] ?? "").toLowerCase();
     const rest = (hm?.[2] ?? "").trim();
-    const rows = lines.slice(1);
-    const todoOf = (title: string) => {
-      const c = findTodo(title);
-      return c ? todoApi(c) : undefined;
-    };
-
-    if (verb === "new" || verb === "create") {
-      spawnTodoCard(rest || "tasks");
-      // extra rows become tasks right away
-      const api = todoApi(findTodo(rest || "tasks")!);
-      rows.forEach((t) => api?.add(t));
-      return `created todo "${rest || "tasks"}"${rows.length ? ` + ${rows.length} tasks` : ""}`;
-    }
-    if (verb === "today") {
-      const now = new Date();
-      const iso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-      const hits: string[] = [];
-      for (const td of Array.from(document.querySelectorAll<HTMLElement>(".todo-card"))) {
-        const a = todoApi(td);
-        if (!a) continue;
-        const due = a.items().filter((i) => !i.done && i.when && i.when <= iso);
-        if (due.length)
-          hits.push(`${a.title()}: ${due.map((i) => `${i.text}${i.when < iso ? " (overdue)" : ""}`).join(" · ")}`);
-      }
-      return hits.length ? `due today/overdue:\n${hits.join("\n")}` : "nothing due today";
-    }
-    if (verb === "list" || verb === "read") {
-      if (!rest) {
-        // every card
-        const all = Array.from(document.querySelectorAll<HTMLElement>(".todo-card"))
-          .map((c) => todoApi(c))
-          .filter(Boolean);
-        if (!all.length) return "no todo lists on this note";
-        return all.map((a) => `== ${a!.title()} ==\n${a!.list() || "(empty)"}`).join("\n");
-      }
-      const a = todoOf(rest);
-      if (!a) return `✕ no todo list named "${rest}"`;
-      return `== ${a.title()} ==\n${a.list() || "(empty)"}`;
-    }
-    if (verb === "add") {
-      // `add <title> <text> [@when]` — title is a word-prefix of the arg list
-      const [card, text] = probeTitle(".todo-card", rest.split(/\s+/).filter(Boolean));
-      const api = card ? todoApi(card) : undefined;
-      if (!api) return `✕ no todo list found — create one first: \`new <title>\``;
-      if (!text) return `✕ add <list> <task text> [@when]`;
-      const i = api.add(text);
-      return `added task ${i} to "${api.title()}"`;
-    }
-    if (verb === "done" || verb === "check" || verb === "open" || verb === "undone" || verb === "del" || verb === "clear") {
-      const nm = rest.match(/^(.*?)\s+(\d+)$/);
-      const isClear = verb === "clear";
-      const a = isClear ? todoOf(rest) : nm ? todoOf(nm[1]) : undefined;
-      if (!a) return `✕ no todo list named "${isClear ? rest : nm?.[1] ?? rest}"`;
-      if (isClear) {
-        const n = a.clearDone();
-        return `cleared ${n} done task${n === 1 ? "" : "s"} from "${a.title()}"`;
-      }
-      const i = Number(nm![2]);
-      if (!(i >= 1 && i <= a.items().length)) return `✕ ${verb} <list> <n> — 1..${a.items().length}`;
-      if (verb === "del") {
-        a.del(i - 1);
-        return `deleted task ${i} from "${a.title()}"`;
-      }
-      const done = verb === "done" || verb === "check";
-      a.setDone(i - 1, done);
-      return `task ${i} in "${a.title()}" → ${done ? "done ✓" : "reopened"}`;
-    }
-    return `✕ unknown todo verb "${verb}" — new · list · add · done · open · del · clear · today`;
-  };
-
-  /** execute one ` ```sheet ` fence — the AI's read/write channel into the
-   *  grids. Verbs: new · read · set · append · addrow · addcol · delrow ·
-   *  delcol · clear · sort. Returns a result line that feeds back to it. */
-  const sheetTool = async (body: string): Promise<string> => {
-    const lines = body
-      .split("\n")
-      .map((l) => l.replace(/\s+$/, ""))
-      .filter((l) => l.trim() !== "");
-    if (!lines.length) return "✕ empty sheet command";
-    const hm = lines[0].trim().match(/^(\S+)\s*(.*)$/);
-    const verb = (hm?.[1] ?? "").toLowerCase();
-    const rest = (hm?.[2] ?? "").trim();
-    const rows = lines.slice(1);
-
-    if (verb === "new" || verb === "create") {
-      const dm = rest.match(/(\d{1,2})\s*[x×]\s*(\d{1,2})/i);
-      const r = Math.min(50, Math.max(1, Number(dm?.[1] ?? 6)));
-      const c = Math.min(26, Math.max(1, Number(dm?.[2] ?? 4)));
-      const title = (dm ? rest.replace(dm[0], "") : rest).trim() || "sheet";
-      spawnSheetCard(title, r, c);
-      return `created sheet "${title}" (${r}x${c})`;
-    }
-    if (verb === "read" || verb === "get") {
-      const api = findSheet(rest) ? sheetApi(findSheet(rest)!) : null;
-      if (!api) return `✕ no sheet found named "${rest || "?"}"`;
-      return `sheet "${api.title()}" ${api.rows()}x${api.cols()} (raw TSV):\n${api.read()}`;
-    }
-    // export budget | export budget csv | export budget C:/out/budget.xlsx
-    if (verb === "export" || verb === "save") {
-      const { title, path, fmt } = pullXferArgs(rest, ["xlsx", "csv", "tsv"]);
-      let card = findSheet(title);
-      if (!card && !title) card = document.querySelector<HTMLElement>(".sheet-card") ?? null;
-      const api = card ? sheetApi(card) : null;
-      if (!api?.exportFile) return `✕ no sheet found named "${title || "?"}"`;
-      return api.exportFile(path ?? (fmt ? `exports/${api.title()}.${fmt}` : undefined));
-    }
-    // import budget C:/in.xlsx sheet=Sheet2 | import C:/in.csv
-    if (verb === "import" || verb === "load") {
-      const { title, path, sheet } = pullXferArgs(rest, ["xlsx", "csv", "tsv"]);
-      let card = title ? findSheet(title) : null;
-      if (!card) {
-        const stem = path?.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "") || title || "sheet";
-        card = spawnSheetCard(title || stem, 6, 4);
-      }
-      const api = sheetApi(card);
-      if (!api?.importFile) return "✕ sheet import unavailable";
-      return api.importFile(path, sheet);
-    }
-    if (verb === "set") {
-      const card = findSheet(rest);
-      const api = card ? sheetApi(card) : null;
-      if (!api) return `✕ no sheet found named "${rest || "?"}"`;
-      let wrote = 0;
-      const bad: string[] = [];
-      const cells: Array<[number, number, string]> = [];
-      for (const l of rows) {
-        const eq = l.indexOf("=");
-        if (eq < 1) {
-          bad.push(l.slice(0, 24));
-          continue;
-        }
-        const ref = refOf(l.slice(0, eq));
-        if (!ref) {
-          bad.push(l.slice(0, 24));
-          continue;
-        }
-        cells.push([ref[0], ref[1], l.slice(eq + 1)]);
-        wrote++;
-      }
-      api.setCells(cells);
-      return `wrote ${wrote} cell${wrote === 1 ? "" : "s"} to "${api.title()}"` +
-        (bad.length ? ` — skipped malformed: ${bad.join(", ")}` : "");
+    const noteName = (s: string) =>
+      s.trim().replace(/\.(md|laido)$/i, "").replace(/[<>:"\\|?*#^\[\]]/g, "-");
+    if (verb === "new" || verb === "write" || verb === "create") {
+      const name = noteName(rest);
+      if (!name) return "✕ note new needs a name";
+      const md = lines.slice(1).join("\n");
+      await invoke("vault_write", { name: `${name}.laido`, content: md + "\n" });
+      addActivity(`wrote note "${name}" (${md.split("\n").length} lines)`);
+      return `note "${name}" written — open it from the palette or \`@today\`-style`;
     }
     if (verb === "append") {
-      const card = findSheet(rest);
-      const api = card ? sheetApi(card) : null;
-      if (!api) return `✕ no sheet found named "${rest || "?"}"`;
-      if (!rows.length) return "✕ append needs rows (one per line, cells split by | or tab)";
-      for (const l of rows) api.addRow(l.split(/\t|\|/).map((s) => s.trim()));
-      return `appended ${rows.length} row${rows.length === 1 ? "" : "s"} to "${api.title()}"`;
-    }
-    if (verb === "addrow" || verb === "addcol") {
-      const card = findSheet(rest);
-      const api = card ? sheetApi(card) : null;
-      if (!api) return `✕ no sheet found named "${rest || "?"}"`;
-      if (verb === "addrow") api.addRow();
-      else api.addCol();
-      return `${verb === "addrow" ? "row" : "column"} added to "${api.title()}"`;
-    }
-    if (verb === "delrow" || verb === "delcol" || verb === "sort" || verb === "clear") {
-      // these carry their target at the END of the line — "delrow budget 3",
-      // "delcol budget B", "sort budget B desc", "clear budget [A1:B2]"
-      const tm = rest.match(/^(.*?)\s+(\S+)$/);
-      let title = rest;
-      let arg = "";
-      if (verb === "clear") {
-        const rm = rest.match(/^(.*?)\s*([A-Za-z]{1,3}\d{1,4}(?::[A-Za-z]{1,3}\d{1,4})?)$/);
-        if (rm) {
-          title = rm[1];
-          arg = rm[2];
-        }
-      } else if (verb === "sort") {
-        const sm = rest.match(/^(.*?)\s+([A-Za-z]{1,3})\s*(desc|asc)?$/i);
-        if (sm) {
-          title = sm[1];
-          arg = sm[2] + (sm[3] ? ` ${sm[3]}` : "");
-        }
-      } else if (tm) {
-        title = tm[1];
-        arg = tm[2];
-      }
-      const card = findSheet(title);
-      const api = card ? sheetApi(card) : null;
-      if (!api) return `✕ no sheet found named "${title || "?"}"`;
-      if (verb === "delrow") {
-        const n = Number(arg);
-        if (!n || n < 1 || n > api.rows()) return `✕ row ${arg} out of range (1..${api.rows()})`;
-        api.delRow(n - 1);
-        return `deleted row ${n} from "${api.title()}"`;
-      }
-      if (verb === "delcol") {
-        const mm = arg.match(/^[A-Za-z]{1,3}$/);
-        if (!mm) return `✕ column "${arg}" isn't a letter`;
-        let c = 0;
-        for (const ch of arg.toUpperCase()) c = c * 26 + (ch.charCodeAt(0) - 64);
-        if (c > api.cols()) return `✕ column ${arg} out of range (A..${cellName(0, api.cols() - 1).replace(/\d/, "")})`;
-        api.delCol(c - 1);
-        return `deleted column ${arg.toUpperCase()} from "${api.title()}"`;
-      }
-      if (verb === "clear") {
-        if (!arg) {
-          api.clear();
-          return `cleared all of "${api.title()}"`;
-        }
-        const [a, b] = arg.split(":");
-        const ra = refOf(a);
-        const rb = refOf(b ?? a);
-        if (!ra || !rb) return `✕ bad range "${arg}"`;
-        api.clear(ra, rb);
-        return `cleared ${arg.toUpperCase()} of "${api.title()}"`;
-      }
-      // sort — needs a column letter; the api doesn't expose sort (it's a
-      // user-gesture op) so reorder via read+set
-      const sm = arg.match(/^([A-Za-z]{1,3})\s*(desc|asc)?$/i);
-      if (!sm) return `✕ sort needs a column letter — "sort ${api.title()} B"`;
-      let c = 0;
-      for (const ch of sm[1].toUpperCase()) c = c * 26 + (ch.charCodeAt(0) - 64);
-      const desc = /^desc$/i.test(sm[2] ?? "");
-      const grid = api.read().split("\n").map((l) => l.split("\t"));
-      const key = (row: string[]) => {
-        const v = row[c - 1] ?? "";
-        const n = Number(v.replace(/[$,\s]/g, ""));
-        return { num: isNaN(n) ? null : n, s: v.toLowerCase() };
-      };
-      grid.sort((x, y) => {
-        const ka = key(x);
-        const kb = key(y);
-        const cmp =
-          ka.num !== null && kb.num !== null
-            ? ka.num - kb.num
-            : ka.num !== null
-              ? -1
-              : kb.num !== null
-                ? 1
-                : ka.s.localeCompare(kb.s);
-        return desc ? -cmp : cmp;
+      const name = noteName(rest);
+      if (!name) return "✕ note append needs a name";
+      const md = lines.slice(1).join("\n");
+      let cur = "";
+      try {
+        cur = await invoke<string>("vault_read", { name: `${name}.laido` });
+      } catch { /* fresh note */ }
+      await invoke("vault_write", {
+        name: `${name}.laido`,
+        content: cur.trimEnd() + "\n\n" + md + "\n",
       });
-      api.setAll(grid);
-      return `sorted "${api.title()}" by column ${sm[1].toUpperCase()} ${desc ? "descending" : "ascending"}`;
+      addActivity(`appended ${md.split("\n").length} lines to "${name}"`);
+      return `appended to "${name}"`;
     }
-    if (verb === "format" || verb === "fmt") {
-      // "format budget B1:B9 cur" / "format budget B pct" — number formats
-      const fm = rest.match(/^(.*?)\s+([A-Za-z]{1,3}\d{0,4}(?::[A-Za-z]{1,3}\d{0,4})?)\s+(\w+)$/);
-      if (!fm) return `✕ format needs <title> <range> <fmt> — e.g. "format budget B1:B9 cur"`;
-      const card = findSheet(fm[1]);
-      const api = card ? sheetApi(card) : null;
-      if (!api?.setFmt) return `✕ no sheet found named "${fm[1]}"`;
-      const cells: Array<[number, number]> = [];
-      const spec = fm[2];
-      const parts = spec.split(":");
-      const ra = refOf(parts[0]);
-      const rb = parts[1] ? refOf(parts[1]) : ra;
-      // a bare column letter means the whole column
-      const colOnly = spec.match(/^([A-Za-z]{1,3})$/);
-      if (colOnly) {
-        let c = 0;
-        for (const ch of colOnly[1].toUpperCase()) c = c * 26 + (ch.charCodeAt(0) - 64);
-        for (let r = 0; r < api.rows(); r++) cells.push([r, c - 1]);
-      } else if (ra && rb) {
-        for (let r = Math.min(ra[0], rb[0]); r <= Math.max(ra[0], rb[0]); r++)
-          for (let c = Math.min(ra[1], rb[1]); c <= Math.max(ra[1], rb[1]); c++) cells.push([r, c]);
-      } else return `✕ bad range "${spec}"`;
-      api.setFmt(cells, fm[3]);
-      return `formatted ${cells.length} cells in "${api.title()}" as ${fm[3]}`;
-    }
-    if (verb === "dedupe") {
-      const tm = rest.match(/^(.*?)\s+([A-Za-z]{1,3})$/);
-      if (!tm) return `✕ dedupe needs <title> <col> — "dedupe budget B"`;
-      const card = findSheet(tm[1]);
-      const api = card ? sheetApi(card) : null;
-      if (!api?.dedupe) return `✕ no sheet found named "${tm[1]}"`;
-      let c = 0;
-      for (const ch of tm[2].toUpperCase()) c = c * 26 + (ch.charCodeAt(0) - 64);
-      const n = api.dedupe(c - 1);
-      return `removed ${n} duplicate row${n === 1 ? "" : "s"} from "${api.title()}" by column ${tm[2].toUpperCase()}`;
-    }
-    if (verb === "freeze") {
-      // "freeze budget r1" / "freeze budget cA" / "freeze budget rc" / "freeze budget off"
-      const tm = rest.match(/^(.*?)\s*(\boff\b|rc|r1|c[A-Za-z])?$/i);
-      const card = findSheet(tm?.[1] ?? rest);
-      const api = card ? sheetApi(card) : null;
-      if (!api?.freeze) return `✕ no sheet found named "${rest}"`;
-      const mode = (tm?.[2] ?? "").toLowerCase();
-      const r = mode === "r1" || mode === "rc";
-      const c = mode === "ca" || mode === "rc" || /^c[a-z]$/i.test(mode);
-      api.freeze(r, c);
-      return r || c ? `froze ${r ? "row 1" : ""}${r && c ? " + " : ""}${c ? "column A" : ""} of "${api.title()}"` : `unfroze "${api.title()}"`;
-    }
-    if (verb === "hide" || verb === "unhide") {
-      if (verb === "unhide") {
-        const card = findSheet(rest);
-        const api = card ? sheetApi(card) : null;
-        if (!api?.unhide) return `✕ no sheet found named "${rest}"`;
-        api.unhide();
-        return `unhid all of "${api.title()}"`;
+    if (verb === "read" || verb === "get") {
+      const name = noteName(rest);
+      try {
+        return await invoke<string>("vault_read", { name: `${name}.laido` });
+      } catch {
+        return `✕ no note named "${name}"`;
       }
-      // "hide budget r3" / "hide budget cB" / "hide budget 3" / "hide budget B"
-      const tm = rest.match(/^(.*?)\s+([rc]?[A-Za-z0-9]+)$/i);
-      if (!tm) return `✕ hide needs <title> <r3|cB>`;
-      const card = findSheet(tm[1]);
-      const api = card ? sheetApi(card) : null;
-      if (!api?.hideRow) return `✕ no sheet found named "${tm[1]}"`;
-      const m2 = tm[2].match(/^([rc]?)([A-Za-z]*)([0-9]*)$/i);
-      if (m2?.[1]?.toLowerCase() === "r" || (!m2?.[2] && m2?.[3])) {
-        api.hideRow(Number(m2![3] || m2![2]) - 1);
-        return `hid row ${m2![3] || m2![2]} of "${api.title()}"`;
-      }
-      const L = (m2?.[2] || "").toUpperCase();
-      let c = 0;
-      for (const ch of L) c = c * 26 + (ch.charCodeAt(0) - 64);
-      api.hideCol!(c - 1);
-      return `hid column ${L} of "${api.title()}"`;
     }
-    if (verb === "cf") {
-      // "cf budget B > 100 #ffe08a" / "cf budget B dup #ffc9c9" / "cf budget B clear"
-      const cm = rest.match(/^(.*?)\s+([A-Za-z]{1,3})\s+([!=<>]{1,2}|between|contains|top|dup)\s*(\S*)\s*(#\w{3,8}|\w+)?$/i);
-      if (!cm) return `✕ cf needs <title> <col> <op> <val> <color> — "cf budget B > 100 #ffe08a"`;
-      const card = findSheet(cm[1]);
-      const api = card ? sheetApi(card) : null;
-      if (!api?.addCf) return `✕ no sheet found named "${cm[1]}"`;
-      let c = 0;
-      for (const ch of cm[2].toUpperCase()) c = c * 26 + (ch.charCodeAt(0) - 64);
-      if (cm[3].toLowerCase() === "clear") {
-        api.clearCf!(c - 1);
-        return `cleared conditional rules on ${api.title()} col ${cm[2].toUpperCase()}`;
-      }
-      const color = (cm[5] ?? "#ffe08a").startsWith("#") ? cm[5]! : "#ffe08a";
-      api.addCf(c - 1, cm[3].toLowerCase(), cm[4] ?? "", color);
-      return `highlight rule on "${api.title()}" col ${cm[2].toUpperCase()}: ${cm[3]}${cm[4] ?? ""} → ${color}`;
+    if (verb === "list") {
+      const files = await invoke<Array<{ name: string }>>("vault_list").catch(() => []);
+      return files.map((f) => f.name).join("\n") || "(empty vault)";
     }
-    if (verb === "filter") {
-      // "filter budget B apple|pear" / "filter budget B off" / "filter budget"
-      const card0 = findSheet(rest);
-      if (card0 && sheetApi(card0)?.filterState) {
-        // bare "filter <title>" reports the current state
-        return `filters on "${sheetApi(card0)!.title()}" — ${sheetApi(card0)!.filterState!()}`;
-      }
-      const fm = rest.match(/^(.*?)\s+([A-Za-z]{1,3})\s+(.+)$/);
-      if (!fm) return `✕ filter needs <title> <col> <v1|v2|off>`;
-      const card = findSheet(fm[1]);
-      const api = card ? sheetApi(card) : null;
-      if (!api?.filter) return `✕ no sheet found named "${fm[1]}"`;
-      let c = 0;
-      for (const ch of fm[2].toUpperCase()) c = c * 26 + (ch.charCodeAt(0) - 64);
-      if (/^off|clear|all$/i.test(fm[3].trim())) {
-        api.filter(c - 1, null);
-        return `cleared the filter on "${api.title()}" col ${fm[2].toUpperCase()}`;
-      }
-      api.filter(c - 1, fm[3].split("|").map((s) => s.trim()));
-      return `filtered "${api.title()}" col ${fm[2].toUpperCase()} to: ${fm[3]}`;
+    if (verb === "open") {
+      const name = noteName(rest);
+      void loadNote(`${name}.laido`);
+      return `opened "${name}"`;
     }
-    if (verb === "view") {
-      // "view budget kanban C" | "view budget grid" | "view budget" (report)
-      const vm = rest.match(/^(.*?)\s+(kanban\s+[A-Za-z]{1,3}|calendar\s+[A-Za-z]{1,3}|grid)$/i);
-      if (vm) {
-        const card = findSheet(vm[1]);
-        const api = card ? sheetApi(card) : null;
-        if (!api?.view) return `✕ no sheet found named "${vm[1]}"`;
-        const v = api.view(vm[2].replace(/\s+/g, " "));
-        return `view on "${api.title()}" → ${v}`;
-      }
-      const card = findSheet(rest);
-      if (card && sheetApi(card)?.view)
-        return `"${sheetApi(card)!.title()}" view: ${sheetApi(card)!.view!()}`;
-      return `✕ view needs <title> kanban <col>|grid`;
-    }
-    return `✕ unknown sheet verb "${verb}" — new · read · set · append · addrow · addcol · delrow · delcol · clear · sort · format · dedupe · freeze · hide · unhide · cf · filter · view`;
+    return `✕ unknown note verb "${verb}" — new/append/read/list/open`;
   };
+
 
   const aiTurn = async (text: string, auto = false): Promise<string> => {
     if (busy && !auto) return "";
@@ -1987,12 +2307,15 @@ export function wireTerminal(card: HTMLElement) {
         }
         await runLaido(cmd);
       }
+      const savedTools: string[] = [];
       for (const body of r.sheet) {
         // "```sheet\nset budget\nB2=5```" — create/read/edit grids on the note
         const verb = (body.trim().split(/\s+/)[0] ?? "").toLowerCase();
         const out = await sheetTool(body);
         const head = body.trim().split("\n")[0] ?? "";
         line("laido", `sheet: ${head} → ${out}`);
+        const saved = out.match(/tool "([^"]+)" saved/);
+        if (saved) savedTools.push(saved[1]);
         if (out.startsWith("✕")) {
           history.push({ role: "user", content: `sheet tool failed: ${out}` });
           if (steps < MAX_STEPS)
@@ -2004,6 +2327,18 @@ export function wireTerminal(card: HTMLElement) {
         // visible trace line and the grid itself
         if ((verb === "read" || verb === "get") && steps < MAX_STEPS)
           finalText = await aiTurn("answer the request using this sheet data", true);
+      }
+      /* "…and apply it to A1:B9" — the model sometimes registers the tool
+       * but forgets the apply fence. If a tool actually SAVED this turn and
+       * the ask named a range, apply that tool ourselves. */
+      if (/\bapply\b/i.test(text) && savedTools.length && !r.sheet.some((b) => /^apply\b/i.test(b.trim()))) {
+        const range = text.match(/[A-Za-z]{1,3}\d{1,4}\s*:\s*[A-Za-z]{1,3}\d{1,4}/)?.[0]?.replace(/\s+/g, "");
+        if (range) {
+          const name = savedTools.at(-1)!;
+          const out = await sheetTool(`apply ${name} ${range}`);
+          line("laido", `sheet: apply ${name} ${range} → ${out}`);
+          history.push({ role: "user", content: `sheet tool result:\n${out}` });
+        }
       }
       for (const body of r.slides) {
         // "```slides\noutline pitch\nbullets | Pain | one | two```" —
