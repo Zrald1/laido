@@ -2748,7 +2748,11 @@ function wordAtLineStart(p: CmdPickState): boolean {
   const r = document.createRange();
   r.setStart(top, 0);
   r.setEnd(p.node, p.start);
-  return strip(r.toString()).trim() === "";
+  const lead = strip(r.toString());
+  // a word that directly follows a click-and-type nbsp pad was placed in
+  // empty space — the row's left edge isn't the command's start. Typed
+  // prose never contains nbsp, so the pad itself is the intent signal.
+  return lead.trim() === "" || lead.endsWith(" ");
 }
 
 /** a hand-typed word at line start arms immediately — the word becomes a
@@ -2993,8 +2997,20 @@ function refreshCmdPick() {
     return;
   }
   if (cmdPick.mode === "prefix") {
-    // still typing the word — rebuild the suggestion list from the live text
-    if (sel.anchorNode !== cmdPick.node || sel.anchorOffset < cmdPick.start) return closeCmdPick();
+    // still typing the word — rebuild the suggestion list from the live text.
+    // typing can merge the word into a neighbouring text node (e.g. the
+    // click-and-type nbsp pad), leaving the armed node stale — re-derive the
+    // prefix from the live caret instead of closing on an identity mismatch
+    if (sel.anchorNode !== cmdPick.node || sel.anchorOffset < cmdPick.start) {
+      const re = currentCmdPrefix();
+      if (re) {
+        cmdPick = re;
+        cmdActive = 0;
+        void renderCmdPick(re.word);
+        return;
+      }
+      return closeCmdPick();
+    }
     const partial = (cmdPick.node.textContent ?? "").slice(cmdPick.start, sel.anchorOffset);
     if (!/^[a-z]+$/.test(partial)) return closeCmdPick();
     void renderCmdPick(partial);
