@@ -849,10 +849,28 @@ export function wireBrowser(card: HTMLElement) {
     /* the native surface can't be scissored by the DOM scroll region, so
      * position it at the visible intersection — a partially-shown card
      * keeps its page on screen instead of blinking out at the clip edge */
-    const ix = Math.max(r.left, clip.left);
+    let ix = Math.max(r.left, clip.left);
     const iy = Math.max(r.top, clipTop);
-    const iw = Math.min(r.right, clip.right) - ix;
+    let iw = Math.min(r.right, clip.right) - ix;
     const ih = Math.min(r.bottom, clipBot) - iy;
+    /* DOM popovers can never beat the native HWND — while the ext panel
+     * overlaps the view rect, give the engine only the uncovered slice
+     * so the whole panel stays on screen (restored on close) */
+    if (!extPop.hidden) {
+      const pr = extPop.getBoundingClientRect();
+      const ox = Math.min(pr.right, ix + iw) - Math.max(pr.left, ix);
+      const oy = Math.min(pr.bottom, iy + ih) - Math.max(pr.top, iy);
+      if (ox > 0 && oy > 0) {
+        if (pr.left > ix) {
+          iw = Math.min(iw, pr.left - ix); // intrudes from the right
+        } else if (pr.right < ix + iw) {
+          iw -= pr.right - ix;
+          ix = pr.right; // intrudes from the left
+        } else {
+          iw = 0; // panel swallows the whole view
+        }
+      }
+    }
     /* a native webview punches through the DOM — if another card covers
      * the visible middle, the widget underneath must hide. Two consecutive
      * samples required so a transient hit-test gap can't flicker it */
@@ -1389,6 +1407,8 @@ export function wireBrowser(card: HTMLElement) {
     }
     const room = clip.bottom - pr.top - 8;
     if (room < 380) extPop.style.maxHeight = `${Math.max(120, room)}px`;
+    /* the engine must re-cut its surface around the panel's new rect */
+    pvSync();
   };
   /* re-fit whenever geometry changes while open — card resizes/drags and
    * window resizes can each shove the anchor point off-screen */
@@ -1401,6 +1421,7 @@ export function wireBrowser(card: HTMLElement) {
   const toggleExt = async (on: boolean) => {
     extPop.hidden = !on;
     bar.querySelector('[data-a="ext"]')?.classList.toggle("on", on);
+    if (!on) pvSync(); // restore the full surface when the panel closes
     if (on) {
       fitExt();
       await renderExt().catch(() => {});
