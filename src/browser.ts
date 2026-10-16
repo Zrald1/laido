@@ -275,10 +275,29 @@ const paintSndButtons = () => {
 };
 
 let audioTimer = 0;
+const unclaimedTicks = new Map<string, number>();
 const startAudioPoll = () => {
   if (audioTimer) return;
   audioTimer = window.setInterval(async () => {
     const ids = await invoke<string[]>("pv_list").catch(() => [] as string[]);
+    /* orphan sweep — an engine with no connected card claiming it must
+     * stay hidden: a stray visible surface floats at stale bounds and
+     * eats clicks meant for the UI underneath (a "chatbox click" lands
+     * on it and navigates the page). Two consecutive ticks so a just-
+     * spawned engine isn't hidden mid-wire. */
+    const claimed = new Set(
+      [...document.querySelectorAll<HTMLElement>(".browser-card")]
+        .filter((c) => c.isConnected)
+        .map((c) => c.dataset.bv ?? ""),
+    );
+    for (const id of ids) {
+      if (claimed.has(id)) { unclaimedTicks.delete(id); continue; }
+      const n = (unclaimedTicks.get(id) ?? 0) + 1;
+      unclaimedTicks.set(id, n);
+      if (n >= 2) void invoke("pv_visible", { id, on: false }).catch(() => {});
+    }
+    for (const id of [...unclaimedTicks.keys()]) if (!ids.includes(id)) unclaimedTicks.delete(id);
+
     for (const id of ids) {
       const s = await invoke<string>("pv_eval", { id, js: AUD_JS }).catch(() => "");
       if (!s) continue;
@@ -292,6 +311,10 @@ const startAudioPoll = () => {
     paintSndButtons();
   }, 2000);
 };
+/* run unconditionally — orphan engines can exist on notes with zero live
+ * browser cards (deleted note, crash, stale park), and only the sweep
+ * hides them */
+startAudioPoll();
 
 export function wireBrowser(card: HTMLElement) {
   if (!card?.dataset) return;
