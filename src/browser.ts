@@ -243,7 +243,10 @@ export function wireBrowser(card: HTMLElement) {
   // the real engine is the default lane — ◐ drops to the text reader
   let liveOn = true;
   let loading = false;
-  const bvId = `bv-${Date.now().toString(36)}-${++pvSeq}`;
+  /* the webview id must be STABLE across rewires — a fresh id makes the
+   * restore path open a second engine and reload the page (and orphans
+   * the old one). Reuse the card's id when it already has one */
+  const bvId = card.dataset.bv || `bv-${Date.now().toString(36)}-${++pvSeq}`;
   card.dataset.bv = bvId;
   const lock = card.querySelector<HTMLElement>(".bb-lock");
   const reBtn = bar.querySelector<HTMLElement>('[data-a="re"]');
@@ -981,10 +984,27 @@ export function wireBrowser(card: HTMLElement) {
   });
   chatIn?.addEventListener("pointerdown", (e) => e.stopPropagation());
 
-  // restore persisted address
+  // restore persisted address — but a re-wire (undo restore, md
+  // re-render) must NOT reload a webview that already shows the page:
+  // pv_open on an existing view calls navigate() again, which is a real
+  // page reload. Ask the engine what it has first and only nav when the
+  // view is missing or on a different url.
   if (cur().url) {
     urlIn.value = cur().url;
-    void nav(cur().url, true).then(say);
+    const sameUrl = (a: string, b: string) => a.replace(/\/+$/, "") === b.replace(/\/+$/, "");
+    void invoke<string>("pv_url", { id: bvId })
+      .then((have) => {
+        if (sameUrl(have, cur().url)) {
+          // the engine kept the page — just re-glue the surface
+          lastBox = "";
+          pvSync();
+          paintView();
+          say(`live — ${hostOf(cur().url)}`);
+          return;
+        }
+        return nav(cur().url, true).then(say);
+      })
+      .catch(() => nav(cur().url, true).then(say));
   } else {
     say("new tab");
   }
