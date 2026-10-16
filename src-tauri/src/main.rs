@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod agent;
+mod extensions;
 mod llm;
 mod looprun;
 mod pageview;
@@ -93,6 +94,29 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             vault::ensure_vault()?;
+            /* the WebView2 environment is created by the FIRST webview —
+             * extensions must be enabled here or the child page-views can
+             * never load them. The conf file only declares size/chrome;
+             * the window itself is built in code so the env options land */
+            #[cfg(windows)]
+            {
+                use tauri::{WebviewUrl, WebviewWindowBuilder};
+                let ext_dir = extensions::ext_root(app.handle());
+                let _ = std::fs::create_dir_all(&ext_dir);
+                WebviewWindowBuilder::new(
+                    app.handle(),
+                    "main",
+                    WebviewUrl::App("index.html".into()),
+                )
+                .title("Laido")
+                .inner_size(1180.0, 760.0)
+                .min_inner_size(720.0, 460.0)
+                .decorations(false)
+                .center()
+                .browser_extensions_enabled(true)
+                .extensions_path(&ext_dir)
+                .build()?;
+            }
             skills::seed_defaults();
             scheduler::start(app.handle().clone());
             if let Some(name) = pending_note_from_args() {
@@ -187,6 +211,15 @@ fn main() {
             pageview::pv_close,
             pageview::pv_url,
             pageview::pv_eval,
+            extensions::ext_list,
+            extensions::ext_install_path,
+            extensions::ext_install_url,
+            extensions::ext_remove,
+            extensions::us_list,
+            extensions::us_save,
+            extensions::us_toggle,
+            extensions::us_remove,
+            extensions::us_upload,
         ])
         .run(tauri::generate_context!())
         .expect("error while running laido");

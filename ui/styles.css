@@ -2085,6 +2085,44 @@ li.todo.done .todo-box { color: var(--muted); }
   color: var(--fg); font-size: 10px; cursor: pointer; user-select: none;
 }
 .btool:hover { border-color: var(--accent); color: var(--accent); }
+/* extensions popover — hangs off the 🧩 bar button */
+.bc-ext {
+  position: absolute; top: 30px; right: 6px; z-index: 70; width: 300px;
+  max-height: 380px; overflow-y: auto; scrollbar-width: thin;
+  background: var(--bg-2, #fff); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.28); padding: 8px; font-size: 11px;
+}
+.bc-ext[hidden] { display: none; }
+.bx-sec {
+  font-size: 9.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--muted); margin: 8px 2px 4px;
+}
+.bx-sec:first-child { margin-top: 0; }
+.bx-row {
+  display: flex; align-items: center; gap: 6px; padding: 3px 4px;
+  border-radius: 5px;
+}
+.bx-row:hover { background: var(--bg-3); }
+.bx-l { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; cursor: pointer; }
+.bx-n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bx-n em { font-style: normal; color: var(--muted); font-size: 10px; }
+.bx-del, .nx-del {
+  border: none; background: none; color: var(--muted); cursor: pointer;
+  font-size: 12px; padding: 0 4px; border-radius: 3px;
+}
+.bx-del:hover, .nx-del:hover { background: var(--bg-3); color: var(--bad, #b00); }
+.bx-none { color: var(--muted); font-size: 10.5px; padding: 4px 6px; font-style: italic; }
+.bx-actions { display: flex; gap: 4px; margin-top: 5px; flex-wrap: wrap; }
+.bx-b {
+  border: 1px solid var(--line); background: var(--card-bg, #fff); color: var(--fg);
+  border-radius: 6px; font-size: 10.5px; padding: 3px 8px; cursor: pointer;
+}
+.bx-b:hover { border-color: var(--accent); color: var(--accent); }
+.bx-url {
+  flex: 1; min-width: 0; border: 1px solid var(--line); border-radius: 6px;
+  background: transparent; color: inherit; font: 10.5px/1.4 inherit; padding: 3px 7px;
+}
+.bx-tog { accent-color: var(--accent); margin: 0; }
 .btool-x {
   border: none; background: none; color: var(--muted); cursor: pointer;
   font-size: 11px; padding: 0 2px; border-radius: 3px; line-height: 1;

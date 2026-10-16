@@ -93,6 +93,11 @@ pub async fn pv_open(
         id.clone(),
         tauri::WebviewUrl::External(url.parse().map_err(|e| format!("bad url {e}"))?),
     )
+    /* unpacked chrome extensions in app_data/extensions load into this
+     * profile at webview creation — new tabs pick up freshly installed
+     * ones, and "apply now" is a pv_close + re-open */
+    .browser_extensions_enabled(true)
+    .extensions_path(crate::extensions::ext_root(&app))
     .on_navigation(move |u| {
         let _ = app2.emit_to("main", "pv:nav", json!({ "id": id2, "url": u.to_string() }));
         true

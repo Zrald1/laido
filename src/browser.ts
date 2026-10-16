@@ -119,6 +119,7 @@ export function browserInnerHtml(): string {
     `<button class="bb-b" data-a="clip" title="clip page text (or selection) into the note">⇲</button>` +
     `<button class="bb-b" data-a="bm" title="save to bookmarks.laido">★</button>` +
     `<button class="bb-b" data-a="win" title="open in a real window">⧉</button>` +
+    `<button class="bb-b" data-a="ext" title="extensions — chrome/firefox add-ons & page scripts">🧩</button>` +
     `<button class="bb-b" data-a="chat" title="ask AI about this page">✦</button>` +
     `</div>` +
     `<div class="btabs" contenteditable="false"></div>` +
@@ -811,7 +812,10 @@ export function wireBrowser(card: HTMLElement) {
     const pay = e.payload;
     if (!pay || pay.id !== bvId || !card.isConnected) return;
     setLoading(!pay.done);
-    if (pay.done && liveOn) say(`live — ${hostOf(pay.url || card.dataset.url || "")}`);
+    if (pay.done && liveOn) {
+      say(`live — ${hostOf(pay.url || card.dataset.url || "")}`);
+      void injectScripts(pay.url || card.dataset.url || "");
+    }
   });
   // real titles — js-set ones included (fetch can't see them)
   on("pv:title", (e: { payload: any }) => {
@@ -835,6 +839,174 @@ export function wireBrowser(card: HTMLElement) {
     } else {
       addActivity(`browser: downloading ${pay.url}`);
       say(`downloading ${name}…`);
+    }
+  });
+
+  /* ---------- extensions ---------- */
+  interface UScript {
+    name: string; enabled: boolean; matches: string[]; js: string; css: string;
+  }
+  interface NativeExt { id: string; name: string; version: string; desc: string }
+  /* chrome-style match patterns (e.g. "*://*.youtube.com/x"): `*` becomes `.*`,
+   * anything else is literal */
+  const matchRe = (m: string): RegExp => {
+    const esc = m.trim().replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+    return new RegExp(`^${esc}$`, "i");
+  };
+  /* every enabled script whose pattern matches the url gets injected once
+   * per page (window flag guards re-entry on soft navigations) */
+  const injectScripts = async (url: string) => {
+    if (!url || !liveOn) return;
+    const scripts = await invoke<UScript[]>("us_list").catch(() => [] as UScript[]);
+    for (const sc of scripts) {
+      if (!sc.enabled) continue;
+      const pats = sc.matches.length ? sc.matches : ["*://*/*"];
+      if (!pats.some((m) => matchRe(m).test(url))) continue;
+      const tag = `__laidoExt_${sc.name.replace(/\W+/g, "_")}`;
+      const js =
+        `(()=>{const T=${JSON.stringify(tag)};if(window[T])return'have';window[T]=1;` +
+        (sc.css
+          ? `const st=document.createElement('style');st.dataset.laidoExt=${JSON.stringify(sc.name)};st.textContent=${JSON.stringify(sc.css)};(document.head||document.documentElement).append(st);`
+          : "") +
+        `try{(function(){\n${sc.js}\n})()}catch(e){console.warn('[ext]',e)}return'on'})()`;
+      void invoke<string>("pv_eval", { id: bvId, js })
+        .then((s) => { if (s && s.includes("on")) say(`🧩 ${sc.name} active on this page`); })
+        .catch(() => {});
+    }
+  };
+
+  /* the extensions popover — two lanes:
+   *  page scripts inject instantly; native chrome/firefox add-ons load into
+   *  the webview profile at creation, so they apply on the next page/tab
+   *  (the apply button force-recreates the engine right away) */
+  const extPop = document.createElement("div");
+  extPop.className = "bc-ext";
+  extPop.contentEditable = "false";
+  extPop.hidden = true;
+  card.append(extPop);
+  const reopenEngine = async (): Promise<string> => {
+    const r = view.getBoundingClientRect();
+    const d = dpr();
+    const u = cur().url;
+    await invoke("pv_close", { id: bvId }).catch(() => {});
+    await new Promise((r2) => setTimeout(r2, 250));
+    if (!u) return "no page to reload";
+    await invoke("pv_open", {
+      id: bvId, url: u,
+      x: Math.round(r.left * d), y: Math.round(r.top * d),
+      w: Math.round(Math.max(1, r.width) * d), h: Math.round(Math.max(1, r.height) * d),
+    }).catch((e) => String(e));
+    lastBox = "";
+    pvSync();
+    return "engine restarted — extensions active";
+  };
+  const renderExt = async () => {
+    const [nat, us] = await Promise.all([
+      invoke<NativeExt[]>("ext_list").catch(() => [] as NativeExt[]),
+      invoke<UScript[]>("us_list").catch(() => [] as UScript[]),
+    ]);
+    const esc = (s: string) => s.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+    extPop.innerHTML =
+      `<div class="bx-sec">page scripts — inject into pages instantly</div>` +
+      (us.length
+        ? us.map((s) =>
+            `<div class="bx-row"><label class="bx-l"><input type="checkbox" class="bx-tog" data-n="${esc(s.name)}"${s.enabled ? " checked" : ""}/><span class="bx-n" title="${esc(s.matches.join(", "))}">${esc(s.name)}</span></label><button class="bx-del" data-n="${esc(s.name)}" title="delete">×</button></div>`,
+          ).join("")
+        : `<div class="bx-none">none yet — ask the AI to make one, or upload a file</div>`) +
+      `<div class="bx-actions"><button class="bx-b" data-x="usup">＋ upload .js / .css / .json</button><button class="bx-b" data-x="mkai">✦ ask AI to build one</button></div>` +
+      `<div class="bx-sec">chrome / firefox extensions — load on next page</div>` +
+      (nat.length
+        ? nat.map((x) =>
+            `<div class="bx-row"><span class="bx-n" title="${esc(x.desc)}">${esc(x.name)} <em>${esc(x.version)}</em></span><button class="nx-del" data-n="${esc(x.id)}" title="remove">×</button></div>`,
+          ).join("")
+        : `<div class="bx-none">none installed — open a store page in this card then press “install this page”, or upload a file</div>`) +
+      `<div class="bx-actions"><input class="bx-url" placeholder="store link or .crx/.xpi url…"/><button class="bx-b" data-x="insturl">install</button></div>` +
+      `<div class="bx-actions"><button class="bx-b" data-x="instpage">install this page</button><button class="bx-b" data-x="natup">upload .crx/.xpi/.zip/folder</button><button class="bx-b" data-x="apply">apply ⟳</button></div>` +
+      `<div class="bx-actions"><button class="bx-b" data-x="cws">⌕ chrome store</button><button class="bx-b" data-x="amo">🦊 firefox add-ons</button></div>`;
+  };
+  const toggleExt = async (on: boolean) => {
+    extPop.hidden = !on;
+    bar.querySelector('[data-a="ext"]')?.classList.toggle("on", on);
+    if (on) await renderExt();
+  };
+  extPop.addEventListener("pointerdown", (e) => e.stopPropagation());
+  extPop.addEventListener("click", async (e) => {
+    const el = e.target as HTMLElement;
+    e.preventDefault();
+    e.stopPropagation();
+    const tog = el.closest<HTMLInputElement>(".bx-tog");
+    if (tog) {
+      await invoke("us_toggle", { name: tog.dataset.n ?? "", on: tog.checked }).catch(() => {});
+      say(`${tog.checked ? "enabled" : "paused"} “${tog.dataset.n}”`);
+      return;
+    }
+    const del = el.closest<HTMLElement>(".bx-del");
+    if (del) {
+      await invoke("us_remove", { name: del.dataset.n ?? "" }).catch(() => {});
+      await renderExt();
+      return;
+    }
+    const ndel = el.closest<HTMLElement>(".nx-del");
+    if (ndel) {
+      await invoke("ext_remove", { id: ndel.dataset.n ?? "" }).catch(() => {});
+      await renderExt();
+      return;
+    }
+    const act = el.closest<HTMLElement>("[data-x]")?.dataset.x;
+    if (!act) return;
+    const dlg = window.__TAURI__?.dialog;
+    if (act === "usup" && dlg) {
+      const p = await dlg.open({
+        multiple: false,
+        filters: [{ name: "page script", extensions: ["js", "css", "json", "user.js"] }],
+      });
+      if (typeof p === "string") {
+        const n = await invoke<string>("us_upload", { path: p }).catch((e) => `✕ ${String(e).slice(0, 90)}`);
+        say(`🧩 script “${n}” ready — injects on matching pages`);
+        void injectScripts(cur().url);
+        await renderExt();
+      }
+    } else if (act === "mkai") {
+      setChatOpen(true);
+      chatIn?.focus({ preventScroll: true });
+      chatIn!.value = "make a page extension that ";
+    } else if (act === "insturl") {
+      const u = extPop.querySelector<HTMLInputElement>(".bx-url")?.value.trim() ?? "";
+      if (!u) { say("paste a store link or .crx url first"); return; }
+      say("installing…");
+      const n = await invoke<string>("ext_install_url", { url: u }).catch((e) => `✕ ${String(e).slice(0, 110)}`);
+      say(n.startsWith("✕") ? n : `🧩 “${n}” installed — loads into new pages (⟳ apply = now)`);
+      await renderExt();
+    } else if (act === "instpage") {
+      const u = cur().url;
+      if (!/chromewebstore\.google\.com|addons\.mozilla\.org/.test(u)) {
+        say("open a chrome web store or firefox add-ons page in this card first");
+        return;
+      }
+      say("installing…");
+      const n = await invoke<string>("ext_install_url", { url: u }).catch((e) => `✕ ${String(e).slice(0, 110)}`);
+      say(n.startsWith("✕") ? n : `🧩 “${n}” installed — loads into new pages (⟳ apply = now)`);
+      await renderExt();
+    } else if (act === "natup" && dlg) {
+      const p = await dlg.open({
+        multiple: false,
+        filters: [{ name: "extension", extensions: ["crx", "xpi", "zip"] }],
+      });
+      if (typeof p === "string") {
+        say("installing…");
+        const n = await invoke<string>("ext_install_path", { path: p }).catch((e) => `✕ ${String(e).slice(0, 110)}`);
+        say(n.startsWith("✕") ? n : `🧩 “${n}” installed — loads into new pages (⟳ apply = now)`);
+        await renderExt();
+      }
+    } else if (act === "apply") {
+      say("restarting the page engine…");
+      say(await reopenEngine());
+    } else if (act === "cws" || act === "amo") {
+      const q = extPop.querySelector<HTMLInputElement>(".bx-url")?.value.trim() ?? "";
+      const base = act === "cws"
+        ? "https://chromewebstore.google.com/search/"
+        : "https://addons.mozilla.org/en-US/firefox/search/?q=";
+      void nav(base + encodeURIComponent(q), true).then(say);
     }
   });
 
@@ -882,6 +1054,7 @@ export function wireBrowser(card: HTMLElement) {
       void apis.get(card)?.bookmark().then(say);
     }
     else if (a === "win") openInBrowser(card.dataset.url ?? urlIn.value);
+    else if (a === "ext") void toggleExt(extPop.hidden);
     else if (a === "chat") setChatOpen(chatPane ? chatPane.hidden : true);
   });
   status.addEventListener("click", () => {
@@ -1142,6 +1315,7 @@ export function wireBrowser(card: HTMLElement) {
           pvSync();
           paintView();
           say(`live — ${hostOf(cur().url)}`);
+          void injectScripts(cur().url);
           return;
         }
         return nav(cur().url, true).then(say);

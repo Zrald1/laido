@@ -1239,7 +1239,73 @@ const browserTool = async (body: string): Promise<string> => {
     if (!card) return `✕ no browser found named "${sp.join(" ") || "?"}"`;
     return browserApi(card)!.delTool(tname);
   }
-  return `✕ unknown browser verb "${verb}" — open/read/links/search/extract/tables/grab/click/navigate/back/forward/clip/bookmark/eval/list/tabs/newtab/tab/tools/tool/runtool/tooldel`;
+
+  /* ---------- extensions — userscript lane: {name, js, css, matches} saved
+   * app-wide and injected into every matching page load. `ext` is the AI's
+   * build-an-extension verb; card arg only locates where to report/inject. */
+  if (verb === "exts") {
+    const card = findBrowser(rest);
+    if (!card) return `✕ no browser found named "${rest || "?"}"`;
+    const us = await invoke<{ name: string; enabled: boolean; matches: string[] }[]>("us_list").catch(() => []);
+    return us.length
+      ? `page scripts: ${us.map((s) => `${s.name}${s.enabled ? "" : " (off)"}`).join(", ")}`
+      : `no page scripts — ext <title> {"name":"x","js":"…","matches":["*://*/*"]}`;
+  }
+  if (verb === "ext" || verb === "addon" || verb === "extension") {
+    const j = rest.indexOf("{");
+    const name = j < 0 ? rest : rest.slice(0, j).trim();
+    const card = findBrowser(name);
+    if (!card) return `✕ no browser found named "${name || "?"}"`;
+    if (j < 0) return `✕ ext needs a spec — ext <title> {"name":"x","js":"…","matches":["*://*/*"],"css":"…"}`;
+    let spec: { name?: string; js?: string; css?: string; matches?: string[] } | null = null;
+    try {
+      spec = JSON.parse(rest.slice(j));
+    } catch {
+      try { spec = new Function(`return (${rest.slice(j)})`)(); } catch { /* fall through */ }
+    }
+    if (!spec?.name || typeof spec.js !== "string")
+      return `✕ ext spec needs name + js — ext <title> {"name":"x","js":"…"}`;
+    await invoke("us_save", {
+      name: spec.name,
+      js: spec.js,
+      css: typeof spec.css === "string" ? spec.css : "",
+      matches: Array.isArray(spec.matches) ? spec.matches.filter((m) => typeof m === "string") : [],
+    });
+    // inject into the live page right now if the url matches
+    const url = browserApi(card)!.url();
+    const pats = spec.matches?.length ? spec.matches : ["*://*/*"];
+    const hit = pats.some((m) => {
+      const re = new RegExp(`^${m.trim().replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`, "i");
+      return re.test(url);
+    });
+    if (hit && url) {
+      const tag = `__laidoExt_${spec.name.replace(/\W+/g, "_")}`;
+      const js =
+        `(()=>{const T=${JSON.stringify(tag)};if(window[T])return'have';window[T]=1;` +
+        (spec.css ? `const st=document.createElement('style');st.textContent=${JSON.stringify(spec.css)};(document.head||document.documentElement).append(st);` : "") +
+        `try{(function(){\n${spec.js}\n})()}catch(e){return 'err:'+e.message}return'on'})()`;
+      const s = await invoke<string>("pv_eval", { id: card.dataset.bv ?? "", js }).catch(() => "");
+      return `extension "${spec.name}" saved${s?.includes("on") ? " + live on this page" : ""}${s?.includes("err:") ? ` — script error: ${s}` : ""}`;
+    }
+    return `extension "${spec.name}" saved — injects on matching page loads`;
+  }
+  if (verb === "extdel" || verb === "rmext") {
+    const sp = rest.split(/\s+/);
+    const sname = sp.pop() ?? "";
+    const card = findBrowser(sp.join(" "));
+    if (!card) return `✕ no browser found named "${sp.join(" ") || "?"}"`;
+    await invoke("us_remove", { name: sname }).catch(() => {});
+    return `extension "${sname}" removed`;
+  }
+  if (verb === "exton" || verb === "extoff") {
+    const sp = rest.split(/\s+/);
+    const sname = sp.pop() ?? "";
+    const card = findBrowser(sp.join(" "));
+    if (!card) return `✕ no browser found named "${sp.join(" ") || "?"}"`;
+    await invoke("us_toggle", { name: sname, on: verb === "exton" }).catch(() => {});
+    return `extension "${sname}" ${verb === "exton" ? "on" : "off"}`;
+  }
+  return `✕ unknown browser verb "${verb}" — open/read/links/search/extract/tables/grab/click/navigate/back/forward/clip/bookmark/eval/list/tabs/newtab/tab/tools/tool/runtool/tooldel/ext/exts/extdel`;
 };
 
 /** locate a chart card by title — same fuzzy logic as findSheet */
