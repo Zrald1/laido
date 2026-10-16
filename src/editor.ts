@@ -5900,7 +5900,10 @@ export function initEditor() {
       return;
     }
     const a = (e.target as HTMLElement).closest("[data-url]") as HTMLElement | null;
-    if (!a) return;
+    /* a card's own data-url is its state (browser cards keep the live page
+     * url on the element) — matching it here would navigate the card to
+     * itself on every stray click inside it, i.e. a reload */
+    if (!a || a.classList.contains("callout")) return;
     const card = a.closest(".callout") as HTMLElement | null;
     if (card?.dataset.justdragged) return;
     const inCard = !!card;
