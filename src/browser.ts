@@ -907,6 +907,8 @@ export function wireBrowser(card: HTMLElement) {
         ro.disconnect();
         extResize.disconnect();
         window.removeEventListener("resize", extWinFit);
+        document.removeEventListener("pointerdown", closeExt);
+        document.removeEventListener("keydown", escExt, true);
         if (fsOn) setFs(false); // a dead card can't hold fullscreen
         /* every tab's engine: parked → hidden + re-claimable by url;
          * deleted → closed for real */
@@ -1331,6 +1333,12 @@ export function wireBrowser(card: HTMLElement) {
   extPop.className = "bc-ext";
   extPop.contentEditable = "false";
   extPop.hidden = true;
+  const closeBtn = document.createElement("button");
+  closeBtn.className = "bx-close";
+  closeBtn.dataset.x = "close";
+  closeBtn.title = "close (Esc)";
+  closeBtn.textContent = "×";
+  extPop.append(closeBtn);
   card.append(extPop);
   const reopenEngine = async (): Promise<string> => {
     const r = view.getBoundingClientRect();
@@ -1371,6 +1379,9 @@ export function wireBrowser(card: HTMLElement) {
       `<div class="bx-actions"><input class="bx-url" placeholder="store link or .crx/.xpi url…"/><button class="bx-b" data-x="insturl">install</button></div>` +
       `<div class="bx-actions"><button class="bx-b" data-x="instpage">install this page</button><button class="bx-b" data-x="natup">upload .crx/.xpi/.zip/folder</button><button class="bx-b" data-x="apply">apply ⟳</button></div>` +
       `<div class="bx-actions"><button class="bx-b" data-x="cws">⌕ chrome store</button><button class="bx-b" data-x="amo">🦊 firefox add-ons</button></div>`;
+    /* the × survives every re-render — always an exit, even while the
+     * list is still loading */
+    extPop.prepend(closeBtn);
   };
   /* keep the popover inside the visible area — the card's right edge can
    * sit past the pane (resized wider than the window, narrow windows) and
@@ -1418,11 +1429,32 @@ export function wireBrowser(card: HTMLElement) {
   extResize.observe(card);
   const extWinFit = () => { if (!extPop.hidden) fitExt(); };
   window.addEventListener("resize", extWinFit);
+  /* dismiss paths — the panel must close on ×, Escape, or a click
+   * anywhere outside it (extPop's own pointerdown stopPropagation
+   * shields inside clicks; the 🧩 button toggles itself) */
+  const closeExt = (e: PointerEvent) => {
+    if (extPop.hidden) return;
+    if ((e.target as HTMLElement).closest('[data-a="ext"]')) return;
+    void toggleExt(false);
+  };
+  document.addEventListener("pointerdown", closeExt);
+  const escExt = (e: KeyboardEvent) => {
+    if (e.key !== "Escape" || extPop.hidden) return;
+    e.stopPropagation();
+    void toggleExt(false);
+  };
+  /* capture phase — the card head's own keydown handler stopPropagations
+   * every key (typing isolation), which would swallow Escape typed into
+   * the url input before it ever bubbles to document */
+  document.addEventListener("keydown", escExt, true);
   const toggleExt = async (on: boolean) => {
     extPop.hidden = !on;
     bar.querySelector('[data-a="ext"]')?.classList.toggle("on", on);
     if (!on) pvSync(); // restore the full surface when the panel closes
     if (on) {
+      /* the engine may hold OS keyboard focus — Escape/Esc can't reach
+       * the panel's document listener until the main webview takes it */
+      void invoke("pv_focus_main").catch(() => {});
       fitExt();
       await renderExt().catch(() => {});
       fitExt();
@@ -1492,6 +1524,7 @@ export function wireBrowser(card: HTMLElement) {
     }
     const act = el.closest<HTMLElement>("[data-x]")?.dataset.x;
     if (!act) return;
+    if (act === "close") { void toggleExt(false); return; }
     const dlg = window.__TAURI__?.dialog;
     if (act === "usup" && dlg) {
       const p = await dlg.open({
