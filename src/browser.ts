@@ -49,7 +49,7 @@ export function toUrl(input: string): string {
 export function parseBrowser(block: string[]): {
   title: string;
   url: string;
-  tabs: { url: string; title: string }[];
+  tabs: { url: string; title: string; bv: string }[];
   atab: number;
   tools: { name: string; js: string }[];
   chat: string;
@@ -59,7 +59,7 @@ export function parseBrowser(block: string[]): {
   const head = block[0] ?? "";
   const title = head.replace(/^\[!\w+\]\s*/, "").trim();
   let url = "";
-  const tabs: { url: string; title: string }[] = [];
+  const tabs: { url: string; title: string; bv: string }[] = [];
   const tools: { name: string; js: string }[] = [];
   let chat = "";
   let bv = "";
@@ -68,8 +68,13 @@ export function parseBrowser(block: string[]): {
     const line = raw.trim();
     const m = line.match(/^url:\s*(\S+)/i);
     if (m) url = m[1];
-    const mt = line.match(/^tab:\s*(\S+)(?:\s*\|\s*(.*))?$/i);
-    if (mt) tabs.push({ url: mt[1] === "about:blank" ? "" : mt[1], title: (mt[2] ?? "").trim() });
+    const mt = line.match(/^tab:\s*(\S+)(?:\s*\|\s*([^|]*?))?(?:\s*\|\s*(\S+))?\s*$/i);
+    if (mt)
+      tabs.push({
+        url: mt[1] === "about:blank" ? "" : mt[1],
+        title: (mt[2] ?? "").trim(),
+        bv: mt[3] ?? "",
+      });
     const ma = line.match(/^atab:\s*(\d+)/i);
     if (ma) atab = parseInt(ma[1], 10) || 0;
     const mo = line.match(/^tool:\s*(\{[\s\S]*\})\s*$/i);
@@ -94,11 +99,17 @@ export function browserToMd(card: HTMLElement): string {
   const title = DS(card.dataset.topic) ?? "browser";
   let md = `> [!browser] ${title}\n> url: ${url}`;
   try {
-    const tabs = JSON.parse(DS(card.dataset.tabs) || "[]") as { url: string; title: string }[];
+    const tabs = JSON.parse(DS(card.dataset.tabs) || "[]") as {
+      url: string;
+      title: string;
+      bv?: string;
+    }[];
     if (tabs.length > 1) {
       md += `\n> atab: ${parseInt(card.dataset.atab ?? "0", 10) || 0}`;
       for (const tb of tabs)
-        md += `\n> tab: ${tb.url || "about:blank"} | ${(tb.title || "").replace(/\|/g, "/")}`;
+        md +=
+          `\n> tab: ${tb.url || "about:blank"} | ${(tb.title || "").replace(/\|/g, "/")}` +
+          (tb.bv ? ` | ${tb.bv}` : "");
     }
   } catch { /* tab state is best-effort */ }
   try {
@@ -290,11 +301,15 @@ const startAudioPoll = () => {
      * eats clicks meant for the UI underneath (a "chatbox click" lands
      * on it and navigates the page). Two consecutive ticks so a just-
      * spawned engine isn't hidden mid-wire. */
-    const claimed = new Set(
-      [...document.querySelectorAll<HTMLElement>(".browser-card")]
-        .filter((c) => c.isConnected)
-        .map((c) => c.dataset.bv ?? ""),
-    );
+    const claimed = new Set<string>();
+    for (const c of document.querySelectorAll<HTMLElement>(".browser-card")) {
+      if (!c.isConnected) continue;
+      if (c.dataset.bv) claimed.add(c.dataset.bv);
+      try {
+        for (const t of JSON.parse(c.dataset.tabs || "[]") as { bv?: string }[])
+          if (t.bv) claimed.add(t.bv);
+      } catch { /* tab state optional — dataset.bv still covers single-tab cards */ }
+    }
     for (const id of ids) {
       if (claimed.has(id)) { unclaimedTicks.delete(id); continue; }
       const n = (unclaimedTicks.get(id) ?? 0) + 1;
@@ -303,20 +318,24 @@ const startAudioPoll = () => {
     }
     for (const id of [...unclaimedTicks.keys()]) if (!ids.includes(id)) unclaimedTicks.delete(id);
 
-    for (const id of ids) {
-      const s = await invoke<string>("pv_eval", { id, js: AUD_JS }).catch(() => "");
-      if (!s) continue;
-      try {
-        const st = JSON.parse(JSON.parse(s)) as {
-          playing: boolean;
-          muted: boolean;
-          t: string;
-          u?: string;
-        };
-        audioPv.set(id, { playing: st.playing, muted: st.muted, title: st.t });
-        if (st.u) liveTabs.get(id)?.(st.u, st.t);
-      } catch { /* odd page state — skip this tick */ }
-    }
+    /* parallel evals — a serial loop over many parked engines stretches
+     * the effective poll past several seconds and SPA tracking lags */
+    await Promise.all(
+      ids.map(async (id) => {
+        const s = await invoke<string>("pv_eval", { id, js: AUD_JS }).catch(() => "");
+        if (!s) return;
+        try {
+          const st = JSON.parse(JSON.parse(s)) as {
+            playing: boolean;
+            muted: boolean;
+            t: string;
+            u?: string;
+          };
+          audioPv.set(id, { playing: st.playing, muted: st.muted, title: st.t });
+          if (st.u) liveTabs.get(id)?.(st.u, st.t);
+        } catch { /* odd page state — skip this engine */ }
+      }),
+    );
     for (const id of [...audioPv.keys()]) if (!ids.includes(id)) audioPv.delete(id);
     renderAudioPill();
     paintSndButtons();
@@ -340,13 +359,16 @@ export function wireBrowser(card: HTMLElement) {
   if (!bar || !urlIn || !view || !reader || !status) return;
   const strip = card.querySelector<HTMLElement>(".btabs");
 
-  /* tabs — one live engine, N addresses; each tab keeps its own url,
-   * title and back-stack and switching navigates the same webview */
+  /* tabs — ONE LIVE ENGINE PER TAB: each tab keeps its own url, title,
+   * back-stack AND webview, so switching is show/hide, never a reload.
+   * bv is "" until the tab first navigates (engines are lazy). */
   interface BTab {
     url: string;
     title: string;
     hist: string[];
     hi: number;
+    bv: string;
+    at: number; // last-active ms — LRU victim when engines cap out
   }
   let tabs: BTab[] = [];
   try {
@@ -357,13 +379,29 @@ export function wireBrowser(card: HTMLElement) {
         .map((t) => {
           const h = Array.isArray(t.hist) ? t.hist.map(S).filter(Boolean).slice(-60) : [];
           const i = typeof t.hi === "number" && Number.isFinite(t.hi) ? t.hi : -1;
-          return { url: S(t.url), title: S(t.title), hist: h, hi: Math.min(i, h.length - 1) };
+          return {
+            url: S(t.url),
+            title: S(t.title),
+            hist: h,
+            hi: Math.min(i, h.length - 1),
+            bv: S(t.bv),
+            at: 0,
+          };
         });
   } catch {
     tabs = [];
   }
   if (!tabs.length)
-    tabs = [{ url: DS(card.dataset.url) ?? "", title: DS(card.dataset.topic) ?? "", hist: [], hi: -1 }];
+    tabs = [
+      {
+        url: DS(card.dataset.url) ?? "",
+        title: DS(card.dataset.topic) ?? "",
+        hist: [],
+        hi: -1,
+        bv: "",
+        at: 0,
+      },
+    ];
   let active = Math.min(Math.max(parseInt(card.dataset.atab ?? "0", 10) || 0, 0), tabs.length - 1);
   const cur = () => tabs[active] ?? tabs[0];
   // hist/hi always alias the ACTIVE tab's stack
@@ -373,29 +411,59 @@ export function wireBrowser(card: HTMLElement) {
   // the real engine is the default lane — ◐ drops to the text reader
   let liveOn = true;
   let loading = false;
-  /* the webview id must be STABLE across rewires — a fresh id makes the
-   * restore path open a second engine and reload the page (and orphans
-   * the old one). Reuse the card's id when it already has one; a parked
-   * engine whose bv: line never reached disk is re-claimed by url. */
+  /* each tab's bv must be STABLE across rewires — serialized in its tab:
+   * line, reclaimed by url as a fallback, or recreated on next activate.
+   * The card-level bv: is the ACTIVE tab's engine (back-compat). */
   delete card.dataset.park;
-  if (!card.dataset.bv) {
-    const u = (card.dataset.url ?? "").replace(/\/+$/, "").toLowerCase();
-    const parked = u ? parkedByUrl.get(u) : undefined;
-    if (parked) {
-      card.dataset.bv = parked;
-      parkedByUrl.delete(u);
+  const normU = (u: string) => u.replace(/\/+$/, "").toLowerCase();
+  // the card-level bv belongs to the active tab
+  if (!cur().bv && card.dataset.bv) cur().bv = card.dataset.bv;
+  for (const t of tabs) {
+    if (!t.bv && t.url) {
+      const parked = parkedByUrl.get(normU(t.url));
+      if (parked) {
+        t.bv = parked;
+        parkedByUrl.delete(normU(t.url));
+      }
     }
   }
-  /* a duplicated card carries the source's bv — two live cards must never
-   * share one engine (bounds fight) */
-  if (
-    card.dataset.bv &&
-    [...document.querySelectorAll<HTMLElement>(".browser-card")].some(
-      (c) => c !== card && c.dataset.bv === card.dataset.bv,
-    )
-  )
-    delete card.dataset.bv;
-  const bvId = card.dataset.bv || `bv-${Date.now().toString(36)}-${++pvSeq}`;
+  /* a duplicated card carries the source's bvs — two live cards must
+   * never share engines (bounds fight). Strip any bv another card owns. */
+  const foreign = new Set<string>();
+  for (const c of document.querySelectorAll<HTMLElement>(".browser-card")) {
+    if (c === card || !c.isConnected) continue;
+    if (c.dataset.bv) foreign.add(c.dataset.bv);
+    try {
+      for (const t of JSON.parse(c.dataset.tabs || "[]") as { bv?: string }[])
+        if (t.bv) foreign.add(t.bv);
+    } catch { /* unparsed sibling — its dataset.bv still covers it */ }
+  }
+  for (const t of tabs) if (t.bv && foreign.has(t.bv)) t.bv = "";
+  /* dead engines (evicted, crashed, or closed since the note saved) get
+   * cleared so their tab falls back to a fresh nav on activate. ONLY the
+   * ids parsed at wire time are checked — a bv assigned by nav() during
+   * THIS wire is still mid-creation (OPENING claim — not in pv_list yet)
+   * and clearing it here orphans every event route for that tab */
+  const parsedBvs = new Set(tabs.map((t) => t.bv).filter(Boolean));
+  void invoke<string[]>("pv_list")
+    .then((ids) => {
+      if (!Array.isArray(ids)) return;
+      let dirty = false;
+      for (const t of tabs)
+        if (t.bv && parsedBvs.has(t.bv) && !ids.includes(t.bv)) {
+          t.bv = "";
+          dirty = true;
+        }
+      if (dirty) {
+        persistTabs();
+        renderTabs();
+      }
+    })
+    .catch(() => {});
+  const genBv = () => `bv-${Date.now().toString(36)}-${++pvSeq}`;
+  /* bvId mirrors the ACTIVE tab's engine — every active-page invoke uses
+   * it; sibling engines are only ever hidden/closed by id */
+  let bvId = cur().bv;
   card.dataset.bv = bvId;
   startAudioPoll();
   const lock = card.querySelector<HTMLElement>(".bb-lock");
@@ -432,31 +500,63 @@ export function wireBrowser(card: HTMLElement) {
     persistTabs();
   };
   /* pushState/SPA navigations never fire pv:nav — stamp the engine's
-   * REAL location into the active tab whenever the poll spots a drift,
-   * so the tab stores the page the user actually sees. Mirrors pv:nav. */
-  const liveTrack = (u: string, title: string) => {
-    if (!liveOn || Date.now() - switchAt < 900) return; // engine isn't truth
-    if (u && u !== "about:blank" && u !== cur().url) {
-      cur().url = u;
-      card.dataset.url = u;
-      setLock(u);
-      if (urlIn.value !== u) urlIn.value = u;
-      if (hist[hi] !== u) {
-        hist.splice(hi + 1);
-        hist.push(u);
-        hi = hist.length - 1;
+   * REAL location into the tab that OWNS that engine (a background tab's
+   * autoplay nav belongs to it, not the active tab). Mirrors pv:nav. */
+  const liveTrack = (id: string, u: string, title: string) => {
+    const ti = tabs.findIndex((t) => t.bv === id);
+    if (ti < 0) return;
+    const t = tabs[ti];
+    const act = ti === active;
+    if (act && (!liveOn || Date.now() - switchAt < 900)) return;
+    if (u && u !== "about:blank" && u !== t.url) {
+      t.url = u;
+      if (t.hist[t.hi] !== u) {
+        t.hist.splice(t.hi + 1);
+        t.hist.push(u);
+        t.hi = t.hist.length - 1;
+      }
+      if (act) {
+        card.dataset.url = u;
+        setLock(u);
+        if (urlIn.value !== u) urlIn.value = u;
+        onChange();
       }
       persistTabs();
       renderTabs();
-      onChange();
     }
-    if (title && title !== cur().title) {
-      cur().title = title;
-      card.dataset.topic = title;
-      const el = card.querySelector(".callout-title");
-      if (el) el.textContent = title;
+    if (title && title !== t.title) {
+      t.title = title;
+      if (act) {
+        card.dataset.topic = title;
+        const el = card.querySelector(".callout-title");
+        if (el) el.textContent = title;
+      }
       renderTabs();
     }
+  };
+  const claimEng = (id: string) => liveTabs.set(id, (u, t) => liveTrack(id, u, t));
+  for (const t of tabs) if (t.bv) claimEng(t.bv);
+  /* every inactive tab's engine hides — only the active one shows */
+  const hideSiblings = () => {
+    for (const t of tabs)
+      if (t.bv && t !== cur())
+        void invoke("pv_visible", { id: t.bv, on: false }).catch(() => {});
+  };
+  /* engine budget: an idle webview costs ~80MB — beyond the cap, close
+   * the least-recently-active background engine; its tab falls back to a
+   * real nav on next switch (same as before per-tab engines) */
+  const MAX_ENGINES = 8;
+  const evictIdle = () => {
+    const live = tabs.filter((t) => t.bv);
+    if (live.length <= MAX_ENGINES) return;
+    const vic = live
+      .filter((t) => t !== cur())
+      .sort((a, b) => a.at - b.at)[0];
+    if (!vic) return;
+    void invoke("pv_close", { id: vic.bv }).catch(() => {});
+    liveTabs.delete(vic.bv);
+    vic.bv = "";
+    persistTabs();
   };
   /* same capture, synchronous-ish, run right before leaving a tab so its
    * stored url is the page the engine is really on — even if the user
@@ -492,7 +592,6 @@ export function wireBrowser(card: HTMLElement) {
     }
     syncTab();
   };
-  liveTabs.set(bvId, liveTrack);
   const renderTabs = () => {
     if (!strip) return;
     strip.innerHTML =
@@ -593,6 +692,42 @@ export function wireBrowser(card: HTMLElement) {
     reader.style.display = !liveOn || !cur().url ? "" : "none";
     if (!cur().url) showBlank();
   };
+  /* activate the tab at index `i`: hide every other tab's engine, then
+   * show the target's live engine at the card rect — no navigation, no
+   * reload, the page kept running. Only a tab whose engine was evicted
+   * or never created falls back to nav(). */
+  const activateTab = (i: number): Promise<string> | string => {
+    const t = cur();
+    hist = t.hist;
+    hi = t.hi;
+    t.at = Date.now();
+    card.dataset.url = t.url;
+    card.dataset.topic = t.title || "new tab";
+    const el = card.querySelector(".callout-title");
+    if (el) el.textContent = card.dataset.topic;
+    urlIn.value = t.url;
+    persistTabs();
+    renderTabs();
+    paintView();
+    hideSiblings();
+    bvId = t.bv;
+    card.dataset.bv = bvId;
+    /* a hidden engine can't own fullscreen — clear a stale __pvFs that
+     * points at one of OUR background tabs (another card's fs stays) */
+    {
+      const w = window as unknown as { __pvFs?: string };
+      if (w.__pvFs && w.__pvFs !== bvId && tabs.some((t) => t.bv === w.__pvFs))
+        delete w.__pvFs;
+    }
+    if (fsOn) setFs(false); // the old engine hides — it can't stay fullscreen
+    lastBox = "";
+    pvSync();
+    if (t.bv) return `tab ${i + 1}`;
+    if (t.url) return nav(t.url, false);
+    say("new tab");
+    refocusField(urlIn);
+    return "new tab";
+  };
   const switchTab = async (i: number, fromUi = false): Promise<string> => {
     if (i < 0 || i >= tabs.length) return `✕ no tab ${i + 1} — ${tabs.length} open`;
     if (i === active) {
@@ -601,73 +736,26 @@ export function wireBrowser(card: HTMLElement) {
     }
     await seizeLive();
     active = i;
-    const t = cur();
-    hist = t.hist;
-    hi = t.hi;
-    card.dataset.url = t.url;
-    card.dataset.topic = t.title || "new tab";
-    const el = card.querySelector(".callout-title");
-    if (el) el.textContent = card.dataset.topic;
-    urlIn.value = t.url;
-    persistTabs();
-    renderTabs();
-    paintView();
-    if (t.url) return nav(t.url, false);
-    blankEngine();
-    lastBox = "";
-    pvSync();
-    say("new tab");
-    refocusField(urlIn);
-    return "new tab";
+    return activateTab(i);
   };
   const newTab = async (input?: string): Promise<string> => {
     const url = input ? toUrl(input) : "";
     await seizeLive();
-    tabs.push({ url, title: "", hist: [], hi: -1 });
+    tabs.push({ url, title: "", hist: [], hi: -1, bv: "", at: 0 });
     active = tabs.length - 1;
-    hist = cur().hist;
-    hi = -1;
-    card.dataset.url = url;
-    if (!url) {
-      card.dataset.topic = "new tab";
-      const el = card.querySelector(".callout-title");
-      if (el) el.textContent = "new tab";
-    }
-    urlIn.value = url;
-    persistTabs();
-    renderTabs();
-    paintView();
-    if (url) return nav(url, true);
-    blankEngine();
-    lastBox = "";
-    pvSync();
-    say("new tab");
-    refocusField(urlIn);
-    return "new tab";
+    return activateTab(active);
   };
   const closeTab = (i: number) => {
     if (tabs.length <= 1) return;
+    const vic = tabs[i];
+    if (vic?.bv) {
+      void invoke("pv_close", { id: vic.bv }).catch(() => {});
+      liveTabs.delete(vic.bv);
+    }
     tabs.splice(i, 1);
     if (active > i) active--;
     else if (active === i) active = Math.min(active, tabs.length - 1);
-    const t = cur();
-    hist = t.hist;
-    hi = t.hi;
-    card.dataset.url = t.url;
-    card.dataset.topic = t.title || "new tab";
-    const el = card.querySelector(".callout-title");
-    if (el) el.textContent = card.dataset.topic;
-    urlIn.value = t.url;
-    persistTabs();
-    renderTabs();
-    paintView();
-    if (t.url && t.url !== lastFetched) void nav(t.url, false).then(say);
-    else if (!t.url) {
-      blankEngine();
-      lastBox = "";
-      pvSync();
-      say("new tab");
-    } else pvSync();
+    void Promise.resolve(activateTab(active)).then(say);
     onChange();
   };
 
@@ -700,9 +788,9 @@ export function wireBrowser(card: HTMLElement) {
     pvSync();
   };
   const pvSync = () => {
-    if (!card.isConnected) return;
+    if (!card.isConnected || !bvId) return; // blank tab — no engine to glue
     const fsOwner = fsFlag();
-    if (fsOwner === bvId) {
+    if (bvId && fsOwner === bvId) {
       // our page owns fullscreen — the surface covers the whole window
       const d = dpr();
       const key = `fs,${window.innerWidth},${window.innerHeight},${d}`;
@@ -774,14 +862,18 @@ export function wireBrowser(card: HTMLElement) {
         window.clearInterval(pvTimer);
         ro.disconnect();
         if (fsOn) setFs(false); // a dead card can't hold fullscreen
-        if (card.dataset.park) {
-          const u = (card.dataset.url ?? "").replace(/\/+$/, "").toLowerCase();
-          if (u) parkedByUrl.set(u, bvId);
-          void invoke("pv_visible", { id: bvId, on: false }).catch(() => {});
-        } else {
-          void invoke("pv_close", { id: bvId }).catch(() => {});
+        /* every tab's engine: parked → hidden + re-claimable by url;
+         * deleted → closed for real */
+        for (const t of tabs) {
+          if (!t.bv) continue;
+          if (card.dataset.park) {
+            if (t.url) parkedByUrl.set(normU(t.url), t.bv);
+            void invoke("pv_visible", { id: t.bv, on: false }).catch(() => {});
+          } else {
+            void invoke("pv_close", { id: t.bv }).catch(() => {});
+          }
+          liveTabs.delete(t.bv);
         }
-        liveTabs.delete(bvId);
         for (const u of unlistens) void u.then((f) => f()).catch(() => {});
       }
       return;
@@ -848,7 +940,8 @@ export function wireBrowser(card: HTMLElement) {
     paintView();
     bar.querySelector('[data-a="mode"]')?.classList.toggle("on", live);
     if (!live) void invoke("pv_visible", { id: bvId, on: false }).catch(() => {});
-    else pvSync();
+    else if (bvId) pvSync();
+    else if (cur().url) void nav(cur().url, false).then(say); // engine evicted — rebuild
   };
   paintView();
   renderTabs();
@@ -911,14 +1004,13 @@ export function wireBrowser(card: HTMLElement) {
       w: Math.round(r.width * d), h: Math.round(r.height * d),
     });
   };
-  /* the engine is SHARED across tabs — a switch/new/close leaves the old
-   * page in it, and its late events (youtube's SPA navs, title churn,
-   * delayed loads) would stamp that old page's url/title into the tab we
-   * just switched TO — visually "going back". leaveTo() starts a short
-   * suppression window; stalePv() filters the departing page's events. */
+  /* in-tab navigation on the ACTIVE engine: the old page's late events
+   * (title churn, delayed loads, a just-in-flight redirect) would stamp
+   * back over the page we asked for. leaveTo() starts a short suppression
+   * window; stalePv() filters the departing page's events. */
   let switchAt = 0;
   let leaveUrl = "";
-  let expectUrl = ""; // "" = the engine is being sent to about:blank
+  let expectUrl = "";
   const noTrail = (u: string) => u.replace(/\/+$/, "");
   const leaveTo = (target: string) => {
     leaveUrl = card.dataset.url ?? cur().url;
@@ -928,15 +1020,6 @@ export function wireBrowser(card: HTMLElement) {
   const stalePv = (u: string) =>
     Date.now() - switchAt < 900 &&
     (expectUrl ? noTrail(u) === noTrail(leaveUrl) : u !== "about:blank");
-  /* blank tab targets: actually unload the old page so it can't keep
-   * emitting — the surface hides anyway and youtube audio dies too */
-  const blankEngine = () => {
-    leaveTo("");
-    void invoke("pv_eval", {
-      id: bvId,
-      js: "location.href='about:blank';'blank'",
-    }).catch(() => {});
-  };
   const nav = async (input: string, push: boolean): Promise<string> => {
     const url = toUrl(input);
     if (!url) return "empty address";
@@ -948,6 +1031,16 @@ export function wireBrowser(card: HTMLElement) {
     // it, and repaint so the new-tab placeholder drops out of live mode
     cur().url = url;
     paintView();
+    /* a tab with no engine yet gets one on first nav — engines are lazy
+     * so blank tabs cost nothing. Budget check first: past the cap, the
+     * oldest background engine dies instead */
+    if (liveOn && !cur().bv) {
+      evictIdle();
+      cur().bv = genBv();
+      bvId = cur().bv;
+      card.dataset.bv = bvId;
+      claimEng(bvId);
+    }
     // the real engine opens immediately — XFO/walls can't touch it; the
     // fetch lane runs in parallel for the AI's text + the reader view
     if (liveOn) {
@@ -1027,27 +1120,42 @@ export function wireBrowser(card: HTMLElement) {
     const u = listen?.call(window.__TAURI__?.event, ev, cb);
     if (u) unlistens.push(u as Promise<() => void>);
   };
+  /* every engine event carries its engine id — route it to the OWNING
+   * tab. A background tab's events (autoplay nav, title churn) update
+   * its own state; only the active tab's events touch the card chrome */
+  const ownTab = (id: string) => {
+    const ti = tabs.findIndex((t) => t.bv === id);
+    return ti < 0 ? null : { t: tabs[ti], act: ti === active };
+  };
   on("pv:nav", (e: { payload: any }) => {
     const pay = e.payload;
-    if (!pay || pay.id !== bvId || !card.isConnected || !pay.url) return;
-    if (stalePv(pay.url)) return; // the departed page still talking
+    if (!pay || !card.isConnected || !pay.url) return;
+    const o = ownTab(pay.id);
+    if (!o) return;
+    const { t, act } = o;
+    if (act && stalePv(pay.url)) return; // the departed page still talking
     if (pay.url === "about:blank") {
-      // a blank tab's engine — keep the tab blank, don't stamp a url
-      card.dataset.url = "";
-      cur().url = "";
+      t.url = "";
+      if (act) card.dataset.url = "";
       renderTabs();
       return;
     }
     const u = pay.url;
+    t.url = u;
+    if (t.hist[t.hi] !== u) {
+      t.hist.splice(t.hi + 1);
+      t.hist.push(u);
+      t.hi = t.hist.length - 1;
+    }
+    if (!act) {
+      persistTabs();
+      renderTabs();
+      return;
+    }
     card.dataset.url = u;
-    cur().url = u;
     setLock(u);
     if (urlIn.value !== u) urlIn.value = u;
-    if (hist[hi] !== u) {
-      hist.splice(hi + 1);
-      hist.push(u);
-      hi = hist.length - 1;
-    }
+    hi = t.hi;
     syncTab();
     renderTabs();
     if (u === lastFetched) return;
@@ -1069,7 +1177,9 @@ export function wireBrowser(card: HTMLElement) {
   // real loading state — ⟳ flips to ✕ while the page loads
   on("pv:load", (e: { payload: any }) => {
     const pay = e.payload;
-    if (!pay || pay.id !== bvId || !card.isConnected) return;
+    if (!pay || !card.isConnected) return;
+    const o = ownTab(pay.id);
+    if (!o || !o.act) return;
     if (pay.url && stalePv(pay.url)) return;
     setLoading(!pay.done);
     if (pay.done && liveOn) {
@@ -1083,21 +1193,25 @@ export function wireBrowser(card: HTMLElement) {
   // real titles — js-set ones included (fetch can't see them)
   on("pv:title", (e: { payload: any }) => {
     const pay = e.payload;
-    if (!pay || pay.id !== bvId || !card.isConnected || !pay.title) return;
+    if (!pay || !card.isConnected || !pay.title) return;
+    const o = ownTab(pay.id);
+    if (!o) return;
     /* titles carry no url — drop every one inside the transition window;
      * the new page's own title arrives after its load */
-    if (Date.now() - switchAt < 900) return;
-    card.dataset.topic = pay.title;
-    const t = card.querySelector(".callout-title");
-    if (t) t.textContent = pay.title;
-    cur().title = pay.title;
+    if (o.act && Date.now() - switchAt < 900) return;
+    o.t.title = pay.title;
+    if (o.act) {
+      card.dataset.topic = pay.title;
+      const t = card.querySelector(".callout-title");
+      if (t) t.textContent = pay.title;
+    }
     persistTabs();
     renderTabs();
   });
   // downloads — real files land in OS Downloads; trace them
   on("pv:dl", (e: { payload: any }) => {
     const pay = e.payload;
-    if (!pay || pay.id !== bvId || !card.isConnected) return;
+    if (!pay || !ownTab(pay.id)?.act || !card.isConnected) return;
     const name = (pay.path || pay.url).split(/[\\/]/).pop() ?? "file";
     if (pay.done) {
       addActivity(`browser: downloaded ${name}${pay.ok ? "" : " (failed)"}`);
