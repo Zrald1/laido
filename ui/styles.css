@@ -1954,6 +1954,22 @@ li.todo.done .todo-box { color: var(--muted); }
   font-size: 11px; padding: 2px 5px; border-radius: 4px; flex: none;
 }
 .bb-b:hover, .bb-b.on { background: var(--bg-3); color: var(--accent); }
+.bb-exs { display: flex; gap: 2px; align-items: center; flex: none; }
+.bb-ex {
+  position: relative; width: 16px; height: 16px; padding: 0; line-height: 1;
+  font-size: 9px; font-weight: 800; color: var(--fg);
+  background: var(--bg-3); border-radius: 5px;
+}
+/* state dot: green = on, gray = off */
+.bb-ex::after {
+  content: ""; position: absolute; right: -1px; bottom: -1px;
+  width: 5px; height: 5px; border-radius: 50%;
+  background: #43a047; border: 1px solid var(--bg);
+}
+.bb-ex.off { opacity: .45; }
+.bb-ex.off::after { background: #777; }
+.bb-exmore { width: auto; padding: 0 4px; font-weight: 600; color: var(--muted); }
+.bb-exmore::after { display: none; }
 .bb-url {
   flex: 1; min-width: 60px; border: 1px solid var(--line); border-radius: 5px;
   background: var(--bg-2); color: var(--fg); font-size: 11px;
@@ -2112,6 +2128,7 @@ li.todo.done .todo-box { color: var(--muted); }
   border-radius: 5px;
 }
 .bx-row:hover { background: var(--bg-3); }
+.bx-row.off .bx-n { opacity: .45; }
 .bx-l { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; cursor: pointer; }
 .bx-n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bx-n em { font-style: normal; color: var(--muted); font-size: 10px; }

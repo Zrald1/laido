@@ -138,6 +138,7 @@ export function browserInnerHtml(): string {
     `<button class="bb-b" data-a="bm" title="save to bookmarks.laido">★</button>` +
     `<button class="bb-b" data-a="win" title="open in a real window">⧉</button>` +
     `<button class="bb-b" data-a="ext" title="extensions — chrome/firefox add-ons & page scripts">🧩</button>` +
+    `<span class="bb-exs" title="installed extensions — click a chip to turn it off/on"></span>` +
     `<button class="bb-b bb-snd" data-a="snd" hidden title="audio playing — click to mute">🔊</button>` +
     `<button class="bb-b" data-a="chat" title="ask AI about this page">✦</button>` +
     `</div>` +
@@ -1291,7 +1292,7 @@ export function wireBrowser(card: HTMLElement) {
   interface UScript {
     name: string; enabled: boolean; matches: string[]; js: string; css: string;
   }
-  interface NativeExt { id: string; name: string; version: string; desc: string }
+  interface NativeExt { id: string; name: string; version: string; desc: string; enabled: boolean }
   /* chrome-style match patterns (e.g. "*://*.youtube.com/x"): `*` becomes `.*`,
    * anything else is literal */
   const matchRe = (m: string): RegExp => {
@@ -1340,6 +1341,43 @@ export function wireBrowser(card: HTMLElement) {
   closeBtn.textContent = "×";
   extPop.append(closeBtn);
   card.append(extPop);
+  /* installed extensions get a letter chip right of 🧩 — one click on the
+   * bar turns an extension off/on without opening the panel (applies to
+   * new pages; apply ⟳ restarts the current one) */
+  const extChips = bar?.querySelector<HTMLElement>(".bb-exs");
+  const refreshExtChips = async () => {
+    if (!extChips) return;
+    const list = await invoke<NativeExt[]>("ext_list").catch(() => [] as NativeExt[]);
+    extChips.innerHTML = "";
+    for (const x of list.slice(0, 4)) {
+      const b = document.createElement("button");
+      b.className = `bb-b bb-ex${x.enabled ? "" : " off"}`;
+      b.dataset.exid = x.id;
+      b.title = `${x.name} ${x.version} — ${x.enabled ? "on (click to turn off)" : "off (click to turn on)"}`;
+      b.textContent = (x.name.trim()[0] ?? "🧩").toUpperCase();
+      extChips.append(b);
+    }
+    if (list.length > 4) {
+      const more = document.createElement("button");
+      more.className = "bb-b bb-ex bb-exmore";
+      more.dataset.x = "more";
+      more.title = `${list.length - 4} more — open the extensions panel`;
+      more.textContent = `+${list.length - 4}`;
+      extChips.append(more);
+    }
+  };
+  extChips?.addEventListener("click", async (e) => {
+    const b = (e.target as HTMLElement).closest<HTMLElement>(".bb-ex");
+    if (!b) return;
+    if (b.dataset.x === "more") { void toggleExt(true); return; }
+    const off = !b.classList.contains("off");
+    const r = await invoke<string>("ext_toggle", { id: b.dataset.exid ?? "", on: !off }).catch((x) => String(x));
+    if (typeof r === "string" && r) { say(`✕ ${r.slice(0, 80)}`); return; }
+    say(`🧩 ${b.title.split(" — ")[0]} ${off ? "off" : "on"} — applies to new pages (apply ⟳ = this page)`);
+    void refreshExtChips();
+    if (!extPop.hidden) void renderExt();
+  });
+  void refreshExtChips();
   const reopenEngine = async (): Promise<string> => {
     const r = view.getBoundingClientRect();
     const d = dpr();
@@ -1373,7 +1411,7 @@ export function wireBrowser(card: HTMLElement) {
       `<div class="bx-sec">chrome / firefox extensions — load on next page</div>` +
       (nat.length
         ? nat.map((x) =>
-            `<div class="bx-row"><span class="bx-n" title="${esc(x.desc)}">${esc(x.name)} <em>${esc(x.version)}</em></span><button class="nx-del" data-n="${esc(x.id)}" title="remove">×</button></div>`,
+            `<div class="bx-row${x.enabled ? "" : " off"}"><label class="bx-l"><input type="checkbox" class="nx-tog" data-n="${esc(x.id)}"${x.enabled ? " checked" : ""}/><span class="bx-n" title="${esc(x.desc)}">${esc(x.name)} <em>${esc(x.version)}</em></span></label><button class="nx-del" data-n="${esc(x.id)}" title="remove">×</button></div>`,
           ).join("")
         : `<div class="bx-none">none installed — open a store page in this card then press “install this page”, or upload a file</div>`) +
       `<div class="bx-actions"><input class="bx-url" placeholder="store link or .crx/.xpi url…"/><button class="bx-b" data-x="insturl">install</button></div>` +
@@ -1382,6 +1420,7 @@ export function wireBrowser(card: HTMLElement) {
     /* the × survives every re-render — always an exit, even while the
      * list is still loading */
     extPop.prepend(closeBtn);
+    void refreshExtChips(); // the toolbar chips mirror the same list
   };
   /* keep the popover inside the visible area — the card's right edge can
    * sit past the pane (resized wider than the window, narrow windows) and
@@ -1500,16 +1539,33 @@ export function wireBrowser(card: HTMLElement) {
     `document.title='laido-install::'+location.href;` +
     `},true);return'on'})()`;
   extPop.addEventListener("pointerdown", (e) => e.stopPropagation());
-  extPop.addEventListener("click", async (e) => {
+  /* checkbox toggles live on `change`, not click — the click handler's
+   * preventDefault would revert the check; change fires after the state
+   * settles (label clicks dispatch it on the control too) */
+  extPop.addEventListener("change", async (e) => {
     const el = e.target as HTMLElement;
-    e.preventDefault();
-    e.stopPropagation();
     const tog = el.closest<HTMLInputElement>(".bx-tog");
     if (tog) {
       await invoke("us_toggle", { name: tog.dataset.n ?? "", on: tog.checked }).catch(() => {});
       say(`${tog.checked ? "enabled" : "paused"} “${tog.dataset.n}”`);
       return;
     }
+    const ntog = el.closest<HTMLInputElement>(".nx-tog");
+    if (ntog) {
+      const r = await invoke<string>("ext_toggle", { id: ntog.dataset.n ?? "", on: ntog.checked }).catch((x) => String(x));
+      if (typeof r === "string" && r) { say(`✕ ${r.slice(0, 80)}`); ntog.checked = !ntog.checked; return; }
+      say(`🧩 extension ${ntog.checked ? "on" : "off"} — applies to new pages (apply ⟳ = this page)`);
+      ntog.closest(".bx-row")?.classList.toggle("off", !ntog.checked);
+      void refreshExtChips();
+    }
+  });
+  extPop.addEventListener("click", async (e) => {
+    const el = e.target as HTMLElement;
+    /* labels/inputs: let the default toggle run (change handler takes it);
+     * preventDefault here would cancel the activation */
+    if (el.closest("input,label")) { e.stopPropagation(); return; }
+    e.preventDefault();
+    e.stopPropagation();
     const del = el.closest<HTMLElement>(".bx-del");
     if (del) {
       await invoke("us_remove", { name: del.dataset.n ?? "" }).catch(() => {});

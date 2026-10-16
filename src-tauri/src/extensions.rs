@@ -24,6 +24,16 @@ pub fn ext_root(app: &AppHandle) -> PathBuf {
         .join("extensions")
 }
 
+/* WebView2's extensions_path loads EVERY dir under ext_root — there is
+ * no per-extension enabled flag at that api level. So "disabled" lives
+ * in a sibling dir the loader never scans; toggling is a rename. */
+fn ext_root_off(app: &AppHandle) -> PathBuf {
+    app.path()
+        .app_data_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("extensions-disabled")
+}
+
 fn script_root(app: &AppHandle) -> PathBuf {
     ext_root(app).join("scripts")
 }
@@ -43,6 +53,7 @@ pub struct ExtInfo {
     name: String,
     version: String,
     desc: String,
+    enabled: bool,
 }
 
 #[derive(Serialize)]
@@ -99,7 +110,7 @@ fn unzip_to(buf: &[u8], dest: &Path) -> Result<String, String> {
     Ok(format!("{count} files"))
 }
 
-fn manifest_info(dir: &Path) -> Option<ExtInfo> {
+fn manifest_info(dir: &Path, enabled: bool) -> Option<ExtInfo> {
     let m: Value = serde_json::from_str(&fs::read_to_string(dir.join("manifest.json")).ok()?).ok()?;
     /* chrome i18n: store extensions write "__MSG_key__" placeholders —
      * resolve them through _locales/<default_locale>/messages.json so the
@@ -129,23 +140,47 @@ fn manifest_info(dir: &Path) -> Option<ExtInfo> {
             .chars()
             .take(120)
             .collect(),
+        enabled,
     })
 }
 
 #[tauri::command]
 pub async fn ext_list(app: AppHandle) -> Result<Vec<ExtInfo>, String> {
-    let root = ext_root(&app);
     let mut out = Vec::new();
-    if let Ok(rd) = fs::read_dir(&root) {
-        for e in rd.flatten() {
-            if e.path().is_dir() && e.file_name() != "scripts" {
-                if let Some(i) = manifest_info(&e.path()) {
-                    out.push(i);
+    for (root, enabled) in [(ext_root(&app), true), (ext_root_off(&app), false)] {
+        if let Ok(rd) = fs::read_dir(&root) {
+            for e in rd.flatten() {
+                if e.path().is_dir() && e.file_name() != "scripts" {
+                    if let Some(i) = manifest_info(&e.path(), enabled) {
+                        out.push(i);
+                    }
                 }
             }
         }
     }
     Ok(out)
+}
+
+#[tauri::command]
+pub async fn ext_toggle(app: AppHandle, id: String, on: bool) -> Result<(), String> {
+    let (from, to) = if on {
+        (ext_root_off(&app).join(&id), ext_root(&app).join(&id))
+    } else {
+        (ext_root(&app).join(&id), ext_root_off(&app).join(&id))
+    };
+    if !from.exists() {
+        return Err("extension not found".into());
+    }
+    /* webview2 writes its own _metadata into loaded ext dirs — after a
+     * disable it can leave a stub behind at the destination, and windows
+     * rename won't replace a non-empty dir. `from` is authoritative */
+    if to.exists() {
+        fs::remove_dir_all(&to).map_err(|e| e.to_string())?;
+    }
+    if let Some(par) = to.parent() {
+        fs::create_dir_all(par).map_err(|e| e.to_string())?;
+    }
+    fs::rename(&from, &to).map_err(|e| e.to_string())
 }
 
 fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
@@ -167,7 +202,7 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
 }
 
 fn install_dir(app: &AppHandle, src: &Path) -> Result<String, String> {
-    let info = manifest_info(src).ok_or("no manifest.json in that folder")?;
+    let info = manifest_info(src, true).ok_or("no manifest.json in that folder")?;
     let dest = ext_root(app).join(slug(&info.name));
     if dest.exists() {
         fs::remove_dir_all(&dest).map_err(|e| e.to_string())?;
@@ -261,9 +296,11 @@ pub async fn ext_install_url(app: AppHandle, url: String) -> Result<String, Stri
 
 #[tauri::command]
 pub async fn ext_remove(app: AppHandle, id: String) -> Result<(), String> {
-    let d = ext_root(&app).join(&id);
-    if d.exists() {
-        fs::remove_dir_all(&d).map_err(|e| e.to_string())?;
+    for root in [ext_root(&app), ext_root_off(&app)] {
+        let d = root.join(&id);
+        if d.exists() {
+            fs::remove_dir_all(&d).map_err(|e| e.to_string())?;
+        }
     }
     Ok(())
 }

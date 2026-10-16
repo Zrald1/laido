@@ -217,6 +217,7 @@ fn main() {
             extensions::ext_install_path,
             extensions::ext_install_url,
             extensions::ext_remove,
+            extensions::ext_toggle,
             extensions::us_list,
             extensions::us_save,
             extensions::us_toggle,
