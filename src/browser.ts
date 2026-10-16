@@ -221,7 +221,12 @@ const AUD_JS =
   `return JSON.stringify({n:ms.length,` +
   `playing:ms.some(m=>!m.paused&&!m.ended&&(m.readyState>1||m.currentTime>0)),` +
   `muted:ms.length?ms.every(m=>m.muted||m.volume===0):false,` +
-  `t:document.title||''})})()`;
+  `t:document.title||'',u:location.href})})()`;
+/* SPA navigations (youtube video clicks, any pushState routing) never
+ * fire pv:nav — so a tab left on a SPA keeps its FIRST url and switching
+ * back reloads the wrong page. Every wired card registers a tracker the
+ * audio tick feeds the engine's real location.href/document.title into. */
+const liveTabs = new Map<string, (u: string, title: string) => void>();
 const MUTE_JS = (on: boolean) =>
   `[...document.querySelectorAll('video,audio')].forEach(m=>{m.muted=${on}});'${on ? "muted" : "unmuted"}'`;
 
@@ -302,8 +307,14 @@ const startAudioPoll = () => {
       const s = await invoke<string>("pv_eval", { id, js: AUD_JS }).catch(() => "");
       if (!s) continue;
       try {
-        const st = JSON.parse(JSON.parse(s)) as { playing: boolean; muted: boolean; t: string };
+        const st = JSON.parse(JSON.parse(s)) as {
+          playing: boolean;
+          muted: boolean;
+          t: string;
+          u?: string;
+        };
         audioPv.set(id, { playing: st.playing, muted: st.muted, title: st.t });
+        if (st.u) liveTabs.get(id)?.(st.u, st.t);
       } catch { /* odd page state — skip this tick */ }
     }
     for (const id of [...audioPv.keys()]) if (!ids.includes(id)) audioPv.delete(id);
@@ -420,6 +431,68 @@ export function wireBrowser(card: HTMLElement) {
     t.title = card.dataset.topic ?? t.title;
     persistTabs();
   };
+  /* pushState/SPA navigations never fire pv:nav — stamp the engine's
+   * REAL location into the active tab whenever the poll spots a drift,
+   * so the tab stores the page the user actually sees. Mirrors pv:nav. */
+  const liveTrack = (u: string, title: string) => {
+    if (!liveOn || Date.now() - switchAt < 900) return; // engine isn't truth
+    if (u && u !== "about:blank" && u !== cur().url) {
+      cur().url = u;
+      card.dataset.url = u;
+      setLock(u);
+      if (urlIn.value !== u) urlIn.value = u;
+      if (hist[hi] !== u) {
+        hist.splice(hi + 1);
+        hist.push(u);
+        hi = hist.length - 1;
+      }
+      persistTabs();
+      renderTabs();
+      onChange();
+    }
+    if (title && title !== cur().title) {
+      cur().title = title;
+      card.dataset.topic = title;
+      const el = card.querySelector(".callout-title");
+      if (el) el.textContent = title;
+      renderTabs();
+    }
+  };
+  /* same capture, synchronous-ish, run right before leaving a tab so its
+   * stored url is the page the engine is really on — even if the user
+   * switched within a poll tick of clicking a SPA link */
+  const seizeLive = async () => {
+    if (!liveOn) {
+      syncTab();
+      return;
+    }
+    try {
+      const s = await invoke<string>("pv_eval", {
+        id: bvId,
+        js: "JSON.stringify({u:location.href,t:document.title})",
+      });
+      const p = s
+        ? (JSON.parse(JSON.parse(s)) as { u?: string; t?: string })
+        : null;
+      if (p?.u && p.u !== "about:blank" && p.u !== cur().url) {
+        cur().url = p.u;
+        card.dataset.url = p.u;
+        if (hist[hi] !== p.u) {
+          hist.splice(hi + 1);
+          hist.push(p.u);
+          hi = hist.length - 1;
+        }
+      }
+      if (p?.t) {
+        cur().title = p.t;
+        card.dataset.topic = p.t;
+      }
+    } catch {
+      /* engine mid-nav or dead — keep last-known state */
+    }
+    syncTab();
+  };
+  liveTabs.set(bvId, liveTrack);
   const renderTabs = () => {
     if (!strip) return;
     strip.innerHTML =
@@ -520,13 +593,13 @@ export function wireBrowser(card: HTMLElement) {
     reader.style.display = !liveOn || !cur().url ? "" : "none";
     if (!cur().url) showBlank();
   };
-  const switchTab = (i: number, fromUi = false): Promise<string> | string => {
+  const switchTab = async (i: number, fromUi = false): Promise<string> => {
     if (i < 0 || i >= tabs.length) return `✕ no tab ${i + 1} — ${tabs.length} open`;
     if (i === active) {
       if (fromUi) refocusField(urlIn);
       return `already on tab ${i + 1}`;
     }
-    syncTab();
+    await seizeLive();
     active = i;
     const t = cur();
     hist = t.hist;
@@ -547,9 +620,9 @@ export function wireBrowser(card: HTMLElement) {
     refocusField(urlIn);
     return "new tab";
   };
-  const newTab = (input?: string): Promise<string> | string => {
+  const newTab = async (input?: string): Promise<string> => {
     const url = input ? toUrl(input) : "";
-    syncTab();
+    await seizeLive();
     tabs.push({ url, title: "", hist: [], hi: -1 });
     active = tabs.length - 1;
     hist = cur().hist;
@@ -708,6 +781,7 @@ export function wireBrowser(card: HTMLElement) {
         } else {
           void invoke("pv_close", { id: bvId }).catch(() => {});
         }
+        liveTabs.delete(bvId);
         for (const u of unlistens) void u.then((f) => f()).catch(() => {});
       }
       return;
