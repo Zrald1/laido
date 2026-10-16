@@ -223,7 +223,7 @@ let pvSeq = 0;
  * #aud-pill on the titlebar — one click mutes it. mutedPv remembers the
  * intent per engine so fresh page loads re-mute themselves. */
 const mutedPv = new Set<string>();
-const audioPv = new Map<string, { playing: boolean; muted: boolean; title: string }>();
+const audioPv = new Map<string, { playing: boolean; muted: boolean; title: string; warm: boolean }>();
 /* engine → the note its card lived in — stamped by enhanceCard into
  * dataset.note, refreshed on every claim so a re-parked engine always
  * reports to the right tab (drives the note-tab 🔊 indicator) */
@@ -236,6 +236,10 @@ const AUD_JS =
   `(()=>{const ms=[...document.querySelectorAll('video,audio')];` +
   `return JSON.stringify({n:ms.length,` +
   `playing:ms.some(m=>!m.paused&&!m.ended&&(m.readyState>1||m.currentTime>0)),` +
+  /* warm — media that has started (currentTime>0) but is now paused:
+   * resumable from the note-tab ▶ button; a never-started page earns
+   * no beacon */
+  `warm:ms.some(m=>m.currentTime>0&&!m.ended),` +
   `muted:ms.length?ms.every(m=>m.muted||m.volume===0):false,` +
   `t:document.title||'',u:location.href})})()`;
 /* SPA navigations (youtube video clicks, any pushState routing) never
@@ -334,10 +338,11 @@ const startAudioPoll = () => {
           const st = JSON.parse(JSON.parse(s)) as {
             playing: boolean;
             muted: boolean;
+            warm?: boolean;
             t: string;
             u?: string;
           };
-          audioPv.set(id, { playing: st.playing, muted: st.muted, title: st.t });
+          audioPv.set(id, { playing: st.playing, muted: st.muted, title: st.t, warm: st.warm ?? st.playing });
           if (st.u) liveTabs.get(id)?.(st.u, st.t);
         } catch { /* odd page state — skip this engine */ }
       }),
@@ -346,28 +351,57 @@ const startAudioPoll = () => {
       if (!ids.includes(id)) { audioPv.delete(id); engineNote.delete(id); }
     renderAudioPill();
     paintSndButtons();
-    /* note-tab 🔊: which notes own a playing engine — tabs.ts paints the
-     * icon so a song parked in the background can be found and returned
-     * to in one click */
-    const noteAudio = new Map<string, { titles: string[]; muted: boolean }>();
-    for (const [id, a] of audioPv) {
-      if (!a.playing) continue;
-      const note = engineNote.get(id);
-      if (!note) continue;
-      const n = noteAudio.get(note) ?? { titles: [], muted: true };
-      n.titles.push(a.title || "media");
-      if (!a.muted) n.muted = false;
-      noteAudio.set(note, n);
-    }
-    document.dispatchEvent(
-      new CustomEvent("nav:audio", { detail: [...noteAudio.entries()] }),
-    );
+    broadcastNoteAudio();
   }, 2000);
 };
+/* note-tab media beacon: notes owning a live or resumable engine —
+ * tabs.ts paints ⏸ (playing, click pauses) or ▶ (paused, click
+ * resumes); the tab title still navigates */
+const broadcastNoteAudio = () => {
+  const noteAudio = new Map<string, { titles: string[]; muted: boolean; playing: boolean }>();
+  for (const [id, a] of audioPv) {
+    if (!a.playing && !a.warm) continue;
+    const note = engineNote.get(id);
+    if (!note) continue;
+    const n = noteAudio.get(note) ?? { titles: [], muted: true, playing: false };
+    n.titles.push(a.title || "media");
+    if (!a.muted) n.muted = false;
+    if (a.playing) n.playing = true;
+    noteAudio.set(note, n);
+  }
+  document.dispatchEvent(
+    new CustomEvent("nav:audio", { detail: [...noteAudio.entries()] }),
+  );
+};
+
 /* run unconditionally — orphan engines can exist on notes with zero live
  * browser cards (deleted note, crash, stale park), and only the sweep
  * hides them */
 startAudioPoll();
+
+/* the note-tab ⏸/▶ beacon: pause every playing engine owned by that
+ * note, or resume+unmute when it's all quiet — real playback control,
+ * not just a marker (tabs.ts can't import this module, hence the event) */
+document.addEventListener("nav:audiotoggle", (e) => {
+  const note = (e as CustomEvent<string>).detail;
+  if (!note) return;
+  const ids = [...engineNote.entries()].filter(([, n]) => n === note).map(([id]) => id);
+  const anyPlaying = ids.some((id) => audioPv.get(id)?.playing);
+  const js = anyPlaying
+    ? `[...document.querySelectorAll('video,audio')].forEach(m=>{try{m.pause()}catch(_){}})`
+    : `[...document.querySelectorAll('video,audio')].forEach(m=>{try{m.muted=false;if(m.volume===0)m.volume=.8;const p=m.play();p&&p.catch?p.catch(()=>{}):0}catch(_){}})`;
+  for (const id of ids) {
+    void invoke("pv_eval", { id, js }).catch(() => {});
+    /* flip the beacon now — the 2s tick lands the authoritative state */
+    const a = audioPv.get(id);
+    if (a) {
+      a.playing = !anyPlaying && a.warm;
+      if (!anyPlaying) a.muted = false;
+    }
+  }
+  paintSndButtons();
+  broadcastNoteAudio();
+});
 
 export function wireBrowser(card: HTMLElement) {
   if (!card?.dataset) return;

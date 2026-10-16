@@ -59,10 +59,11 @@ function persist() {
   localStorage.setItem(KEY, JSON.stringify({ tabs: tabs.filter((n) => typeof n === "string" && n), active }));
 }
 
-/* note → audio playing in its parked browser engines — browser.ts's
- * audio tick broadcasts nav:audio; a 🔊 on the tab means "this note is
- * still making sound — click it to go back" */
-let noteAudio = new Map<string, { titles: string[]; muted: boolean }>();
+/* note → media state in its parked browser engines — browser.ts's audio
+ * tick broadcasts nav:audio; the tab shows ⏸ (click pauses) or ▶ (click
+ * resumes), and nav:audiotoggle asks browser.ts to flip playback. The
+ * TITLE still navigates — only the icon is the transport control */
+let noteAudio = new Map<string, { titles: string[]; muted: boolean; playing: boolean }>();
 
 function paintSnd() {
   document.querySelectorAll<HTMLElement>("#tabs .tab").forEach((t) => {
@@ -76,10 +77,16 @@ function paintSnd() {
     if (!ic) {
       ic = document.createElement("span");
       ic.className = "tab-snd";
+      ic.addEventListener("click", (e) => {
+        e.stopPropagation(); // transport only — never navigates
+        document.dispatchEvent(new CustomEvent("nav:audiotoggle", { detail: name }));
+      });
       t.insertBefore(ic, t.querySelector(".tab-close"));
     }
-    ic.textContent = info.muted ? "🔇" : "🔊";
-    ic.title = `playing: ${info.titles.join(" · ")} — click to return`;
+    ic.textContent = info.playing ? "⏸" : "▶";
+    ic.title = info.playing
+      ? `playing: ${info.titles.join(" · ")} — click to pause`
+      : `paused: ${info.titles.join(" · ")} — click to resume`;
   });
 }
 
@@ -105,7 +112,7 @@ function render() {
     t.addEventListener("click", () => void select(name));
     let dragFrom: { x: number; y: number } | null = null;
     t.addEventListener("pointerdown", (e) => {
-      if ((e.target as HTMLElement).closest(".tab-close")) return;
+      if ((e.target as HTMLElement).closest(".tab-close, .tab-snd")) return;
       dragFrom = { x: e.clientX, y: e.clientY };
       t.setPointerCapture(e.pointerId);
     });
@@ -196,7 +203,7 @@ document.addEventListener("nav:open", (e) => {
 
 document.addEventListener("nav:audio", (e) => {
   noteAudio = new Map(
-    (e as CustomEvent<[string, { titles: string[]; muted: boolean }][]>).detail,
+    (e as CustomEvent<[string, { titles: string[]; muted: boolean; playing: boolean }][]>).detail,
   );
   paintSnd();
 });

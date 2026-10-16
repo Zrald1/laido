@@ -80,9 +80,14 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   font-size: 12px; color: var(--muted); flex: none;
 }
 .tab-close:hover { background: var(--bad); color: #fff; }
-/* parked media beacon — a browser engine in this note is still playing;
- * tiny fixed chip so it never reshapes the tab */
-.tab-snd { font-size: 10px; flex: none; line-height: 1; }
+/* parked media beacon — a browser engine in this note holds live or
+ * resumable media; ⏸/▶ is a real transport (pause/resume), the tab
+ * title still navigates */
+.tab-snd {
+  font-size: 9px; flex: none; line-height: 1; cursor: pointer;
+  padding: 2px 3px; border-radius: 5px; color: var(--accent);
+}
+.tab-snd:hover { background: var(--bg-3); }
 #new-tab {
   align-self: flex-end; width: 28px; height: 28px; margin: 0 0 7px 4px;
   border-radius: 8px; color: var(--muted); font-size: 16px; flex: none;
