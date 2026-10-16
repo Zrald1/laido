@@ -1225,6 +1225,18 @@ export function wireBrowser(card: HTMLElement) {
     if (!pay || !card.isConnected || !pay.title) return;
     const o = ownTab(pay.id);
     if (!o) return;
+    /* store pages flag install clicks through the title channel — the
+     * store's own "add to chrome" flow can't finish inside an embedded
+     * webview, so the hook asks us to run our real install lane */
+    if (pay.title.startsWith("laido-install::")) {
+      const url = pay.title.slice("laido-install::".length);
+      void invoke<string>("pv_eval", {
+        id: pay.id,
+        js: "if(window.__laidoKeepT)document.title=window.__laidoKeepT;'r'",
+      }).catch(() => {});
+      void installFromStore(url);
+      return;
+    }
     /* titles carry no url — drop every one inside the transition window;
      * the new page's own title arrives after its load */
     if (o.act && Date.now() - switchAt < 900) return;
@@ -1245,6 +1257,10 @@ export function wireBrowser(card: HTMLElement) {
     if (pay.done) {
       addActivity(`browser: downloaded ${name}${pay.ok ? "" : " (failed)"}`);
       say(pay.ok ? `downloaded ${name}` : `download failed — ${name}`);
+      /* a finished .crx/.xpi IS an extension — install it straight into
+       * the profile rather than leaving it inert in Downloads */
+      if (pay.ok && pay.path && /\.(crx|xpi)$/i.test(name))
+        void installFromPath(pay.path);
     } else {
       addActivity(`browser: downloading ${pay.url}`);
       say(`downloading ${name}…`);
@@ -1266,6 +1282,11 @@ export function wireBrowser(card: HTMLElement) {
    * per page (window flag guards re-entry on soft navigations) */
   const injectScripts = async (url: string) => {
     if (!url || !liveOn) return;
+    /* store pages get the install-click hook so "add to chrome/firefox"
+     * routes to our install lane instead of dying on the page's own
+     * download machinery */
+    if (/chromewebstore\.google\.com|addons\.mozilla\.org/.test(url))
+      void invoke<string>("pv_eval", { id: bvId, js: STORE_HOOK_JS }).catch(() => {});
     const scripts = await invoke<UScript[]>("us_list").catch(() => [] as UScript[]);
     for (const sc of scripts) {
       if (!sc.enabled) continue;
@@ -1386,6 +1407,45 @@ export function wireBrowser(card: HTMLElement) {
       fitExt();
     }
   };
+  /* a store-page click or an extension download resolved to a real
+   * install — show the payoff: status + the panel listing it */
+  const installFromStore = async (url: string) => {
+    say("installing extension…");
+    const n = await invoke<string>("ext_install_url", { url })
+      .catch((e) => `✕ ${String(e).slice(0, 110)}`);
+    if (n.startsWith("✕")) { say(n); return; }
+    say(`🧩 “${n}” installed — loads into new pages (⟳ apply = now)`);
+    addActivity(`browser: installed extension “${n}”`);
+    void toggleExt(true);
+  };
+  const installFromPath = async (path: string) => {
+    const n = await invoke<string>("ext_install_path", { path })
+      .catch((e) => `✕ ${String(e).slice(0, 110)}`);
+    if (n.startsWith("✕")) { say(n); return; }
+    say(`🧩 “${n}” installed from ${path.split(/[\\/]/).pop()} — ⟳ apply loads it`);
+    addActivity(`browser: installed extension “${n}”`);
+    void toggleExt(true);
+  };
+  /* injected into store pages: their install button runs the browser's
+   * own add-to-chrome machinery — which doesn't exist here, so the page
+   * just reports "download interrupted". Capture the click and flag the
+   * host through document.title → pv:title → our real install lane. */
+  const STORE_HOOK_JS =
+    `(()=>{if(window.__laidoInst)return'have';window.__laidoInst=1;` +
+    `document.addEventListener('click',(e)=>{` +
+    `const el=e.target&&e.target.closest?e.target.closest('button,a,[role="button"],[role="link"]'):null;` +
+    `if(!el)return;const host=location.hostname;` +
+    `const cws=host==='chromewebstore.google.com';` +
+    `const amo=host==='addons.mozilla.org';` +
+    `if(!cws&&!amo)return;` +
+    `const txt=((el.innerText||'')+' '+(el.getAttribute('aria-label')||'')+' '+(el.title||'')).toLowerCase();` +
+    `const cls=String(el.className||'').toLowerCase();` +
+    `const hit=(cws&&/add to chrome|install/.test(txt))||` +
+    `(amo&&(/add to firefox|install/.test(txt)||/installbutton|button--download/.test(cls)));` +
+    `if(!hit)return;e.preventDefault();e.stopImmediatePropagation();` +
+    `window.__laidoKeepT=document.title;` +
+    `document.title='laido-install::'+location.href;` +
+    `},true);return'on'})()`;
   extPop.addEventListener("pointerdown", (e) => e.stopPropagation());
   extPop.addEventListener("click", async (e) => {
     const el = e.target as HTMLElement;

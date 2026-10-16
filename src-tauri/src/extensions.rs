@@ -101,11 +101,34 @@ fn unzip_to(buf: &[u8], dest: &Path) -> Result<String, String> {
 
 fn manifest_info(dir: &Path) -> Option<ExtInfo> {
     let m: Value = serde_json::from_str(&fs::read_to_string(dir.join("manifest.json")).ok()?).ok()?;
+    /* chrome i18n: store extensions write "__MSG_key__" placeholders —
+     * resolve them through _locales/<default_locale>/messages.json so the
+     * panel shows "AdBlock" instead of a placeholder slug */
+    let msgs: Option<Value> = m["default_locale"].as_str().and_then(|loc| {
+        fs::read_to_string(dir.join("_locales").join(loc).join("messages.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+    });
+    let resolve = |s: &str| -> String {
+        let Some(k) = s.strip_prefix("__MSG_").and_then(|x| x.strip_suffix("__")) else {
+            return s.to_string();
+        };
+        // message keys are case-insensitive in chrome's lookup
+        msgs.as_ref()
+            .and_then(|mm| mm.as_object())
+            .and_then(|o| o.iter().find(|(k2, _)| k2.eq_ignore_ascii_case(k)).map(|(_, v)| v))
+            .and_then(|e| e["message"].as_str())
+            .unwrap_or(s)
+            .to_string()
+    };
     Some(ExtInfo {
         id: dir.file_name()?.to_string_lossy().to_string(),
-        name: m["name"].as_str().unwrap_or("extension").to_string(),
+        name: resolve(m["name"].as_str().unwrap_or("extension")),
         version: m["version"].as_str().unwrap_or("").to_string(),
-        desc: m["description"].as_str().unwrap_or("").chars().take(120).collect(),
+        desc: resolve(m["description"].as_str().unwrap_or(""))
+            .chars()
+            .take(120)
+            .collect(),
     })
 }
 
