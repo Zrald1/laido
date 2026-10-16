@@ -887,6 +887,8 @@ export function wireBrowser(card: HTMLElement) {
       if (++deadTicks >= 2) {
         window.clearInterval(pvTimer);
         ro.disconnect();
+        extResize.disconnect();
+        window.removeEventListener("resize", extWinFit);
         if (fsOn) setFs(false); // a dead card can't hold fullscreen
         /* every tab's engine: parked → hidden + re-claimable by url;
          * deleted → closed for real */
@@ -1331,10 +1333,11 @@ export function wireBrowser(card: HTMLElement) {
       `<div class="bx-actions"><button class="bx-b" data-x="instpage">install this page</button><button class="bx-b" data-x="natup">upload .crx/.xpi/.zip/folder</button><button class="bx-b" data-x="apply">apply ⟳</button></div>` +
       `<div class="bx-actions"><button class="bx-b" data-x="cws">⌕ chrome store</button><button class="bx-b" data-x="amo">🦊 firefox add-ons</button></div>`;
   };
-  /* keep the popover inside the visible note area — the card's right edge
-   * can sit at/past the pane edge (resized cards, narrow windows), and a
-   * `right:6px` anchor would clip the panel against overflow:hidden
-   * ancestors. Clamp to #note-body's client box instead */
+  /* keep the popover inside the visible area — the card's right edge can
+   * sit past the pane (resized wider than the window, narrow windows) and
+   * a `right:6px` anchor clips against overflow:hidden ancestors. Bound
+   * to #note-body ∩ the viewport — the window edge is the ultimate clip.
+   * Runs on open AND every card/window resize while visible. */
   const fitExt = () => {
     extPop.style.right = "";
     extPop.style.left = "";
@@ -1342,7 +1345,13 @@ export function wireBrowser(card: HTMLElement) {
     extPop.style.width = "";
     extPop.style.maxHeight = "";
     const clipEl = card.closest<HTMLElement>("#note-body") ?? document.body;
-    const clip = clipEl.getBoundingClientRect();
+    const clr = clipEl.getBoundingClientRect();
+    const clip = {
+      left: Math.max(clr.left, 0),
+      right: Math.min(clr.right, window.innerWidth),
+      top: Math.max(clr.top, 0),
+      bottom: Math.min(clr.bottom, window.innerHeight),
+    };
     const cr = card.getBoundingClientRect();
     let pr = extPop.getBoundingClientRect();
     if (pr.right > clip.right - 6) {
@@ -1360,11 +1369,20 @@ export function wireBrowser(card: HTMLElement) {
     const room = clip.bottom - pr.top - 8;
     if (room < 380) extPop.style.maxHeight = `${Math.max(120, room)}px`;
   };
+  /* re-fit whenever geometry changes while open — card resizes/drags and
+   * window resizes can each shove the anchor point off-screen */
+  const extResize = new ResizeObserver(() => {
+    if (!extPop.hidden) fitExt();
+  });
+  extResize.observe(card);
+  const extWinFit = () => { if (!extPop.hidden) fitExt(); };
+  window.addEventListener("resize", extWinFit);
   const toggleExt = async (on: boolean) => {
     extPop.hidden = !on;
     bar.querySelector('[data-a="ext"]')?.classList.toggle("on", on);
     if (on) {
-      await renderExt();
+      fitExt();
+      await renderExt().catch(() => {});
       fitExt();
     }
   };
