@@ -349,8 +349,17 @@ function clickAndType(e: MouseEvent) {
   }
   const cur = window.getSelection()?.getRangeAt(0) ?? range;
   const rects = cur.getClientRects();
-  const caretX = rects[rects.length - 1]?.left;
-  if (caretX == null || e.clientX <= caretX + 4) return;
+  // an empty block's caret is element-anchored and reports no rect — measure
+  // from the block's content-left edge so blank lines can still be padded
+  // out to the clicked x
+  let caretX = rects[rects.length - 1]?.left;
+  if (caretX == null) {
+    const cs = getComputedStyle(block);
+    caretX =
+      block.getBoundingClientRect().left +
+      (parseFloat(cs.paddingLeft) + parseFloat(cs.borderLeftWidth)) * Z();
+  }
+  if (e.clientX <= caretX + 4) return;
   const dx = (e.clientX - caretX) / Z();
   const n = Math.max(1, Math.round(dx / nbspWidth(block)));
   const pad = document.createTextNode("\u00a0".repeat(n));
@@ -4942,8 +4951,31 @@ export function initEditor() {
     markEdited();
     const caret = el.lastElementChild as HTMLElement | null;
     if (caret) {
-      placeCaretAtEnd(caret);
+      // horizontal placement too: park at the line's content-left edge, then
+      // pad nbsp out to the clicked x — the mouseup pad can't rely on the
+      // hit test retargeting to a line that didn't exist at mousedown
+      const cs = getComputedStyle(caret);
+      const startX =
+        caret.getBoundingClientRect().left +
+        (parseFloat(cs.paddingLeft) + parseFloat(cs.borderLeftWidth)) * Z();
+      const dx = (e.clientX - startX) / Z();
+      if (dx > 4) {
+        caret.textContent = "";
+        const pad = document.createTextNode(
+          " ".repeat(Math.max(1, Math.round(dx / nbspWidth(caret)))),
+        );
+        caret.append(pad);
+        const r3 = document.createRange();
+        r3.setStartAfter(pad);
+        r3.collapse(true);
+        const sel3 = window.getSelection();
+        sel3?.removeAllRanges();
+        sel3?.addRange(r3);
+      } else {
+        placeCaretAtEnd(caret);
+      }
       caret.scrollIntoView({ block: "nearest" });
+      el.focus();
     }
   });
 
