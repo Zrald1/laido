@@ -7,7 +7,7 @@ import { wireTerminal } from "./term.js";
 import { buildSheetCard, wireSheet } from "./sheet.js";
 import { buildDeckCard, wireDeck } from "./slides.js";
 import { buildTodoCard, wireTodo } from "./todo.js";
-import { buildBrowserCard, wireBrowser, toUrl } from "./browser.js";
+import { buildBrowserCard, wireBrowser, browserApi, toUrl } from "./browser.js";
 import { buildCardsCard, wireCards } from "./cards.js";
 import { buildMapCard, wireMap } from "./map.js";
 import { buildAgendaCard, wireAgenda, speakDigest } from "./agenda.js";
@@ -5804,7 +5804,19 @@ export function initEditor() {
     const inCard = !!card;
     if (inCard || e.ctrlKey) {
       e.preventDefault();
-      void invoke("open_url", { url: a.dataset.url });
+      const url = a.dataset.url ?? "";
+      if (!/^https?:\/\//i.test(url)) return;
+      // note links open in the app's real browser — never the OS browser
+      const open = Array.from(document.querySelectorAll<HTMLElement>(".browser-card")).find(
+        (c) => browserApi(c),
+      );
+      if (open) {
+        void browserApi(open)!.navigate(url);
+        open.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        open.style.zIndex = String(++genZ);
+      } else {
+        spawnBrowserCard(url.split("/")[2] ?? "browser", url);
+      }
     }
   });
 

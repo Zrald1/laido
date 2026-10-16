@@ -918,14 +918,15 @@ const browserTool = async (body: string): Promise<string> => {
     const card = findBrowser(rest);
     if (card) {
       const api = browserApi(card)!;
-      const text = api.read();
+      let text = await api.readLive();
+      if (!text) text = api.read();
       if (!text) {
         // card exists but hasn't fetched yet — navigate+read it now
         const u = api.url();
         if (!u) return `✕ browser "${api.title()}" has no page`;
         await api.navigate(u);
       }
-      const txt = api.read();
+      const txt = (await api.readLive()) || api.read();
       return txt
         ? `browser "${api.title()}" (${api.url()}) — page text:\n${txt.slice(0, 12000)}`
         : `✕ no page text on "${api.title()}"`;
@@ -995,6 +996,172 @@ const browserTool = async (body: string): Promise<string> => {
       links.slice(0, 40).map(([t, u]) => `${t} → ${u}`).join("\n");
   }
 
+  // eval <title> <js> — run js inside the live page; JSON result back.
+  // the AI's hands: form fills, button clicks, dom reads beyond text.
+  if (verb === "eval" || verb === "js") {
+    const sp = rest.split(/\s+/);
+    let card = findBrowser(rest);
+    let js = rest;
+    if (!card) {
+      for (let i = sp.length - 1; i > 0; i--) {
+        card = findBrowser(sp.slice(0, i).join(" "));
+        if (card) { js = sp.slice(i).join(" "); break; }
+      }
+    } else {
+      // title matched the whole rest only if there's no js after it
+      const t = (card.dataset.topic ?? "").toLowerCase();
+      const i = rest.toLowerCase().indexOf(t);
+      js = i >= 0 ? rest.slice(i + t.length).trim() : rest;
+    }
+    if (!card) return `✕ no browser found named "${rest.split(/\s+/)[0] || "?"}"`;
+    if (!js) return "✕ eval needs javascript — eval <title> <js>";
+    try {
+      const out = await browserApi(card)!.eval(js);
+      const s = typeof out === "string" ? out : JSON.stringify(out);
+      return `eval on "${card.dataset.topic}" → ${s.slice(0, 4000)}`;
+    } catch (e) {
+      return `✕ eval failed: ${String(e)}`;
+    }
+  }
+
+  /* ---------- the AI's web data-gathering lane ----------
+   * the real engine means every site renders — these verbs turn live DOM
+   * into formatted data the model can reason about or push into widgets */
+
+  // search <query> — clean title→url hits; the discovery lane
+  if (verb === "search" || verb === "find") {
+    if (!rest) return "✕ search needs a query";
+    const p = await invoke<{ links: [string, string][] }>("page_fetch", {
+      url: `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(rest)}`,
+    }).catch((e) => ({ links: [] as [string, string][], err: String(e) }));
+    // ddg wraps every hit as /l/?uddg=<encoded-target> — unwrap to the
+    // real destination so the agent gets urls it can open directly
+    const hits = (p.links ?? [])
+      .map(([t, u]) => {
+        const m = u.match(/[?&]uddg=([^&]+)/);
+        return [t, m ? decodeURIComponent(m[1]) : u] as [string, string];
+      })
+      .filter(([, u]) => u.startsWith("http"));
+    return hits.length
+      ? `search "${rest}" — ${hits.length} hits:\n` +
+          hits.slice(0, 15).map(([t, u]) => `${t} → ${u}`).join("\n")
+      : `✕ no results for "${rest}"`;
+  }
+
+  // extract <title> — the page as a structured digest: meta, json-ld,
+  // headings, forms, tables count, and the readable text — one shot
+  if (verb === "extract" || verb === "data" || verb === "digest") {
+    const card = findBrowser(rest);
+    if (!card) return `✕ no browser found named "${rest || "?"}"`;
+    const api = browserApi(card)!;
+    const d = (await api.eval(`(()=>{
+      const q=(s,a)=>document.querySelector(s)?.${""}[a]??"";
+      const heads=[...document.querySelectorAll("h1,h2,h3")].slice(0,24)
+        .map(h=>"H"+h.tagName[1]+" "+h.innerText.trim()).filter(h=>h.length>4);
+      const forms=[...document.querySelectorAll("form")].slice(0,6).map(f=>({
+        action:f.action||"",inputs:[...f.elements].map(e=>e.name||e.id||e.type).filter(Boolean).slice(0,8)}));
+      const jsonld=[...document.querySelectorAll('script[type="application/ld+json"]')]
+        .map(s=>s.textContent?.trim()??"").filter(Boolean).slice(0,3);
+      return {
+        title:document.title, url:location.href,
+        desc:q('meta[name="description"]',"content")||q('meta[property="og:description"]',"content"),
+        site:q('meta[property="og:site_name"]',"content")||q('meta[name="application-name"]',"content"),
+        heads, tables:document.querySelectorAll("table").length,
+        forms, jsonld,
+        text:(document.body?document.body.innerText:"").slice(0,5000),
+      }})()`)) as {
+      title: string; url: string; desc: string; site: string;
+      heads: string[]; tables: number; forms: { action: string; inputs: string[] }[];
+      jsonld: string[]; text: string;
+    } | null;
+    if (!d) return `✕ extract failed — is the page live?`;
+    let out = `— extract: ${d.title} (${d.url})\n`;
+    if (d.site) out += `site: ${d.site}\n`;
+    if (d.desc) out += `desc: ${d.desc}\n`;
+    if (d.heads.length) out += `headings:\n  ${d.heads.join("\n  ")}\n`;
+    out += `tables: ${d.tables}${d.forms.length ? ` · forms: ${d.forms.map((f) => `[${f.inputs.join(",")}]→${f.action}`).join(" ")}` : ""}\n`;
+    for (const j of d.jsonld) out += `json-ld: ${j.slice(0, 800)}\n`;
+    out += `text:\n${d.text}`;
+    return out.slice(0, 10000);
+  }
+
+  // tables <title> [n] — <table>s as pipe rows (drop-in for sheet append)
+  if (verb === "tables" || verb === "table") {
+    const sp = rest.split(/\s+/);
+    const lastN = /^\d+$/.test(sp[sp.length - 1] ?? "") ? parseInt(sp.pop()!, 10) : -1;
+    const card = findBrowser(sp.join(" "));
+    if (!card) return `✕ no browser found named "${sp.join(" ") || "?"}"`;
+    const api = browserApi(card)!;
+    const tabs = (await api.eval(`JSON.stringify(
+      [...document.querySelectorAll("table")].slice(0,10).map(t=>
+        [...t.rows].slice(0,80).map(r=>
+          [...r.cells].map(c=>c.innerText.trim().replace(/\\s+/g," ").replace(/\\|/g,"/"))
+          .join(" | ")).filter(l=>l.trim()).join("\\n")))`)) as string[] | string | null;
+    const list: string[] = typeof tabs === "string" ? JSON.parse(tabs) : (tabs ?? []);
+    if (!list.length) return `✕ no tables on "${card.dataset.topic}"`;
+    const pick = lastN >= 0 ? list.slice(lastN, lastN + 1) : list.slice(0, 3);
+    return pick
+      .map((t, i) => `table ${lastN >= 0 ? lastN + i : i} (${t.split("\n").length} rows):\n${t}`)
+      .join("\n\n")
+      .slice(0, 10000);
+  }
+
+  // grab <browser> <n> <sheet> — table n straight into a named sheet
+  if (verb === "grab") {
+    const sp = rest.split(/\s+/);
+    if (sp.length < 3) return "✕ grab needs <browser> <table#> <sheet>";
+    const ni = sp.findIndex((t, i) => i > 0 && /^\d+$/.test(t));
+    if (ni < 0 || ni === sp.length - 1) return "✕ grab needs <browser> <table#> <sheet>";
+    const bname = sp.slice(0, ni).join(" ");
+    const tno = parseInt(sp[ni], 10);
+    const sname = sp.slice(ni + 1).join(" ");
+    const card = findBrowser(bname);
+    if (!card) return `✕ no browser found named "${bname || "?"}"`;
+    const api = browserApi(card)!;
+    const tabs = (await api.eval(`JSON.stringify(
+      [...document.querySelectorAll("table")].slice(0,10).map(t=>
+        [...t.rows].slice(0,80).map(r=>
+          [...r.cells].map(c=>c.innerText.trim().replace(/\\s+/g," ").replace(/\\|/g,"/"))
+          .join(" | ")).filter(l=>l.trim()).join("\\n")))`)) as string[] | string | null;
+    const list: string[] = typeof tabs === "string" ? JSON.parse(tabs) : (tabs ?? []);
+    if (tno < 0 || tno >= list.length)
+      return `✕ table ${tno} not found — "${card.dataset.topic}" has ${list.length}`;
+    const rows = list[tno].split("\n");
+    if (!findSheet(sname)) await runWidgetFence("sheet", `new ${sname}`);
+    const scard = findSheet(sname);
+    const sapi = scard ? sheetApi(scard) : null;
+    if (!sapi) return `✕ could not create sheet "${sname}"`;
+    for (const l of rows) sapi.addRow(l.split("|").map((s) => s.trim()));
+    return `grabbed table ${tno} from "${card.dataset.topic}" → ${rows.length} rows into sheet "${sapi.title()}"`;
+  }
+
+  // click <title> <n|text> — click a link inside the live page;
+  // pv:nav tracks wherever it lands
+  if (verb === "click") {
+    const sp = rest.split(/\s+/);
+    let card = findBrowser(rest);
+    let sel = "";
+    if (!card) {
+      for (let i = sp.length - 1; i > 0; i--) {
+        card = findBrowser(sp.slice(0, i).join(" "));
+        if (card) { sel = sp.slice(i).join(" "); break; }
+      }
+    }
+    if (!card) return `✕ no browser found named "${rest.split(/\s+/)[0] || "?"}"`;
+    if (!sel) return "✕ click needs a link number or text — click <title> <n|text>";
+    const csel = `a[href],button,summary,[role='link'],[role='button'],[tabindex],[onclick],input[type='submit'],input[type='button']`;
+    const js = /^\d+$/.test(sel)
+      ? `(()=>{const a=[...document.querySelectorAll(${JSON.stringify(csel)})];const m=a[${sel}];` +
+        `if(!m)return "no link ${sel}";m.click();return "clicked → "+(m.innerText||m.value||m.href||"").trim().slice(0,80)})()`
+      : `(()=>{const want=${JSON.stringify(sel.toLowerCase())};` +
+        `const m=[...document.querySelectorAll(${JSON.stringify(csel)})]` +
+        `.find(x=>(x.innerText||"").toLowerCase().includes(want));` +
+        `if(!m)return "no link matching '${sel.replace(/'/g, "")}'";` +
+        `m.click();return "clicked → "+(m.innerText||m.value||m.href||"").trim().slice(0,80)})()`;
+    const out = await browserApi(card)!.eval(js);
+    return String(out ?? "clicked");
+  }
+
   if (verb === "list") {
     const all = Array.from(document.querySelectorAll<HTMLElement>(".browser-card"));
     if (!all.length) return "no browser cards open";
@@ -1002,7 +1169,7 @@ const browserTool = async (body: string): Promise<string> => {
       .map((c) => `"${c.dataset.topic}" — ${c.dataset.url || "about:blank"}`)
       .join("\n");
   }
-  return `✕ unknown browser verb "${verb}" — open/read/links/navigate/back/forward/clip/bookmark/list`;
+  return `✕ unknown browser verb "${verb}" — open/read/links/search/extract/tables/grab/click/navigate/back/forward/clip/bookmark/eval/list`;
 };
 
 /** locate a chart card by title — same fuzzy logic as findSheet */

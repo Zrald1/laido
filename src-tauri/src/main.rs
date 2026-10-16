@@ -3,6 +3,7 @@
 mod agent;
 mod llm;
 mod looprun;
+mod pageview;
 mod rag;
 mod scheduler;
 mod skills;
@@ -179,6 +180,13 @@ fn main() {
             xfer::deck_pptx_export,
             xfer::deck_pptx_import,
             tools::page_fetch,
+            pageview::pv_open,
+            pageview::pv_nav,
+            pageview::pv_bounds,
+            pageview::pv_visible,
+            pageview::pv_close,
+            pageview::pv_url,
+            pageview::pv_eval,
         ])
         .run(tauri::generate_context!())
         .expect("error while running laido");

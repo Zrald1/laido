@@ -152,6 +152,7 @@ pub struct PageInfo {
     pub text: String,       // readable extraction (capped)
     pub links: Vec<(String, String)>, // (text, absolute url) — top nav targets
     pub blocked: bool,      // XFO / frame-ancestors says no iframes
+    pub walled: bool,       // login / bot wall — reader shows the sign-in lane
     pub status: u16,
 }
 
@@ -403,37 +404,142 @@ fn frame_blocked(map: &reqwest::header::HeaderMap) -> bool {
     false
 }
 
+/// One client for the whole app — the cookie store makes consent walls
+/// resolve the way a real browser does (first hit sets the cookie, the
+/// retry passes it), and pooled connections keep nav snappy.
+fn page_client() -> &'static reqwest::Client {
+    use reqwest::header::{HeaderMap, HeaderValue};
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        let mut heads = HeaderMap::new();
+        heads.insert("accept", HeaderValue::from_static("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"));
+        heads.insert("accept-language", HeaderValue::from_static("en-US,en;q=0.9"));
+        heads.insert("upgrade-insecure-requests", HeaderValue::from_static("1"));
+        heads.insert("sec-fetch-dest", HeaderValue::from_static("document"));
+        heads.insert("sec-fetch-mode", HeaderValue::from_static("navigate"));
+        heads.insert("sec-fetch-site", HeaderValue::from_static("none"));
+        heads.insert("sec-fetch-user", HeaderValue::from_static("?1"));
+        heads.insert("sec-ch-ua", HeaderValue::from_static("\"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\""));
+        heads.insert("sec-ch-ua-mobile", HeaderValue::from_static("?0"));
+        heads.insert("sec-ch-ua-platform", HeaderValue::from_static("\"Windows\""));
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+            .default_headers(heads)
+            .cookie_store(true)
+            .redirect(reqwest::redirect::Policy::limited(8))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
+/// bytes → text honoring the response's declared charset, else a
+/// `<meta charset>` sniff, else UTF-8. Fixes mojibake on windows-1252 /
+/// Shift-JIS pages that don't send a charset header.
+fn decode_body(bytes: &[u8], ctype: &str) -> String {
+    let mut label = ctype
+        .split(';')
+        .find_map(|p| p.trim().strip_prefix("charset="))
+        .map(|s| s.trim_matches('"').to_string());
+    if label.is_none() {
+        let head = String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]).to_lowercase();
+        if let Some(i) = head.find("charset") {
+            let seg = &head[i + 7..head.len().min(i + 40)];
+            let seg = seg.trim_start_matches([' ', '=', '"', '\'']);
+            let end = seg
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+                .unwrap_or(seg.len());
+            let l = seg[..end].to_string();
+            if !l.is_empty() {
+                label = Some(l);
+            }
+        }
+    }
+    let enc = label
+        .as_deref()
+        .and_then(|l| encoding_rs::Encoding::for_label(l.as_bytes()))
+        .unwrap_or(encoding_rs::UTF_8);
+    enc.decode(bytes).0.into_owned()
+}
+
+/// `<meta http-equiv=refresh content="0;url=…">` — the last redirect lane
+/// servers use when they can't send a 3xx (consent gates, region hops).
+fn meta_refresh_url(html: &str, base: &str) -> Option<String> {
+    let low = html.to_lowercase();
+    let m = low.find("http-equiv=\"refresh\"").or_else(|| low.find("http-equiv='refresh'"))?;
+    let seg = &low[m..low.len().min(m + 500)];
+    let c = seg.find("content=")?;
+    let val = &seg[c + 8..];
+    let q = val.chars().next()?;
+    let end = val[1..].find(q)? + 1;
+    let content = &val[1..end];
+    let (_, u) = content.split_once("url=")?;
+    let abs = absolutize(base, u.trim());
+    (abs.starts_with("http")).then_some(abs)
+}
+
+/// A page that says "log in / enable js / something went wrong" instead of
+/// content. Only flagged on thin pages — real articles mention these words.
+fn is_wall(status: u16, title: &str, text: &str) -> bool {
+    if matches!(status, 401 | 403) && text.len() < 4_000 {
+        return true;
+    }
+    if text.len() > 2_000 {
+        return false;
+    }
+    let hay = format!("{title}\n{}", &text[..text.len().min(2_000)]).to_lowercase();
+    const SIGNS: &[&str] = &[
+        "log in to", "log into", "login to", "sign in to", "sign into",
+        "you must log in", "please log in", "forgot password",
+        "forgotten your password", "create an account", "create new account",
+        "enable javascript", "javascript is disabled", "javascript is required",
+        "just a moment", "checking your browser", "verify you are",
+        "are you a robot", "something went wrong", "unusual traffic",
+        "access denied", "prove you're not a robot", "captcha",
+    ];
+    SIGNS.iter().any(|s| hay.contains(s))
+}
+
 #[tauri::command]
 pub async fn page_fetch(url: String) -> Result<PageInfo, String> {
-    let url = url.trim().to_string();
+    let mut url = url.trim().to_string();
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err("not a web url".into());
     }
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
-        .redirect(reqwest::redirect::Policy::limited(8))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let resp = client.get(&url).send().await.map_err(|e| format!("fetch failed: {e}"))?;
-    let status = resp.status().as_u16();
-    let blocked = frame_blocked(resp.headers());
-    let final_url = resp.url().to_string();
-    let ctype = resp
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_lowercase();
-    let body = resp.text().await.map_err(|e| e.to_string())?;
-    let (title, text, links) = if ctype.contains("html") || ctype.is_empty() {
+    let client = page_client();
+    let (mut status, mut blocked, mut final_url, mut body) = (0u16, false, String::new(), String::new());
+    // meta-refresh hops ride on top of reqwest's 3xx following
+    for _ in 0..3 {
+        let resp = client.get(&url).send().await.map_err(|e| format!("fetch failed: {e}"))?;
+        status = resp.status().as_u16();
+        blocked = frame_blocked(resp.headers());
+        final_url = resp.url().to_string();
+        let ctype = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_lowercase();
+        let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+        if !(ctype.contains("html") || ctype.is_empty()) {
+            body = String::new();
+            break;
+        }
+        body = decode_body(&bytes, &ctype);
+        match meta_refresh_url(&body, &final_url) {
+            Some(next) if next != final_url => url = next,
+            _ => break,
+        }
+    }
+    let (title, text, links) = if !body.is_empty() {
         let mut t = html_to_text(&body);
         t.truncate(t.floor_char_boundary(48_000));
         (html_title(&body), t, html_links(&body, &final_url))
     } else {
         (String::new(), String::new(), Vec::new())
     };
-    Ok(PageInfo { url, final_url, title, text, links, blocked, status })
+    let walled = is_wall(status, &title, &text);
+    Ok(PageInfo { url, final_url, title, text, links, blocked, walled, status })
 }
 
 #[cfg(test)]
