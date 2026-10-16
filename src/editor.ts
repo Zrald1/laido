@@ -4360,6 +4360,48 @@ export function insertSticky() {
   }
 }
 
+/* ---------- focus-scroll guard ----------
+ * Clicking a control inside any widget card (browser chat/url, sheet
+ * cells, deck fields, todo inputs, map/canvas popups, card chrome…)
+ * focuses it — and Chromium then scrolls the ancestor to "reveal" the
+ * focused element. Its visibility math misfires under the zoomed
+ * editor (it scrolled even when the control was fully in view), so a
+ * plain click could fling the page to the middle. There's no API to
+ * turn off click-focus scrolling, so: snapshot the scroller on a
+ * pointerdown on a card control, and for the next beat snap it back —
+ * the smooth focus-scroll animates over ~600ms, each frame gets
+ * reverted. Arms only on real controls / non-editable widget surfaces —
+ * the editable card body stays out so drag-selection auto-scroll still
+ * works, and wheel scrolls can't realistically land inside the window. */
+export function guardFocusScroll(scroller: HTMLElement): void {
+  let guard: { st: number; sl: number; until: number } | null = null;
+  document.addEventListener(
+    "pointerdown",
+    (e) => {
+      const t = e.target as HTMLElement;
+      guard =
+        t.closest(".callout") &&
+        t.closest('input, textarea, select, button, a, .grip, [contenteditable="false"]')
+          ? { st: scroller.scrollTop, sl: scroller.scrollLeft, until: performance.now() + 900 }
+          : null;
+    },
+    true,
+  );
+  scroller.addEventListener(
+    "scroll",
+    () => {
+      if (!guard) return;
+      if (performance.now() > guard.until) {
+        guard = null;
+        return;
+      }
+      scroller.scrollTop = guard.st;
+      scroller.scrollLeft = guard.sl;
+    },
+    { passive: true },
+  );
+}
+
 export function initEditor() {
   const el = body();
   document.execCommand("defaultParagraphSeparator", false, "p");
@@ -4843,6 +4885,8 @@ export function initEditor() {
 
   // click to the right of a line's text end → pad with nbsp and type there
   el.addEventListener("mouseup", clickAndType);
+
+  guardFocusScroll(el);
 
   el.addEventListener("keydown", (e) => {
     // the open pickers own arrows/tab/enter/escape until they close

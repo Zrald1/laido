@@ -1,7 +1,7 @@
 import { $, invoke } from "./ipc.js";
 import { renderMarkdown, renderCalloutMd } from "./render.js";
 import { cardToMd, toggleMark, focusBodyOnCardClick, insertTabIndent } from "./editable.js";
-import { STICKY_COLORS } from "./editor.js";
+import { STICKY_COLORS, guardFocusScroll } from "./editor.js";
 import { wireTerminal } from "./term.js";
 
 export async function initStickyWindow(spec: string) {
@@ -26,6 +26,7 @@ export async function initStickyWindow(spec: string) {
   card.querySelector(".callout-head")?.remove();
   focusBodyOnCardClick(card);
   el.append(card);
+  guardFocusScroll(el);
 
   let timer: number | undefined;
   const save = () => {

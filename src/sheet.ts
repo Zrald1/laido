@@ -5176,7 +5176,7 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
       chatAdd("err", `✕ ${String(e).slice(0, 140)}`);
     } finally {
       chatIn.disabled = false;
-      chatIn.focus();
+      chatIn.focus({ preventScroll: true });
     }
   };
   chatIn.addEventListener("keydown", (e) => {

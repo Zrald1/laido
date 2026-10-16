@@ -1038,7 +1038,7 @@ export function wireBrowser(card: HTMLElement) {
       chatAdd("err", `✕ ${String(e).slice(0, 140)}`);
     } finally {
       chatIn.disabled = false;
-      chatIn.focus();
+      chatIn.focus({ preventScroll: true });
     }
   };
   chatIn?.addEventListener("keydown", (e) => {
