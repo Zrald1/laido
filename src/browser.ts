@@ -10,7 +10,7 @@
  * cleanly in reader mode). Every open browser card is listed in the chat
  * digest, and ` ```browser ` fences drive it via browserApi. */
 
-import { invoke } from "./ipc.js";
+import { invoke, refocusField } from "./ipc.js";
 import { addActivity } from "./log.js";
 
 const S = (v: unknown): string => typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : "";
@@ -523,7 +523,7 @@ export function wireBrowser(card: HTMLElement) {
   const switchTab = (i: number, fromUi = false): Promise<string> | string => {
     if (i < 0 || i >= tabs.length) return `✕ no tab ${i + 1} — ${tabs.length} open`;
     if (i === active) {
-      if (fromUi) urlIn.focus();
+      if (fromUi) refocusField(urlIn);
       return `already on tab ${i + 1}`;
     }
     syncTab();
@@ -543,7 +543,7 @@ export function wireBrowser(card: HTMLElement) {
     lastBox = "";
     pvSync();
     say("new tab");
-    urlIn.focus();
+    refocusField(urlIn);
     return "new tab";
   };
   const newTab = (input?: string): Promise<string> | string => {
@@ -567,7 +567,7 @@ export function wireBrowser(card: HTMLElement) {
     lastBox = "";
     pvSync();
     say("new tab");
-    urlIn.focus();
+    refocusField(urlIn);
     return "new tab";
   };
   const closeTab = (i: number) => {
@@ -1118,7 +1118,7 @@ export function wireBrowser(card: HTMLElement) {
       }
     } else if (act === "mkai") {
       setChatOpen(true);
-      chatIn?.focus({ preventScroll: true });
+      refocusField(chatIn);
       chatIn!.value = "make a page extension that ";
     } else if (act === "insturl") {
       const u = extPop.querySelector<HTMLInputElement>(".bx-url")?.value.trim() ?? "";
@@ -1219,6 +1219,7 @@ export function wireBrowser(card: HTMLElement) {
     if (status.dataset.live) setMode(true);
   });
   urlIn.addEventListener("keydown", (e) => {
+    e.stopPropagation();
     if (e.key === "Enter") {
       e.preventDefault();
       void nav(urlIn.value, true).then(say);
@@ -1254,6 +1255,8 @@ export function wireBrowser(card: HTMLElement) {
   const chatLog = card.querySelector<HTMLElement>(".bc-log");
   const chatIn = card.querySelector<HTMLInputElement>(".bc-in");
   const chatHist: { role: string; content: string }[] = [];
+  let asking = false;
+  let idlePlaceholder = "";
   interface ChatBubble { c: string; t: string }
   const liveCard = (): HTMLElement =>
     // a mid-flight AI mutation re-renders the callout — later bubbles must
@@ -1331,7 +1334,9 @@ export function wireBrowser(card: HTMLElement) {
   };
   const askBrowser = async (q: string) => {
     if (!chatIn) return;
-    chatIn.disabled = true;
+    asking = true;
+    idlePlaceholder ??= chatIn.placeholder;
+    chatIn.placeholder = "ai is answering…";
     const pend = chatAdd("wait", "…");
     const title = card.dataset.topic ?? "browser";
     const digest = await digestPage();
@@ -1441,13 +1446,16 @@ export function wireBrowser(card: HTMLElement) {
       pend?.remove();
       chatAdd("err", `✕ ${String(e).slice(0, 140)}`);
     } finally {
-      chatIn.disabled = false;
-      chatIn.focus({ preventScroll: true });
+      asking = false;
+      chatIn.placeholder = idlePlaceholder;
+      refocusField(chatIn);
     }
   };
   chatIn?.addEventListener("keydown", (e) => {
+    e.stopPropagation(); // widget keys never reach note-level chip/picker logic
     if (e.key === "Enter") {
       e.preventDefault();
+      if (asking) return; // one in-flight ask — the field stays editable
       const q = chatIn.value.trim();
       if (!q) return;
       chatIn.value = "";

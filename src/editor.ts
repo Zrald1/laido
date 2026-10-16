@@ -4705,7 +4705,11 @@ export function initEditor() {
   el.addEventListener("input", (e) => {
     markEdited();
     const ie = e as InputEvent;
-    if (!ie.isComposing) {
+    /* edits inside a card's own fields (browser chat, url bar, sheet
+     * cells…) are widget state, not note text — arming a picker from them
+     * would read a stale document selection and let the next space/enter
+     * run a command while the user is only typing in the card */
+    if (!(e.target as HTMLElement | null)?.closest?.(".callout") && !ie.isComposing) {
       // typing a command word + space opens the no-@ picker anywhere on the
       // line; at line start a hand-typed word becomes a chip right away.
       // pasted or dropped text never chips or pops — only manual typing arms.
@@ -4913,6 +4917,12 @@ export function initEditor() {
   guardFocusScroll(el);
 
   el.addEventListener("keydown", (e) => {
+    /* keys typed into a widget control (chat/url inputs, cells, editable
+     * card heads…) belong to the widget — every branch below reads the
+     * document selection, which still points wherever the caret last was,
+     * so handling them here would both eat the keystroke (preventDefault
+     * cancels the field's own editing) and act on a stale note position */
+    if ((e.target as HTMLElement | null)?.closest?.(".callout, input, textarea, select")) return;
     // the open pickers own arrows/tab/enter/escape until they close
     if (wikiPickKey(e)) return;
     if (cmdPickKey(e)) return;
@@ -5923,6 +5933,7 @@ export function initEditor() {
   // image paste — a screenshot on the clipboard becomes a vault
   // attachment + an ![](attachments/…) line, never inline base64
   el.addEventListener("paste", (e) => {
+    if ((e.target as HTMLElement | null)?.closest?.("input, textarea, select")) return;
     const items = e.clipboardData?.items;
     if (!items) return;
     const imgItem = Array.from(items).find((i) => i.type.startsWith("image/"));

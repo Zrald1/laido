@@ -14,7 +14,7 @@
  *  `&` concat, and ~120 Excel functions. Formula cells show the computed
  *  value; focusing one reveals the formula (raw rides in data-raw). */
 
-import { invoke } from "./ipc.js";
+import { invoke, refocusField } from "./ipc.js";
 import { tryCardUndo } from "./cardundo.js";
 
 const S = (v: unknown): string => typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : "";
@@ -5176,7 +5176,7 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
       chatAdd("err", `✕ ${String(e).slice(0, 140)}`);
     } finally {
       chatIn.disabled = false;
-      chatIn.focus({ preventScroll: true });
+      refocusField(chatIn);
     }
   };
   chatIn.addEventListener("keydown", (e) => {

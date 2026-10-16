@@ -212,6 +212,7 @@ fn main() {
             pageview::pv_list,
             pageview::pv_url,
             pageview::pv_eval,
+            pageview::pv_focus_main,
             extensions::ext_list,
             extensions::ext_install_path,
             extensions::ext_install_url,

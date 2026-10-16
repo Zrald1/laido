@@ -231,6 +231,15 @@ pub async fn pv_url(id: String) -> Result<String, String> {
     Ok(get(&id)?.url().map_err(|e| e.to_string())?.to_string())
 }
 
+/// pull OS keyboard focus back into the main webview. A child view that the
+/// user clicked inside keeps HWND focus until something moves it — a bare
+/// DOM `.focus()` on a chat/url field then can't receive real keystrokes.
+#[tauri::command]
+pub async fn pv_focus_main(app: AppHandle) -> Result<(), String> {
+    let wv = app.get_webview("main").ok_or("no main webview")?;
+    wv.set_focus().map_err(|e| e.to_string())
+}
+
 /// eval js inside the live page — the AI's lane into the real DOM.
 /// Result arrives JSON-encoded (eval_with_callback serializes it).
 #[tauri::command]
