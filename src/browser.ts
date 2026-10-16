@@ -344,39 +344,55 @@ export function wireBrowser(card: HTMLElement) {
    * floating card, or leaves the note — it has no z-order of its own */
   const dpr = () => window.devicePixelRatio || 1;
   let lastBox = "";
+  let coverTicks = 0;
   const pvSync = () => {
     if (!card.isConnected) return;
     const r = view.getBoundingClientRect();
     const clipEl = card.closest<HTMLElement>("#note-body") ?? document.body;
     const clip = clipEl.getBoundingClientRect();
-    // a native webview punches through the DOM — if another floating card
-    // covers this view's middle, the widget underneath must hide
+    /* the body clips the view too (overflow:hidden on small cards) — the
+     * webview may only cover the truly visible slice */
+    const body = view.parentElement?.getBoundingClientRect();
+    const clipTop = body ? Math.max(clip.top, body.top) : clip.top;
+    const clipBot = body ? Math.min(clip.bottom, body.bottom) : clip.bottom;
+    /* the native surface can't be scissored by the DOM scroll region, so
+     * position it at the visible intersection — a partially-shown card
+     * keeps its page on screen instead of blinking out at the clip edge */
+    const ix = Math.max(r.left, clip.left);
+    const iy = Math.max(r.top, clipTop);
+    const iw = Math.min(r.right, clip.right) - ix;
+    const ih = Math.min(r.bottom, clipBot) - iy;
+    /* a native webview punches through the DOM — if another card covers
+     * the visible middle, the widget underneath must hide. Two consecutive
+     * samples required so a transient hit-test gap can't flicker it */
     const mid =
-      r.width > 0
-        ? document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+      iw > 0 && ih > 0
+        ? document.elementFromPoint(ix + iw / 2, iy + ih / 2)
         : null;
-    const covered = !mid || !card.contains(mid);
-    const vis =
-      liveOn && !!cur().url && !covered && r.width > 8 && r.height > 8 &&
-      r.top >= clip.top - 2 && r.bottom <= clip.bottom + 2 &&
-      r.left >= clip.left - 2 && r.right <= clip.right + 2;
+    coverTicks = !mid || !card.contains(mid) ? coverTicks + 1 : 0;
+    const vis = liveOn && !!cur().url && coverTicks < 2 && iw > 8 && ih > 8;
     const d = dpr();
-    const key = `${Math.round(r.left)},${Math.round(r.top)},${Math.round(r.width)},${Math.round(r.height)},${vis},${d}`;
+    const key = `${Math.round(ix)},${Math.round(iy)},${Math.round(iw)},${Math.round(ih)},${vis},${d}`;
     if (key === lastBox) return;
     lastBox = key;
     void invoke("pv_bounds", {
       id: bvId,
-      x: Math.round(r.left * d), y: Math.round(r.top * d),
-      w: Math.round(r.width * d), h: Math.round(r.height * d),
+      x: Math.round(ix * d), y: Math.round(iy * d),
+      w: Math.round(Math.max(1, iw) * d), h: Math.round(Math.max(1, ih) * d),
     }).catch(() => {});
     void invoke("pv_visible", { id: bvId, on: vis }).catch(() => {});
   };
+  /* ResizeObserver catches card drags/resizes instantly instead of waiting
+   * for the poll — the page surface tracks the grip in real time */
+  const ro = new ResizeObserver(() => pvSync());
+  ro.observe(view);
   let deadTicks = 0;
   const pvTimer = window.setInterval(() => {
     if (!card.isConnected) {
       // DOM detach = note switch or card delete → the webview must die
       if (++deadTicks >= 2) {
         window.clearInterval(pvTimer);
+        ro.disconnect();
         void invoke("pv_close", { id: bvId }).catch(() => {});
         for (const u of unlistens) void u.then((f) => f()).catch(() => {});
       }

@@ -1985,10 +1985,12 @@ li.todo.done .todo-box { color: var(--muted); }
   justify-content: center; gap: 4px; color: var(--muted); font-size: 12px;
 }
 .br-newtab b { color: var(--fg); font-size: 14px; font-weight: 600; }
-/* the real WebView2 is composited over this rect by the app — keep it a
- * solid 340px so bounds tracking always has a stable target */
+/* the real WebView2 is composited over this rect by the app — the view
+ * flex-fills the card body so resizing the card resizes the page surface */
+.browser-card .callout-body { display: flex; flex-direction: column; overflow: hidden; }
 .browser-view {
-  position: relative; height: 340px; border-top: 1px solid var(--line);
+  position: relative; flex: 1 1 auto; min-height: 300px;
+  border-top: 1px solid var(--line);
   background: var(--bg-2); overflow: hidden;
 }
 .browser-reader {
