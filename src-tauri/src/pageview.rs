@@ -47,14 +47,45 @@ pub async fn pv_open(
     }
     let pos = PhysicalPosition::new(x, y);
     let size = PhysicalSize::new(w.max(1), h.max(1));
-    if let Ok(wv) = get(&id) {
-        wv.navigate(url.parse().map_err(|e| format!("bad url {e}"))?)
-            .map_err(|e| e.to_string())?;
-        wv.set_position(pos).ok();
-        wv.set_size(size).ok();
-        wv.show().ok();
-        return Ok(());
+    /* get-or-create races: two concurrent opens for the same id (restore
+     * nav + user nav) would both miss the map and both add_child — and the
+     * window rejects a duplicate label. VIEWS can't be held across
+     * add_child (on_new_window takes it on the main thread → deadlock), so
+     * the loser of the OPENING claim waits, then navigates the winner's
+     * view — the later url wins, which is what the user sees */
+    static OPENING: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
+    let mut claimed = false;
+    for _ in 0..100 {
+        if let Some(wv) = with_views(|m| m.get(&id).cloned()) {
+            wv.navigate(url.parse().map_err(|e| format!("bad url {e}"))?)
+                .map_err(|e| e.to_string())?;
+            wv.set_position(pos).ok();
+            wv.set_size(size).ok();
+            wv.show().ok();
+            return Ok(());
+        }
+        {
+            let mut g = OPENING.lock().unwrap_or_else(|e| e.into_inner());
+            let s = g.get_or_insert_with(std::collections::HashSet::new);
+            if s.insert(id.clone()) {
+                claimed = true;
+                break; // we create it
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
     }
+    if !claimed {
+        return Err("webview still opening".into());
+    }
+    struct OpeningGuard<'a>(&'a Mutex<Option<std::collections::HashSet<String>>>, String);
+    impl Drop for OpeningGuard<'_> {
+        fn drop(&mut self) {
+            if let Some(s) = self.0.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                s.remove(&self.1);
+            }
+        }
+    }
+    let _guard = OpeningGuard(&OPENING, id.clone());
     let win = app.get_window("main").ok_or("no main window")?;
     let id2 = id.clone();
     let app2 = app.clone();

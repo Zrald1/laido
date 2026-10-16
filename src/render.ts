@@ -358,13 +358,15 @@ function todoCallout(block: string[]): string {
 }
 
 /** the browser card: `> [!browser] title` + `> url: x` — wireBrowser
- *  upgrades it to a live mini-browser (reader lane + iframe when allowed) */
+ *  upgrades it to a live mini-browser (real engine + reader fallback) */
 function browserCallout(block: string[]): string {
   const d = parseBrowser(block);
   const raw = "> " + block.join("\n> ");
   return (
     `<div class="callout browser-card" data-kind="browser" data-topic="${attr(d.title)}"` +
-    ` data-url="${attr(d.url)}" data-md="${attr(raw)}">` +
+    ` data-url="${attr(d.url)}"` +
+    (d.tabs.length > 1 ? ` data-tabs="${attr(JSON.stringify(d.tabs))}" data-atab="${d.atab}"` : "") +
+    ` data-md="${attr(raw)}">` +
     `<div class="callout-head"><span class="callout-title">${esc(d.title)}</span></div>` +
     browserInnerHtml() +
     `</div>`

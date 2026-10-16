@@ -44,24 +44,45 @@ export function toUrl(input: string): string {
 
 /* ---------- markdown <-> card ---------- */
 
-/** `[!browser] title` + `url: …` lines → card fields */
-export function parseBrowser(block: string[]): { title: string; url: string } {
+/** `[!browser] title` + `url: …` + `tab: url | title` lines → card fields */
+export function parseBrowser(block: string[]): {
+  title: string;
+  url: string;
+  tabs: { url: string; title: string }[];
+  atab: number;
+} {
   if (!Array.isArray(block)) block = []; block = block.map((l) => S(l));
   const head = block[0] ?? "";
   const title = head.replace(/^\[!\w+\]\s*/, "").trim();
   let url = "";
+  const tabs: { url: string; title: string }[] = [];
+  let atab = 0;
   for (const raw of block.slice(1)) {
-    const m = raw.trim().match(/^url:\s*(\S+)/i);
+    const line = raw.trim();
+    const m = line.match(/^url:\s*(\S+)/i);
     if (m) url = m[1];
+    const mt = line.match(/^tab:\s*(\S+)(?:\s*\|\s*(.*))?$/i);
+    if (mt) tabs.push({ url: mt[1] === "about:blank" ? "" : mt[1], title: (mt[2] ?? "").trim() });
+    const ma = line.match(/^atab:\s*(\d+)/i);
+    if (ma) atab = parseInt(ma[1], 10) || 0;
   }
-  return { title: title || "browser", url };
+  return { title: title || "browser", url, tabs, atab };
 }
 
 export function browserToMd(card: HTMLElement): string {
   if (!card?.dataset) return "";
   const url = DS(card.dataset.url) ?? "";
   const title = DS(card.dataset.topic) ?? "browser";
-  return `> [!browser] ${title}\n> url: ${url}`;
+  let md = `> [!browser] ${title}\n> url: ${url}`;
+  try {
+    const tabs = JSON.parse(DS(card.dataset.tabs) || "[]") as { url: string; title: string }[];
+    if (tabs.length > 1) {
+      md += `\n> atab: ${parseInt(card.dataset.atab ?? "0", 10) || 0}`;
+      for (const tb of tabs)
+        md += `\n> tab: ${tb.url || "about:blank"} | ${(tb.title || "").replace(/\|/g, "/")}`;
+    }
+  } catch { /* tab state is best-effort */ }
+  return md;
 }
 
 /** the card markup render.ts emits; wireBrowser upgrades it live */
@@ -78,6 +99,7 @@ export function browserInnerHtml(): string {
     `<button class="bb-b" data-a="bm" title="save to bookmarks.laido">★</button>` +
     `<button class="bb-b" data-a="win" title="open in a real window">⧉</button>` +
     `</div>` +
+    `<div class="btabs" contenteditable="false"></div>` +
     `<div class="browser-view">` +
     `<div class="browser-reader"></div>` +
     `</div>` +
@@ -120,6 +142,12 @@ export interface BrowserApi {
   clip(selOnly?: boolean): { title: string; url: string; text: string } | null;
   /** append `- [ ] [title](url)` to bookmarks.laido (created if missing) */
   bookmark(): Promise<string>;
+  /** the card's tab strip — one live engine, an address + back-stack per tab */
+  tabs(): { url: string; title: string; active: boolean }[];
+  /** open a new tab (blank address bar when no url) and switch to it */
+  newTab(url?: string): Promise<string>;
+  /** switch to tab i (0-based) */
+  tab(i: number): Promise<string>;
 }
 
 const apis = new WeakMap<HTMLElement, BrowserApi>();
@@ -140,9 +168,37 @@ export function wireBrowser(card: HTMLElement) {
   const reader = card.querySelector<HTMLElement>(".browser-reader");
   const status = card.querySelector<HTMLElement>(".browser-status");
   if (!bar || !urlIn || !view || !reader || !status) return;
+  const strip = card.querySelector<HTMLElement>(".btabs");
 
-  const hist: string[] = [];
-  let hi = -1;
+  /* tabs — one live engine, N addresses; each tab keeps its own url,
+   * title and back-stack and switching navigates the same webview */
+  interface BTab {
+    url: string;
+    title: string;
+    hist: string[];
+    hi: number;
+  }
+  let tabs: BTab[] = [];
+  try {
+    const raw = JSON.parse(DS(card.dataset.tabs) || "[]") as Partial<BTab>[];
+    if (Array.isArray(raw))
+      tabs = raw
+        .filter((t) => t && typeof t.url === "string")
+        .map((t) => {
+          const h = Array.isArray(t.hist) ? t.hist.map(S).filter(Boolean).slice(-60) : [];
+          const i = typeof t.hi === "number" && Number.isFinite(t.hi) ? t.hi : -1;
+          return { url: S(t.url), title: S(t.title), hist: h, hi: Math.min(i, h.length - 1) };
+        });
+  } catch {
+    tabs = [];
+  }
+  if (!tabs.length)
+    tabs = [{ url: DS(card.dataset.url) ?? "", title: DS(card.dataset.topic) ?? "", hist: [], hi: -1 }];
+  let active = Math.min(Math.max(parseInt(card.dataset.atab ?? "0", 10) || 0, 0), tabs.length - 1);
+  const cur = () => tabs[active] ?? tabs[0];
+  // hist/hi always alias the ACTIVE tab's stack
+  let hist = cur().hist;
+  let hi = cur().hi;
   let lastPage: PageInfo | null = null;
   // the real engine is the default lane — ◐ drops to the text reader
   let liveOn = true;
@@ -171,9 +227,121 @@ export function wireBrowser(card: HTMLElement) {
 
   const hostOf = (u: string) => u.split("/")[2] ?? u;
 
+  const persistTabs = () => {
+    card.dataset.tabs = JSON.stringify(tabs);
+    card.dataset.atab = String(active);
+  };
+  const syncTab = () => {
+    const t = cur();
+    t.hi = hi;
+    t.url = card.dataset.url ?? t.url;
+    t.title = card.dataset.topic ?? t.title;
+    persistTabs();
+  };
+  const renderTabs = () => {
+    if (!strip) return;
+    strip.innerHTML =
+      tabs
+        .map(
+          (tb, i) =>
+            `<span class="btab${i === active ? " on" : ""}" data-i="${i}" title="${escHtml(tb.title || tb.url || "new tab")}">` +
+            `<span class="btab-t">${escHtml(tb.title || hostOf(tb.url) || "new tab")}</span>` +
+            (tabs.length > 1 ? `<button class="btab-x" data-x="${i}" title="close tab">×</button>` : "") +
+            `</span>`,
+        )
+        .join("") +
+      `<button class="btab-add" title="new tab">+</button>`;
+  };
+  const showBlank = () => {
+    reader.innerHTML =
+      `<div class="br-newtab"><b>new tab</b><span>type an address or a search above</span></div>`;
+  };
+  /* reader pane covers the view for reader mode AND for a blank tab — the
+   * webview can't load about:blank, so an empty tab hides it and shows the
+   * placeholder instead */
+  const paintView = () => {
+    reader.style.display = !liveOn || !cur().url ? "" : "none";
+    if (!cur().url) showBlank();
+  };
+  const switchTab = (i: number, fromUi = false): Promise<string> | string => {
+    if (i < 0 || i >= tabs.length) return `✕ no tab ${i + 1} — ${tabs.length} open`;
+    if (i === active) {
+      if (fromUi) urlIn.focus();
+      return `already on tab ${i + 1}`;
+    }
+    syncTab();
+    active = i;
+    const t = cur();
+    hist = t.hist;
+    hi = t.hi;
+    card.dataset.url = t.url;
+    card.dataset.topic = t.title || "new tab";
+    const el = card.querySelector(".callout-title");
+    if (el) el.textContent = card.dataset.topic;
+    urlIn.value = t.url;
+    persistTabs();
+    renderTabs();
+    paintView();
+    if (t.url) return nav(t.url, false);
+    lastBox = "";
+    pvSync();
+    say("new tab");
+    urlIn.focus();
+    return "new tab";
+  };
+  const newTab = (input?: string): Promise<string> | string => {
+    const url = input ? toUrl(input) : "";
+    syncTab();
+    tabs.push({ url, title: "", hist: [], hi: -1 });
+    active = tabs.length - 1;
+    hist = cur().hist;
+    hi = -1;
+    card.dataset.url = url;
+    if (!url) {
+      card.dataset.topic = "new tab";
+      const el = card.querySelector(".callout-title");
+      if (el) el.textContent = "new tab";
+    }
+    urlIn.value = url;
+    persistTabs();
+    renderTabs();
+    paintView();
+    if (url) return nav(url, true);
+    lastBox = "";
+    pvSync();
+    say("new tab");
+    urlIn.focus();
+    return "new tab";
+  };
+  const closeTab = (i: number) => {
+    if (tabs.length <= 1) return;
+    tabs.splice(i, 1);
+    if (active > i) active--;
+    else if (active === i) active = Math.min(active, tabs.length - 1);
+    const t = cur();
+    hist = t.hist;
+    hi = t.hi;
+    card.dataset.url = t.url;
+    card.dataset.topic = t.title || "new tab";
+    const el = card.querySelector(".callout-title");
+    if (el) el.textContent = card.dataset.topic;
+    urlIn.value = t.url;
+    persistTabs();
+    renderTabs();
+    paintView();
+    if (t.url && t.url !== lastFetched) void nav(t.url, false).then(say);
+    else if (!t.url) {
+      lastBox = "";
+      pvSync();
+      say("new tab");
+    } else pvSync();
+    onChange();
+  };
+
   /* the live lane is a REAL WebView2 composited over .browser-view —
    * window-level surface, not DOM: keep it glued to the card's rect and
-   * hide it whenever the card scrolls out, hides, or leaves the note */
+   * hide it whenever the card scrolls out, hides, is covered by another
+   * floating card, or leaves the note — it has no z-order of its own */
   const dpr = () => window.devicePixelRatio || 1;
   let lastBox = "";
   const pvSync = () => {
@@ -181,8 +349,15 @@ export function wireBrowser(card: HTMLElement) {
     const r = view.getBoundingClientRect();
     const clipEl = card.closest<HTMLElement>("#note-body") ?? document.body;
     const clip = clipEl.getBoundingClientRect();
+    // a native webview punches through the DOM — if another floating card
+    // covers this view's middle, the widget underneath must hide
+    const mid =
+      r.width > 0
+        ? document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+        : null;
+    const covered = !mid || !card.contains(mid);
     const vis =
-      liveOn && r.width > 8 && r.height > 8 &&
+      liveOn && !!cur().url && !covered && r.width > 8 && r.height > 8 &&
       r.top >= clip.top - 2 && r.bottom <= clip.bottom + 2 &&
       r.left >= clip.left - 2 && r.right <= clip.right + 2;
     const d = dpr();
@@ -233,17 +408,18 @@ export function wireBrowser(card: HTMLElement) {
     }
   };
 
-  reader.style.display = "none";
   bar.querySelector('[data-a="mode"]')?.classList.add("on");
 
   const setMode = (live: boolean) => {
     liveOn = live;
     lastBox = "";
-    reader.style.display = live ? "none" : "";
+    paintView();
     bar.querySelector('[data-a="mode"]')?.classList.toggle("on", live);
     if (!live) void invoke("pv_visible", { id: bvId, on: false }).catch(() => {});
     else pvSync();
   };
+  paintView();
+  renderTabs();
 
   const renderReader = (p: PageInfo) => {
     const all = p.links ?? [];
@@ -309,14 +485,28 @@ export function wireBrowser(card: HTMLElement) {
     const seq = ++navSeq;
     say("loading…");
     setLock(url);
+    // a blank tab's webview is hidden — claim the url now so pvSync shows
+    // it, and repaint so the new-tab placeholder drops out of live mode
+    cur().url = url;
+    paintView();
     // the real engine opens immediately — XFO/walls can't touch it; the
     // fetch lane runs in parallel for the AI's text + the reader view
     if (liveOn) {
       setLoading(true);
-      void pvOpen(url).catch((e) => {
+      const fail = (e: unknown) => {
         setLoading(false);
         setMode(false);
         say(`live view failed — reader: ${String(e)}`);
+      };
+      void pvOpen(url).catch((e) => {
+        // a same-id open is still mid-create on the rust side — retry once
+        if (/still opening/.test(String(e))) {
+          window.setTimeout(() => {
+            if (seq === navSeq) void pvOpen(url).catch(fail);
+          }, 400);
+          return;
+        }
+        fail(e);
       });
     }
     let p: PageInfo | null = null;
@@ -364,6 +554,8 @@ export function wireBrowser(card: HTMLElement) {
     }
     if (p?.walled && !liveOn) status.dataset.live = "1";
     else delete status.dataset.live;
+    syncTab();
+    renderTabs();
     onChange();
     return `${p?.title || p?.final_url || url} — ${p?.text.length ?? 0} chars${p?.walled ? " (walled — sign-in needed, live in ◐)" : ""}${liveOn ? " (live)" : " (reader)"}`;
   };
@@ -381,6 +573,7 @@ export function wireBrowser(card: HTMLElement) {
     if (!pay || pay.id !== bvId || !card.isConnected || !pay.url) return;
     const u = pay.url;
     card.dataset.url = u;
+    cur().url = u;
     setLock(u);
     if (urlIn.value !== u) urlIn.value = u;
     if (hist[hi] !== u) {
@@ -388,6 +581,8 @@ export function wireBrowser(card: HTMLElement) {
       hist.push(u);
       hi = hist.length - 1;
     }
+    syncTab();
+    renderTabs();
     if (u === lastFetched) return;
     lastFetched = u;
     void invoke<PageInfo>("page_fetch", { url: u })
@@ -418,6 +613,9 @@ export function wireBrowser(card: HTMLElement) {
     card.dataset.topic = pay.title;
     const t = card.querySelector(".callout-title");
     if (t) t.textContent = pay.title;
+    cur().title = pay.title;
+    persistTabs();
+    renderTabs();
   });
   // downloads — real files land in OS Downloads; trace them
   on("pv:dl", (e: { payload: any }) => {
@@ -488,11 +686,35 @@ export function wireBrowser(card: HTMLElement) {
     }
   });
   urlIn.addEventListener("pointerdown", (e) => e.stopPropagation());
+  strip?.addEventListener("click", (e) => {
+    const el = e.target as HTMLElement;
+    const x = el.closest<HTMLElement>(".btab-x");
+    if (x) {
+      e.preventDefault();
+      e.stopPropagation();
+      closeTab(parseInt(x.dataset.x ?? "-1", 10));
+      return;
+    }
+    if (el.closest(".btab-add")) {
+      e.preventDefault();
+      e.stopPropagation();
+      void Promise.resolve(newTab()).then(say);
+      return;
+    }
+    const tb = el.closest<HTMLElement>(".btab");
+    if (tb) {
+      e.preventDefault();
+      e.stopPropagation();
+      void Promise.resolve(switchTab(parseInt(tb.dataset.i ?? "-1", 10), true)).then(say);
+    }
+  });
 
   // restore persisted address
-  if (card.dataset.url) {
-    urlIn.value = card.dataset.url;
-    void nav(card.dataset.url, true).then(say);
+  if (cur().url) {
+    urlIn.value = cur().url;
+    void nav(cur().url, true).then(say);
+  } else {
+    say("new tab");
   }
 
   apis.set(card, {
@@ -551,6 +773,9 @@ export function wireBrowser(card: HTMLElement) {
       const t = p.walled || /^(error|log ?in|sign ?in)/i.test(p.title) ? hostOf(p.final_url) : p.title;
       return clipBookmark(t || p.final_url, p.final_url);
     },
+    tabs: () => tabs.map((t, i) => ({ url: t.url, title: t.title, active: i === active })),
+    newTab: (u?: string) => Promise.resolve(newTab(u)),
+    tab: (i: number) => Promise.resolve(switchTab(i)),
   });
 }
 

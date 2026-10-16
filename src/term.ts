@@ -1169,7 +1169,34 @@ const browserTool = async (body: string): Promise<string> => {
       .map((c) => `"${c.dataset.topic}" — ${c.dataset.url || "about:blank"}`)
       .join("\n");
   }
-  return `✕ unknown browser verb "${verb}" — open/read/links/search/extract/tables/grab/click/navigate/back/forward/clip/bookmark/eval/list`;
+
+  // tabs <title> — the card's tab strip, active marked; tab <t> <n>
+  // switches; newtab <t> [url] opens one (and goes there)
+  if (verb === "tabs") {
+    const card = findBrowser(rest);
+    if (!card) return `✕ no browser found named "${rest || "?"}"`;
+    return browserApi(card)!
+      .tabs()
+      .map((t, i) => `${t.active ? "→" : " "} ${i + 1}: ${t.title || t.url || "new tab"}${t.url ? ` — ${t.url}` : ""}`)
+      .join("\n");
+  }
+  if (verb === "newtab") {
+    const sp = rest.split(/\s+/);
+    const maybeUrl = sp[sp.length - 1] ?? "";
+    const hasUrl = /^(https?:\/\/|[\w-]+(\.[\w-]+)+)/.test(maybeUrl) && sp.length > 1;
+    const card = findBrowser(hasUrl ? sp.slice(0, -1).join(" ") : rest);
+    if (!card) return `✕ no browser found named "${rest || "?"}"`;
+    return await browserApi(card)!.newTab(hasUrl ? maybeUrl : undefined);
+  }
+  if (verb === "tab") {
+    const sp = rest.split(/\s+/);
+    const n = parseInt(sp.pop() ?? "", 10);
+    const card = findBrowser(sp.join(" "));
+    if (!card) return `✕ no browser found named "${sp.join(" ") || "?"}"`;
+    if (!Number.isFinite(n)) return "✕ tab needs a number — tab <title> <n>";
+    return await browserApi(card)!.tab(n - 1);
+  }
+  return `✕ unknown browser verb "${verb}" — open/read/links/search/extract/tables/grab/click/navigate/back/forward/clip/bookmark/eval/list/tabs/newtab/tab`;
 };
 
 /** locate a chart card by title — same fuzzy logic as findSheet */

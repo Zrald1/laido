@@ -93,9 +93,33 @@ export function setFileCallbacks(
 }
 
 function avoidOverlap(card: HTMLElement) {
-  if (card.classList.contains("floating")) return;
   const editor = body();
   const floating = Array.from(editor.querySelectorAll(".callout.floating")) as HTMLElement[];
+  if (card.classList.contains("floating")) {
+    // spawned floaters land dead-center on top of each other — cascade the
+    // newcomer down-right until it clears the pile; a browser card's webview
+    // is a native surface, so stacked cards paint two pages in one rect
+    let dx = parseFloat(card.style.left) || 0;
+    let dy = parseFloat(card.style.top) || 0;
+    const others = floating.filter((f) => f !== card);
+    if (!others.length) return;
+    for (let tries = 0; tries < 24; tries++) {
+      const c = card.getBoundingClientRect();
+      const blocked = others.some((f) => {
+        const r = f.getBoundingClientRect();
+        const ox = Math.min(c.right, r.right) - Math.max(c.left, r.left);
+        const oy = Math.min(c.bottom, r.bottom) - Math.max(c.top, r.top);
+        return ox > Math.min(c.width, r.width) * 0.5 && oy > Math.min(c.height, r.height) * 0.5;
+      });
+      if (!blocked) break;
+      dx += 36;
+      dy += 32;
+      card.style.left = `${dx}px`;
+      card.style.top = `${dy}px`;
+    }
+    writeState(card, { x: dx, y: dy });
+    return;
+  }
   if (floating.length === 0) return;
   const c = card.getBoundingClientRect();
   let shift = 0;
