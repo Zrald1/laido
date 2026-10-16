@@ -323,7 +323,8 @@ function deckCallout(block: string[]): string {
   const raw = "> " + block.join("\n> ");
   return (
     `<div class="callout deck-card" data-kind="deck" data-topic="${attr(d.title)}"` +
-    ` data-theme="${attr(d.theme)}" data-trans="${attr(d.transition)}" data-md="${attr(raw)}">` +
+    ` data-theme="${attr(d.theme)}" data-trans="${attr(d.transition)}" data-md="${attr(raw)}"` +
+    ` data-tools="${attr(JSON.stringify(d.tools))}">` +
     `<div class="callout-head"><span class="callout-title">${esc(d.title)}</span></div>` +
     deckInnerHtml(d) +
     `</div>`
@@ -618,7 +619,7 @@ export function renderMarkdown(src: string, depth = 0): string {
       const kind = (line.match(/^\s*>\s*\[!(\w+)\]/) ?? [])[1] ?? "";
       const inner = (c: string) => {
         if (/^(slides|deck|powerpoint)$/.test(kind))
-          return /^\[!(slide|theme|transition)\b/.test(c);
+          return /^\[!(slide|theme|transition|tool)\b/.test(c);
         if (kind === "sheet")
           return (
             /^\[!(fmt|cf|freeze|hide|w|filter)\b/.test(c) ||

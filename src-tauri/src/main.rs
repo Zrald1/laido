@@ -157,6 +157,7 @@ fn main() {
             state::detect_locale,
             llm::llm_ping,
             llm::llm_models,
+            llm::deck_tool_gen,
             tools::tavily_ping,
             tools::open_url,
             agent::agent_run,

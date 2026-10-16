@@ -855,15 +855,16 @@ export function isFmQueries(p: string): string[] {
  * skipped; alias keeps the user's casing) then write it back — which
  * snapshots the old content, so a bad linkify is one palette hop away
  * from being undone. */
-/** wrap bare `stem` mentions in a line's non-link segments — pure */
+/** wrap bare `stem` mentions in a line's non-link, non-code segments —
+ * pure. [[links]], ![md](x), and `inline code` keep their contents. */
 export function linkifyLine(line: string, stems: string[]): [string, number] {
   line = S(line);
   if (!Array.isArray(stems)) stems = [];
   let count = 0;
   const out = line
-    .split(/(\[\[[^\]]*\]\]|!\[[^\]]*\]\([^)]*\))/)
+    .split(/(\[\[[^\]]*\]\]|!\[[^\]]*\]\([^)]*\)|`+[^`]*`+)/)
     .map((seg, i) => {
-      if (i % 2 === 1) return seg; // inside a link/embed — leave it
+      if (i % 2 === 1) return seg; // inside a link/embed/code — leave it
       let s = seg;
       for (const stm of stems) {
         if (typeof stm !== "string" || !stm) continue;
@@ -904,9 +905,18 @@ export async function linkifyNote() {
   if (md === null) return;
   let count = 0;
   let inFence = false;
+  let inCallout = false; // > [!kind] head opens; > lines after are widget rows
   const out = md.split("\n").map((line) => {
     if (/^\s*```/.test(line)) { inFence = !inFence; return line; }
     if (inFence) return line;
+    const st = line.trimStart();
+    if (st.startsWith(">")) {
+      const inner = st.replace(/^>+\s*/, "");
+      if (/^\[!/.test(inner)) inCallout = true;
+      if (inCallout) return line; // callout body = widget data, not prose
+    } else {
+      inCallout = false;
+    }
     const [l, n] = linkifyLine(line, stems);
     count += n;
     return l;

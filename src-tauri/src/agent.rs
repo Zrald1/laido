@@ -6,8 +6,8 @@ use tauri::{AppHandle, Emitter};
 use tauri_plugin_notification::NotificationExt;
 
 #[derive(Serialize, Clone)]
-struct Activity {
-    text: String,
+pub struct Activity {
+    pub text: String,
 }
 
 #[derive(Serialize, Clone)]

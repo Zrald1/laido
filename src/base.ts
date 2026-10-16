@@ -502,6 +502,20 @@ export function baseSort(spec: string): (a: Map<string, string>, b: Map<string, 
   };
 }
 
+/* the external api — ```base fences drive it: set the query/view, read rows */
+export interface BaseApi {
+  title(): string;
+  view(): string;
+  query(): string;
+  set(p: { q?: string; cols?: string; sort?: string; group?: string; view?: string; in?: string }): void;
+  rows(): string[];
+  read(): string;
+}
+const apis = new WeakMap<HTMLElement, BaseApi>();
+export function baseApi(card: HTMLElement): BaseApi | undefined {
+  return apis.get(card);
+}
+
 export function wireBase(card: HTMLElement) {
   if (!card?.dataset) return;
   if (card.dataset.baseWired) return;
@@ -1281,4 +1295,37 @@ export function wireBase(card: HTMLElement) {
   };
   document.addEventListener("index:changed", onIndex);
   void load();
+
+  /* the external api — a ```base fence drives this */
+  apis.set(card, {
+    title: () => card.dataset.title ?? "base",
+    view: () => card.dataset.view ?? "table",
+    query: () => card.dataset.q ?? "",
+    set: (p) => {
+      if (!p || typeof p !== "object") return;
+      if (p.q !== undefined) card.dataset.q = S(p.q).slice(0, 500);
+      if (p.cols !== undefined) card.dataset.cols = S(p.cols).slice(0, 300);
+      if (p.sort !== undefined) card.dataset.sort = S(p.sort).slice(0, 120);
+      if (p.group !== undefined) card.dataset.group = S(p.group).slice(0, 80);
+      if (p.in !== undefined)
+        card.dataset.in = S(p.in).replace(/\.\./g, "").replace(/^\/+/, "").slice(0, 200);
+      if (p.view !== undefined && ["table", "board", "list", "calendar"].includes(S(p.view)))
+        card.dataset.view = S(p.view);
+      qIn.value = card.dataset.q ?? "";
+      colsIn.value = card.dataset.cols ?? "";
+      sortIn.value = card.dataset.sort ?? "";
+      groupIn.value = card.dataset.group ?? "";
+      card.dispatchEvent(new CustomEvent("base:changed", { bubbles: true }));
+      void load();
+    },
+    rows: () => exportData?.rows ?? [],
+    read: () =>
+      !exportData
+        ? ""
+        : [`note | ${exportData.cols.join(" | ")}`,
+            ...exportData.rows
+              .slice(0, 50)
+              .map((n) => `${stem(n)} | ${exportData!.cols.map((c) => exportData!.cell(n, c)).join(" | ")}`),
+          ].join("\n"),
+  });
 }

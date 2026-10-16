@@ -121,6 +121,11 @@ pub fn open_url(url: String) -> Result<(), String> {
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err("only http(s) links can be opened".into());
     }
+    // the url lands on a `cmd /C start` line — `"` or control chars could
+    // break out of the argument quoting; real http urls never need them
+    if url.contains('"') || url.chars().any(|c| c.is_control()) {
+        return Err("invalid url".into());
+    }
     #[cfg(target_os = "windows")]
     let (program, args): (&str, Vec<&str>) = ("cmd", vec!["/C", "start", "", &url]);
     #[cfg(target_os = "macos")]

@@ -1,6 +1,8 @@
+use crate::agent::Activity;
 use crate::state::load_settings;
 use serde::Serialize;
 use serde_json::json;
+use tauri::{AppHandle, Emitter};
 
 #[derive(Serialize)]
 pub struct PingResult {
@@ -183,6 +185,57 @@ pub async fn llm_ping(message: String) -> Result<PingResult, String> {
         model: s.model_fast.clone(),
         reply,
     })
+}
+
+/// system prompt for `deck_tool_gen` — the AI invents a reusable slide
+/// tool as a stamp of one or more elements. The reply is strict JSON the
+/// frontend validates field-by-field before it ever reaches a slide.
+const DECK_TOOL_SYSTEM: &str = "You design reusable tools for a slide editor's toolbar. \
+The user describes a tool; you reply with ONE JSON object — no prose, no markdown fences.\n\
+Schema: {\"name\":\"short label\",\"icon\":\"one glyph like ▲ or ✚\",\"els\":[<element>,...]}\n\
+Each element: {\"kind\":\"shape|text|img\",\"shape\":\"<gallery key>\",\"x\":0-100,\"y\":0-100,\
+\"w\":1-100,\"h\":1-100,\"text\":\"label\",\"fill\":\"#hex\",\"line\":\"#hex\",\"color\":\"#hex\",\
+\"size\":<font px>,\"bold\":false,\"ital\":false,\"align\":\"l|c|r\",\"rot\":<deg>,\"src\":\"<image path or https url>\"}.\n\
+x/y/w/h are PERCENT of the box the user will drag — compose elements inside a 0-100 canvas. \
+Omit empty fields.\n\
+Shape keys: rect round pill ellipse line tri rtri diamond pent hex star arrow darrow uarrow chevron banner callout.\n\
+Rules: 1-8 elements; prefer shapes with text inside; tasteful fills (muted colors, one accent); \
+keep text short (a word or two); text-only tools are fine (kind \"text\" with styled text).\n\
+Examples — \"kpi card\": rounded rect + big centered text; \"process arrow\": chevron; \
+\"warning stamp\": triangle + short label; \"rating\": five stars in a row; \
+\"divider\": a line + small diamond at center.";
+
+/// generate a reusable deck tool spec from a natural-language description —
+/// returns the model's raw reply; the deck validates/sanitizes it client-side.
+/// Leaves the mandatory activity trace either way.
+#[tauri::command]
+pub async fn deck_tool_gen(app: AppHandle, prompt: String) -> Result<String, String> {
+    let p = prompt.trim();
+    if p.is_empty() {
+        return Err("describe the tool first".into());
+    }
+    let p: String = p.chars().take(600).collect();
+    let model = load_settings().model_rewrite;
+    match chat_retry(&model, Some(DECK_TOOL_SYSTEM), &p, 1600).await {
+        Ok(raw) => {
+            let _ = app.emit(
+                "agent:activity",
+                Activity {
+                    text: format!("✦ deck tool drafted — {}", p.chars().take(48).collect::<String>()),
+                },
+            );
+            Ok(raw)
+        }
+        Err(e) => {
+            let _ = app.emit(
+                "agent:activity",
+                Activity {
+                    text: format!("✕ deck tool failed: {e}"),
+                },
+            );
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]

@@ -47,6 +47,7 @@ pub fn recent_notes(hours: u64) -> Vec<(String, String)> {
 }
 
 pub fn write_note(name: &str, md: &str) -> Result<(), String> {
+    safe_name(name).map_err(|_| format!("invalid note name: {name}"))?;
     fs::write(notes_dir().join(name), md).map_err(|e| e.to_string())
 }
 
@@ -110,12 +111,15 @@ pub struct NoteInfo {
     pub modified: u64,
 }
 
-/// notes are `.laido` files; `.md` stays accepted during the migration window
+/// notes are `.laido` files; `.md` stays accepted during the migration
+/// window. Must be a real file — a directory named `x.laido` (sync-tool
+/// junk, a stray mkdir) would otherwise ghost into every listing.
 pub(crate) fn is_note_file(path: &std::path::Path) -> bool {
-    matches!(
-        path.extension().and_then(|e| e.to_str()),
-        Some("laido") | Some("md")
-    )
+    path.is_file()
+        && matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("laido") | Some("md")
+        )
 }
 
 /// The hard edge of the sandbox: every path the agent reads or writes must
@@ -1686,6 +1690,18 @@ mod tests {
         assert!(link_rename_md("no links here", "a.laido", "b.laido").is_none());
     }
 
+    /// the history/snapshot entry points apply the same safe_name edge as
+    /// note_path — a `../..` name can't list or read outside the vault
+    #[test]
+    fn history_and_snapshot_refuse_traversal() {
+        assert!(vault_history("../../outside".into()).is_empty());
+        assert!(vault_history("a/b".into()).is_empty());
+        assert!(vault_snapshot_read("../../outside".into(), 0).is_err());
+        assert!(vault_snapshot_read("x\\y".into(), 0).is_err());
+        // a well-formed name still reaches the (empty) snapshot dir fine
+        assert!(vault_history("never-heard.laido".into()).is_empty());
+    }
+
     #[test]
     fn asset_list_finds_images_only() {
         let tmp = std::env::temp_dir().join(format!("laido-assetlist-{}", now_secs()));
@@ -1943,6 +1959,11 @@ pub struct SnapInfo {
 
 #[tauri::command]
 pub fn vault_history(name: String) -> Vec<SnapInfo> {
+    // same hard edge as note_path — without it a `../..` name would read
+    // directory listings + first lines of files anywhere on disk
+    if safe_name(&name).is_err() {
+        return Vec::new();
+    }
     let hd = snapshot_dir_for(&notes_dir(), &name);
     let mut out: Vec<SnapInfo> = Vec::new();
     if let Ok(rd) = fs::read_dir(&hd) {
@@ -1967,6 +1988,7 @@ pub fn vault_history(name: String) -> Vec<SnapInfo> {
 
 #[tauri::command]
 pub fn vault_snapshot_read(name: String, ts: u128) -> Result<String, String> {
+    safe_name(&name).map_err(|_| "invalid note name".to_string())?;
     let p = snapshot_dir_for(&notes_dir(), &name).join(format!("{}.laido", ts));
     fs::read_to_string(p).map_err(|e| e.to_string())
 }

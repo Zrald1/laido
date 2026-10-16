@@ -2,7 +2,7 @@ import { invoke } from "./ipc.js";
 import { addActivity } from "./log.js";
 import { currentNote, spawnTerminalCard, spawnSheetCard, spawnDeckCard, insertClip, spawnCardsCard, loadNote } from "./editor.js";
 import { sheetApi, cellName } from "./sheet.js";
-import { deckApi, parseSlideLine, emptySlide, DECK_LAYOUTS, DECK_THEMES, DECK_TRANSITIONS } from "./slides.js";
+import { deckApi, parseSlideLine, parseElLine, emptySlide, DECK_LAYOUTS, DECK_THEMES, DECK_TRANSITIONS } from "./slides.js";
 import { todoApi } from "./todo.js";
 import { spawnTodoCard, spawnBrowserCard } from "./editor.js";
 import { browserApi } from "./browser.js";
@@ -12,6 +12,8 @@ import { chartApi, CHART_TYPES } from "./chart.js";
 import { spawnChartCard } from "./editor.js";
 import { mapApi } from "./map.js";
 import { spawnMapCard } from "./editor.js";
+import { baseApi } from "./base.js";
+import { spawnBaseCard, spawnAgendaCard, spawnGraphCard, spawnCanvasCard } from "./editor.js";
 
 interface TermResult {
   ok: boolean;
@@ -37,6 +39,7 @@ interface TermAi {
   cards: string[];
   maps: string[];
   vault: string[];
+  base: string[];
 }
 
 const MAX_STEPS = 12;
@@ -91,7 +94,7 @@ const matchDoc = async (tok: string) => {
   const t = tok.toLowerCase();
   return (await docs()).find((d) => d.slug === t || slugOf(d.name) === t) ?? null;
 };
-const LAIDO_RE = /^(research|ask|document|summary|related|recall|tasks|loop|skill)\b\s*(.*)$/i;
+const LAIDO_RE = /^(research|ask|document|summary|related|recall|tasks|loop|skill|widget|canvas|agenda|graph)\b\s*(.*)$/i;
 /** search queries that are really the model echoing its instructions, not a
  *  real lookup — running them loops the tool chain forever */
 const BOGUS_QUERY = new Set([
@@ -288,6 +291,28 @@ export function wireTerminal(card: HTMLElement) {
           line("ai", `✓ skill ${name} ran — its cards land on your note`);
           break;
         }
+        case "widget":
+        case "canvas":
+        case "agenda":
+        case "graph": {
+          // fence-less spawnables — canvas/agenda/graph have no tool fence
+          // (freeform strokes / computed views); the fence only births them.
+          // `widget canvas t` and bare `canvas t` both work — the model
+          // writes either
+          const bare = verb !== "widget";
+          const sp = rest.match(/^(\S+)\s*(.*)$/);
+          const kind = bare ? verb : (sp?.[1] ?? "").toLowerCase();
+          const title = (bare ? rest : sp?.[2]?.trim() || "")
+            .replace(/^new\s+/i, "").replace(/^a\s+/i, "").trim() || "";
+          const card =
+            kind === "canvas" || kind === "draw" ? spawnCanvasCard(title || "canvas")
+            : kind === "agenda" || kind === "due" ? spawnAgendaCard(title || "agenda")
+            : kind === "graph" || kind === "map-view" ? spawnGraphCard(title || "vault map")
+            : null;
+          if (!card) throw new Error(`unknown widget "${kind}" — canvas · agenda · graph (sheet/slides/todo/chart/cards/map/base spawn from their own fence 'new')`);
+          line("ai", `✓ ${kind} card spawned — "${card.dataset.topic ?? card.dataset.title ?? (title || kind)}"`);
+          break;
+        }
       }
     } catch (err) {
       line("err", `✕ ${String(err)}`);
@@ -445,6 +470,18 @@ export function wireTerminal(card: HTMLElement) {
       const title = mc.dataset.topic ?? "map";
       const n = api ? api.list().split("\n").filter((l) => l.trim()).length : 0;
       parts.push(`map "${title}" — ${n} nodes — use a \`\`\`map fence to add/read`);
+    }
+    // base cards — property-query views; `base` fences set/read them
+    for (const bc of Array.from(document.querySelectorAll<HTMLElement>(".base-card"))) {
+      const api = baseApi(bc);
+      const title = bc.dataset.title ?? "base";
+      if (!api) {
+        parts.push(`base "${title}" (loading)`);
+        continue;
+      }
+      parts.push(
+        `base "${title}" ${api.view()} view${api.query() ? ` q="${api.query()}"` : ""} — ${api.rows().length} rows — use a \`\`\`base fence to set/read it`,
+      );
     }
     return parts.join("\n");
   };
@@ -604,6 +641,77 @@ export function wireTerminal(card: HTMLElement) {
       return `✕ rename needs a map + prefix + -> + new text`;
     }
     return `✕ unknown map verb "${verb}" — new/add/del/rename/list`;
+  };
+
+  /** k=v field scanner for base specs — a value ends at the NEXT k=
+   *  boundary (or `|`/EOL), so `q=a view=b` parses both fields */
+  const kvSpec = (text: string): Record<string, string> => {
+    const out: Record<string, string> = {};
+    const hits = [...text.matchAll(/(?:^|[\s|])(q|cols|sort|group|view|in)\s*[:=]\s*/gi)];
+    for (let i = 0; i < hits.length; i++) {
+      const from = hits[i].index! + hits[i][0].length;
+      const to = hits[i + 1]?.index ?? text.length;
+      const v = text.slice(from, to).split("|")[0].trim();
+      if (v) out[hits[i][1].toLowerCase()] = v;
+    }
+    return out;
+  };
+
+  /** ```base``` fence — property-query views over the vault. The whole
+   *  widget is its query + view, so the verbs are just that.
+   *    new <title> [q=…]        — a base card; optional filter right away
+   *    set <title> k=v …        — q / cols / sort / group / view / in fields
+   *    read|list [title]        — the current result rows as text */
+  const baseTool = async (body: string): Promise<string> => {
+    const lines = body
+      .split("\n")
+      .map((l) => l.replace(/\s+$/, ""))
+      .filter((l) => l.trim() !== "");
+    if (!lines.length) return "✕ empty base command";
+    const hm = lines[0].trim().match(/^(\S+)\s*(.*)$/);
+    const verb = (hm?.[1] ?? "").toLowerCase();
+    const rest = (hm?.[2] ?? "").trim();
+    const findBase = (name: string): HTMLElement | null => {
+      const all = Array.from(document.querySelectorAll<HTMLElement>(".base-card"));
+      if (!all.length) return null;
+      const n = name.trim().toLowerCase();
+      if (!n) return all.length === 1 ? all[0] : null;
+      return (
+        all.find((c) => (c.dataset.title ?? "").toLowerCase() === n) ??
+        all.find((c) => {
+          const t = (c.dataset.title ?? "").toLowerCase();
+          return t.includes(n) || n.includes(t);
+        }) ??
+        (all.length === 1 ? all[0] : null)
+      );
+    };
+    if (verb === "new" || verb === "create") {
+      // `new <title> [q=…] [view=…]` — the title ends at the first k=v field
+      const tm = rest.match(/^(.*?)\s+((?:q|cols|sort|group|view|in)\s*[:=].*)$/i);
+      const card = spawnBaseCard((tm ? tm[1] : rest) || "base");
+      const patch = kvSpec([tm?.[2] ?? "", ...lines.slice(1)].join("\n"));
+      if (Object.keys(patch).length) baseApi(card)?.set(patch);
+      return `created base "${card.dataset.title}"${patch.q ? ` — q="${patch.q}"` : ""}`;
+    }
+    if (verb === "set" || verb === "filter" || verb === "view") {
+      // `set <title> q=status:done view=board` — title words end at first k=
+      const m = rest.match(/^(.*?)\s+((?:q|cols|sort|group|view|in)\s*[:=].*)$/i);
+      const [card, spec] = m ? [findBase(m[1]), m[2]] : [findBase(rest), ""];
+      if (!card) return `✕ no base found named "${rest || "?"}"`;
+      const patch = kvSpec([spec, ...lines.slice(1)].join("\n"));
+      if (!Object.keys(patch).length)
+        return `✕ set needs fields — q= · cols= · sort= · group= · view=table|board|list|calendar · in=folder`;
+      baseApi(card)?.set(patch);
+      return `base "${card.dataset.title}" → ${Object.entries(patch).map(([k, v]) => `${k}=${v}`).join(" ")}`;
+    }
+    if (verb === "read" || verb === "list" || verb === "rows") {
+      const card = findBase(rest);
+      if (!card) return `✕ no base found named "${rest || "?"}"`;
+      const api = baseApi(card);
+      const out = api?.read() ?? "";
+      return out || `base "${card.dataset.title}" — no rows yet (query: ${api?.query() || "none"})`;
+    }
+    return `✕ unknown base verb "${verb}" — new · set · read`;
   };
 
   /** ```cards``` fence — build decks, quiz sessions, rate cards.
@@ -1153,7 +1261,133 @@ export function wireTerminal(card: HTMLElement) {
       const idx = hit.a.duplicate(i - 1);
       return `duplicated slide ${i} → slide ${idx + 1} in "${hit.a.title()}"`;
     }
-    return `✕ unknown slides verb "${verb}" — new · read · outline · addslide · delslide · move · layout · set · append · theme · transition · bg · note · duplicate`;
+
+    /* ---- the insert layer — same `el:` line grammar the file uses ---- */
+    if (verb === "els" || verb === "elements") {
+      const hit = titleTail(/^(.*?)\s+(\d+)$/);
+      const i = Number(hit?.m[2]);
+      if (!hit?.a || !(i >= 1 && i <= hit.a.count())) return `✕ els <title> <n>`;
+      const els = hit.a.listEls(i - 1);
+      if (!els.length) return `slide ${i} has no elements`;
+      return els
+        .map(
+          (el, n) =>
+            `{${n + 1}} ${el.kind}${el.shape ? "." + el.shape : ""} @${el.x},${el.y} ${el.w}x${el.h}` +
+            `${el.fill ? ` fill=${el.fill}` : ""}${el.line ? ` line=${el.line}` : ""}` +
+            `${el.size ? ` ${el.size}px` : ""}${el.rot ? ` rot=${el.rot}` : ""}` +
+            `${el.src ? ` src=${el.src}` : ""}${el.text ? ` "${el.text.replace(/\n/g, " ").slice(0, 48)}"` : ""}`,
+        )
+        .join("\n");
+    }
+    if (verb === "el" || verb === "insert") {
+      // `el <title> <n> shape.arrow 10,20,30,15 | t=Go | f=#e2604c | l=#fff`
+      const hit = titleTail(/^(.*?)\s+(\d+)\s+(\S[\s\S]*)$/);
+      const i = Number(hit?.m[2]);
+      if (!hit?.a || !(i >= 1 && i <= hit.a.count()))
+        return `✕ el <title> <n> <kind[.shape]> x,y,w,h [| t=text | f=#hex | l=#hex | c=#hex | z=px | r=deg | s=src | a=lcr | b=1 | i=1]`;
+      const fake = emptySlide();
+      parseElLine(fake, `el: ${hit.m[3]}`);
+      const el = fake.els[0];
+      if (!el) return `✕ bad el spec — needs "kind[.shape] x,y,w,h"`;
+      const at = hit.a.addEl(i - 1, el);
+      return at >= 0
+        ? `slide ${i} += ${el.kind}${el.shape ? "." + el.shape : ""} (element ${at + 1})`
+        : `✕ element rejected — unknown kind/shape or dead img src`;
+    }
+    if (verb === "elset") {
+      // `elset <title> <n> <m> | f=#hex | t=new text` — patch element m
+      const hit = titleTail(/^(.*?)\s+(\d+)\s+(\d+)\s+([\s\S]*)$/);
+      const i = Number(hit?.m[2]), n = Number(hit?.m[3]);
+      if (!hit?.a || !(i >= 1 && i <= hit.a.count())) return `✕ elset <title> <n> <m> | k=v | …`;
+      const fake = emptySlide();
+      parseElLine(fake, `el: text 0,0,1,1 | ${hit.m[4]}`);
+      const probe = fake.els[0];
+      const patch: Partial<import("./slides.js").SlideEl> = {};
+      if (probe) {
+        if (probe.text) patch.text = probe.text;
+        if (probe.fill) patch.fill = probe.fill;
+        if (probe.line) patch.line = probe.line;
+        if (probe.color) patch.color = probe.color;
+        if (probe.size) patch.size = probe.size;
+        if (probe.rot) patch.rot = probe.rot;
+        if (probe.src) patch.src = probe.src;
+        if (probe.bold) patch.bold = true;
+        if (probe.ital) patch.ital = true;
+        if (probe.align) patch.align = probe.align;
+      }
+      // geometry fields ride the same kv parts (x= y= w= h=)
+      for (const gm of hit.m[4].matchAll(/(?:^|\|)\s*([xywh])\s*=\s*(-?[\d.]+)/g))
+        patch[{ x: "x", y: "y", w: "w", h: "h" }[gm[1]] as "x" | "y" | "w" | "h"] = Number(gm[2]);
+      if (!Object.keys(patch).length) return `✕ elset needs at least one field — | t= | f= | x= | w= | …`;
+      hit.a.setEl(i - 1, n - 1, patch);
+      return `slide ${i} element ${n} updated`;
+    }
+    if (verb === "eldel") {
+      const hit = titleTail(/^(.*?)\s+(\d+)\s+(\d+)$/);
+      const i = Number(hit?.m[2]), n = Number(hit?.m[3]);
+      if (!hit?.a || !(i >= 1 && i <= hit.a.count())) return `✕ eldel <title> <n> <m>`;
+      if (!hit.a.listEls(i - 1)[n - 1]) return `✕ slide ${i} has no element ${n}`;
+      hit.a.delEl(i - 1, n - 1);
+      return `deleted element ${n} on slide ${i} in "${hit.a.title()}"`;
+    }
+
+    /* ---- custom tools — the AI can invent/register/stamp them too ---- */
+    if (verb === "tools") {
+      const a = deckOf(rest);
+      if (!a) return `✕ no deck found named "${rest || "?"}"`;
+      const tl = a.listTools();
+      return tl.length
+        ? `tools in "${a.title()}":\n` + tl.map((t) => `· ${t.icon} ${t.name} — ${t.els.length} element${t.els.length === 1 ? "" : "s"}`).join("\n")
+        : `no custom tools in "${a.title()}" — make one with the 'tool' verb`;
+    }
+    if (verb === "tool" || verb === "addtool") {
+      // `tool <title> {"name":"kpi","icon":"◉","els":[{…}]}` — spec may sit
+      // on the head line or the following rows
+      const hit = titleTail(/^(.*?)\s+(\{[\s\S]*)$/);
+      const spec = hit ? hit.m[2] : rest.includes("{") ? rest : rows.join("\n");
+      const title = hit ? hit.m[1] : rows.length ? "" : rest;
+      const a = deckOf(title.trim());
+      if (!a) return `✕ tool <title> {json} — deck "${title.trim() || "?"}" not found`;
+      return a.addTool(spec);
+    }
+    if (verb === "tooldel" || verb === "rmtool") {
+      // `tooldel <title…> <tool name…>` — both sides may have spaces, so
+      // walk split points and take the split whose deck exists AND names
+      // a real tool; longest title wins (titles match fuzzier than names)
+      const words = rest.split(/\s+/).filter(Boolean);
+      for (let k = words.length - 1; k >= 1; k--) {
+        const a = deckOf(words.slice(0, k).join(" "));
+        if (!a) continue;
+        const name = words.slice(k).join(" ");
+        if (a.listTools().some((t) => t.name === name))
+          return a.delTool(name) ? `removed tool "${name}"` : `✕ no tool named "${name}"`;
+      }
+      // bare `tooldel <name>` with a lone deck — or title-only match
+      const decks = Array.from(document.querySelectorAll<HTMLElement>(".deck-card"));
+      for (const c of decks) {
+        const a = deckApi(c);
+        if (a?.listTools().some((t) => t.name === rest))
+          return a.delTool(rest) ? `removed tool "${rest}"` : `✕ no tool named "${rest}"`;
+      }
+      const hit = titleTail(/^(.*?)\s+(.+)$/);
+      if (hit?.a) {
+        const name = hit.m[2].trim();
+        return hit.a.delTool(name) ? `removed tool "${name}"` : `✕ no tool named "${name}"`;
+      }
+      return `✕ tooldel <title> <tool name>`;
+    }
+    if (verb === "stamp") {
+      // `stamp <title> <n> <tool name> [x,y,w,h]` — run a custom tool onto slide n
+      const hit = titleTail(/^(.*?)\s+(\d+)\s+([\s\S]+)$/);
+      const i = Number(hit?.m[2]);
+      if (!hit?.a || !(i >= 1 && i <= hit.a.count())) return `✕ stamp <title> <n> <tool name> [x,y,w,h]`;
+      const bm = hit.m[3].match(/^(.*?)\s+(-?[\d.]+),(-?[\d.]+),(-?[\d.]+),(-?[\d.]+)\s*$/);
+      const name = bm ? bm[1].trim() : hit.m[3].trim();
+      const box = bm ? [Number(bm[2]), Number(bm[3]), Number(bm[4]), Number(bm[5])] as const : undefined;
+      return hit.a.stamp(i - 1, name, ...(box ?? []));
+    }
+
+    return `✕ unknown slides verb "${verb}" — new · read · outline · addslide · delslide · move · layout · set · append · theme · transition · bg · note · duplicate · el · els · elset · eldel · stamp · tool · tools · tooldel`;
   };
 
   /** locate a todo card by title — same fuzzy logic as findSheet */
@@ -1601,7 +1835,8 @@ export function wireTerminal(card: HTMLElement) {
         r.chart.length === 0 &&
         r.cards.length === 0 &&
         r.maps.length === 0 &&
-        r.vault.length === 0;
+        r.vault.length === 0 &&
+        (r.base ?? []).length === 0;
       const narratedTool =
         noWidgetFence &&
         !/\b(shall i|want me|would you like|do you want|should i)\b/i.test(r.text) &&
@@ -1631,6 +1866,7 @@ export function wireTerminal(card: HTMLElement) {
         ...r.todo.map((c) => "```todo\n" + c + "\n```"),
         ...r.browser.map((c) => "```browser\n" + c + "\n```"),
         ...r.chart.map((c) => "```chart\n" + c + "\n```"),
+        ...(r.base ?? []).map((c) => "```base\n" + c + "\n```"),
       ].join("\n");
       history.push({ role: "user", content: text });
       history.push({ role: "assistant", content: [r.text, proposed].filter(Boolean).join("\n") });
@@ -1883,6 +2119,22 @@ export function wireTerminal(card: HTMLElement) {
         history.push({ role: "user", content: `note tool result:\n${out}` });
         if ((verb === "read" || verb === "get" || verb === "list") && steps < MAX_STEPS)
           finalText = await aiTurn("answer the request using this note data", true);
+      }
+      for (const body of r.base ?? []) {
+        // "```base\nset myview q=status:done view=board```" — query cards
+        const verb = (body.trim().split(/\s+/)[0] ?? "").toLowerCase();
+        const out = await baseTool(body);
+        const head = body.trim().split("\n")[0] ?? "";
+        line("laido", `base: ${head} → ${out.slice(0, 120)}`);
+        if (out.startsWith("✕")) {
+          history.push({ role: "user", content: `base tool failed: ${out}` });
+          if (steps < MAX_STEPS)
+            finalText = await aiTurn("the base action failed — retry with the correct syntax", true);
+          continue;
+        }
+        history.push({ role: "user", content: `base tool result:\n${out}` });
+        if ((verb === "read" || verb === "list" || verb === "rows") && steps < MAX_STEPS)
+          finalText = await aiTurn("answer the request using this view data", true);
       }
       for (const cmd of r.commands) {
         const out = await runShell(cmd);

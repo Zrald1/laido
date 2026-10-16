@@ -1698,6 +1698,135 @@ body:not(.lib-open) #library { padding: 0; border-right: 0; }
   display: inline-block; padding: 0 4px; border-radius: 4px;
   font-size: 10px; margin-right: 4px; font-weight: 700;
 }
+/* ---------- freeform elements — text boxes / shapes / pictures ---------- */
+.d-els { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 2; }
+.d-el {
+  position: absolute; box-sizing: border-box; pointer-events: auto;
+  cursor: grab; min-width: 1.5%;
+}
+.d-el:active { cursor: grabbing; }
+.d-el.on { outline: 1px dashed var(--dk-ac); outline-offset: 2px; }
+.d-el .d-sh { position: absolute; inset: 0; }
+.d-el .d-sh-bar { inset: 40% 0; } /* line shapes render as a centered bar */
+.d-el-tx {
+  position: absolute; inset: 6% 8%; display: flex;
+  align-items: center; justify-content: center;
+  font-size: 13px; color: var(--dk-fg); outline: none;
+  white-space: pre-wrap; word-break: break-word; text-align: center;
+  cursor: text; overflow: hidden;
+}
+.d-el.kind-text .d-el-tx { inset: 4%; justify-content: flex-start; }
+.d-el.kind-text .d-el-tx[style*="text-align:center"] { justify-content: center; }
+.d-el.kind-text .d-el-tx[style*="text-align:right"] { justify-content: flex-end; }
+.d-el-tx[data-ph]:empty::before {
+  content: attr(data-ph); color: var(--dk-sub); opacity: .55; pointer-events: none;
+}
+.d-el .d-el-img { width: 100%; height: 100%; object-fit: cover; display: block; border-radius: 4px; }
+.d-el .d-el-img.img-missing { background: var(--bg-3); }
+.d-el-cap { inset: auto 0 0 0 !important; min-height: 1.2em; font-size: 10px; opacity: .9; background: color-mix(in srgb, var(--dk-bg) 55%, transparent); }
+.d-el-ph { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; border: 1px dashed var(--dk-sub); border-radius: 6px; color: var(--dk-sub); font-size: 11px; }
+/* selection handles */
+.d-el-h {
+  position: absolute; width: 8px; height: 8px; margin: -4px;
+  background: var(--bg-2); border: 1.5px solid var(--dk-ac); border-radius: 2px;
+  z-index: 3;
+}
+.d-el-h.nw { left: 0; top: 0; cursor: nwse-resize; }
+.d-el-h.ne { right: 0; top: 0; cursor: nesw-resize; }
+.d-el-h.sw { left: 0; bottom: 0; cursor: nesw-resize; }
+.d-el-h.se { right: 0; bottom: 0; cursor: nwse-resize; }
+/* floating mini format bar — Shape Format essentials */
+.d-el-bar {
+  position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 1px; padding: 2px 4px;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 7px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.3); z-index: 5; white-space: nowrap;
+}
+.d-el-bar.below { bottom: auto; top: calc(100% + 8px); }
+.d-el-btn {
+  padding: 1px 6px; border: none; border-radius: 5px; background: none;
+  color: var(--muted); font-size: 11px; line-height: 1.5; cursor: pointer;
+}
+.d-el-btn:hover { background: var(--bg-3); color: var(--accent); }
+.d-el-btn.on { color: var(--accent); }
+.d-el-sws {
+  position: absolute; top: 100%; left: 0; display: flex; gap: 3px;
+  padding: 4px; background: var(--bg-2); border: 1px solid var(--line);
+  border-radius: 7px; box-shadow: 0 6px 20px rgba(0,0,0,.3);
+}
+.d-el-sw {
+  width: 14px; height: 14px; border-radius: 4px; border: 1px solid var(--line);
+  cursor: pointer; padding: 0;
+}
+/* ---------- custom deck tools (AI-drafted / captured stamps) ---------- */
+.deck-ctools { display: inline-flex; align-items: center; gap: 2px; }
+.deck-btn.deck-ctool { color: var(--accent); }
+.deck-toolpop { min-width: 240px; max-width: 280px; padding: 8px; }
+.deck-toolpop .dt-title {
+  font-size: 11px; font-weight: 700; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .06em; margin: 0 2px 6px;
+}
+.deck-toolpop .dt-row { display: flex; gap: 5px; margin-bottom: 6px; }
+.deck-toolpop .dt-in {
+  flex: 1; min-width: 0; padding: 5px 8px; font-size: 12px;
+  background: var(--bg-1); color: var(--text);
+  border: 1px solid var(--line); border-radius: 7px; outline: none;
+}
+.deck-toolpop .dt-in:focus { border-color: var(--accent); }
+.deck-toolpop .dt-go {
+  padding: 5px 12px; font-size: 12px; font-weight: 600;
+  background: var(--accent); color: var(--bg-1);
+  border: none; border-radius: 7px; cursor: pointer;
+}
+.deck-toolpop .dt-go:disabled { opacity: .55; cursor: wait; }
+.deck-toolpop .dt-cap {
+  display: block; width: 100%; margin-bottom: 6px; padding: 5px 8px;
+  font-size: 11.5px; text-align: left; background: var(--bg-1);
+  color: var(--text); border: 1px dashed var(--line);
+  border-radius: 7px; cursor: pointer;
+}
+.deck-toolpop .dt-cap:not(:disabled):hover { border-color: var(--accent); color: var(--accent); }
+.deck-toolpop .dt-cap:disabled { opacity: .5; cursor: default; }
+.deck-toolpop .dt-status { font-size: 11px; color: var(--muted); min-height: 14px; margin: 0 2px 6px; }
+.deck-toolpop .dt-status:empty { margin-bottom: 0; }
+.deck-toolpop .dt-list { max-height: 150px; overflow-y: auto; }
+.deck-toolpop .dt-empty { font-size: 11px; color: var(--muted); opacity: .8; padding: 4px 2px; }
+.deck-toolpop .dt-item {
+  display: flex; align-items: center; gap: 6px; padding: 3px 4px;
+  border-radius: 6px; font-size: 12px;
+}
+.deck-toolpop .dt-item:hover { background: var(--bg-3); }
+.deck-toolpop .dt-item-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.deck-toolpop .dt-item-x {
+  border: none; background: none; color: var(--muted); font-size: 11px;
+  cursor: pointer; padding: 2px 6px; border-radius: 5px;
+}
+.deck-toolpop .dt-item-x:hover { background: var(--bg-1); color: #e2604c; }
+.d-el-sw:hover { transform: scale(1.15); border-color: var(--accent); }
+/* place gesture — armed insert tool */
+.deck-stage.placing .dslide.live { cursor: crosshair; }
+.d-place {
+  position: absolute; border: 1px dashed var(--dk-ac); border-radius: 4px;
+  background: color-mix(in srgb, var(--dk-ac) 12%, transparent);
+  pointer-events: none; z-index: 4;
+}
+.deck-btn.armed { background: var(--bg-3); color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+/* shape gallery popover — a compact icon grid like PowerPoint's */
+.deck-shapepop {
+  display: grid; grid-template-columns: repeat(6, 30px); gap: 2px;
+  min-width: 0; padding: 5px;
+}
+.d-shape-item {
+  display: flex !important; align-items: center; justify-content: center;
+  width: 30px; height: 26px; padding: 3px !important;
+}
+.dsh { width: 22px; height: 17px; display: inline-flex; align-items: center; justify-content: center; }
+.dsh-fill { width: 100%; height: 100%; background: var(--accent); display: block; }
+.dsh-line { width: 100%; height: 2px; background: var(--accent); display: block; }
+/* present mode + sorter minis never show editing chrome */
+.dp-slide .d-el-bar, .dp-slide .d-el-h, .dp-slide .d-place,
+.ds-mini .d-el-bar, .ds-mini .d-el-h { display: none !important; }
+.dp-slide .d-el-tx, .ds-mini .d-el-tx { cursor: default; }
 /* ---------- present mode — fullscreen overlay ---------- */
 .deck-present {
   position: fixed; inset: 0; z-index: 200;

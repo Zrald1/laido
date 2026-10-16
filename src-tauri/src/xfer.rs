@@ -10,14 +10,21 @@ use base64::Engine as _;
 use std::path::{Path, PathBuf};
 
 /// relative paths resolve inside the vault; absolute paths pass through —
-/// the file dialog hands us absolute paths the user picked on purpose
+/// the file dialog hands us absolute paths the user picked on purpose.
+/// A *relative* path is a bare name or subdir — `..`, root markers or
+/// prefix components would escape the vault, so they're refused.
 fn resolve(path: &str) -> Result<PathBuf, String> {
     let p = Path::new(path);
     if p.is_absolute() {
         return Ok(p.to_path_buf());
     }
-    let root = crate::vault::vault_root();
-    Ok(root.join(p))
+    use std::path::Component;
+    if p.components()
+        .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir))
+    {
+        return Err("path must stay inside the vault".into());
+    }
+    Ok(crate::vault::vault_root().join(p))
 }
 
 #[tauri::command]
@@ -141,6 +148,28 @@ pub fn sheet_xlsx_sheets(path: String) -> Result<Vec<String>, String> {
 
 /* =================== PPTX =================== */
 
+/// a freeform object on a slide — text box, shape, or picture (`el:` lines).
+/// x/y/w/h are % of the slide box.
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct ElOut {
+    pub kind: String,
+    #[serde(default)] pub x: f64,
+    #[serde(default)] pub y: f64,
+    #[serde(default)] pub w: f64,
+    #[serde(default)] pub h: f64,
+    #[serde(default)] pub shape: String,
+    #[serde(default)] pub text: String,
+    #[serde(default)] pub fill: String,
+    #[serde(default)] pub line: String,
+    #[serde(default)] pub color: String,
+    #[serde(default)] pub size: f64,
+    #[serde(default)] pub src: String,
+    #[serde(default)] pub rot: f64,
+    #[serde(default)] pub bold: bool,
+    #[serde(default)] pub ital: bool,
+    #[serde(default)] pub align: String,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SlideOut {
     pub layout: String,
@@ -154,6 +183,8 @@ pub struct SlideOut {
     pub body: String,
     pub note: String,
     pub bg: String,
+    #[serde(default)]
+    pub els: Vec<ElOut>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -226,8 +257,123 @@ fn bullets_xml(id: u32, name: &str, x: i64, y: i64, cx: i64, cy: i64, bullets: &
     )
 }
 
+/// Laido shape keys → OOXML preset geometry names
+fn preset(name: &str) -> &str {
+    match name {
+        "round" | "pill" => "roundRect",
+        "ellipse" => "ellipse",
+        "line" => "rect",
+        "tri" => "triangle",
+        "rtri" => "rtTriangle",
+        "diamond" => "diamond",
+        "pent" => "pentagon",
+        "hex" => "hexagon",
+        "star" => "star5",
+        "arrow" => "rightArrow",
+        "darrow" => "leftRightArrow",
+        "uarrow" => "upArrow",
+        "chevron" => "chevron",
+        "banner" => "ribbon",
+        "callout" => "wedgeRectCallout",
+        _ => "rect",
+    }
+}
+
+/// runs for one multi-line string, honoring bold/italic/size/color
+fn runs_xml(text: &str, size: u32, bold: bool, ital: bool, color: &str) -> String {
+    let mut out = String::new();
+    for seg in text.split('\n') {
+        out.push_str(&format!(
+            "<a:r><a:rPr lang=\"en-US\" sz=\"{size}\"{}{} dirty=\"0\"><a:solidFill><a:srgbClr val=\"{color}\"/></a:solidFill></a:rPr><a:t>{}</a:t></a:r>",
+            if bold { " b=\"1\"" } else { "" },
+            if ital { " i=\"1\"" } else { "" },
+            esc(seg)
+        ));
+    }
+    out
+}
+
+/// freeform elements → p:sp/p:pic shapes; `img_rids` carries the rel id for
+/// each `kind=="img"` element in order (None when its file didn't load)
+fn els_xml(
+    els: &[ElOut], w: i64, h: i64, fg: &str, accent: &str,
+    img_rids: &[Option<String>], id: &mut u32,
+) -> String {
+    let mut out = String::new();
+    let mut rid_i = 0usize;
+    let px = |v: f64| (v / 100.0 * w as f64) as i64;
+    let py = |v: f64| (v / 100.0 * h as f64) as i64;
+    for el in els {
+        *id += 1;
+        let idv = *id;
+        let (x, y, cx, cy) = (px(el.x), py(el.y), px(el.w), py(el.h));
+        let rot = if el.rot != 0.0 {
+            format!(" rot=\"{}\"", (el.rot * 60000.0) as i64)
+        } else {
+            String::new()
+        };
+        let ink = hex6(&el.color).unwrap_or_else(|| fg.to_string());
+        let sz = if el.size > 0.0 { (el.size * 100.0) as u32 } else { 1400 };
+        let algn = match el.align.as_str() {
+            "c" => "ctr",
+            "r" => "r",
+            _ => "l",
+        };
+        match el.kind.as_str() {
+            "img" => {
+                let rid = img_rids.get(rid_i).cloned().flatten();
+                rid_i += 1;
+                if let Some(rid) = rid {
+                    out.push_str(&format!(
+                        "<p:pic><p:nvPicPr><p:cNvPr id=\"{idv}\" name=\"laido:el:img\"/><p:cNvPicPr><a:picLocks noChangeAspect=\"1\"/></p:cNvPicPr><p:nvPr/></p:nvPicPr>\
+                         <p:blipFill><a:blip r:embed=\"{rid}\"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>\
+                         <p:spPr><a:xfrm{rot}><a:off x=\"{x}\" y=\"{y}\"/><a:ext cx=\"{cx}\" cy=\"{cy}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr></p:pic>"
+                    ));
+                }
+            }
+            "shape" => {
+                let fill = match hex6(&el.fill) {
+                    Some(c) => format!("<a:solidFill><a:srgbClr val=\"{c}\"/></a:solidFill>"),
+                    None => format!("<a:solidFill><a:srgbClr val=\"{accent}\"/></a:solidFill>"),
+                };
+                let ln = match hex6(&el.line) {
+                    Some(c) => format!("<a:ln w=\"19050\"><a:solidFill><a:srgbClr val=\"{c}\"/></a:solidFill></a:ln>"),
+                    None => "<a:ln><a:noFill/></a:ln>".to_string(),
+                };
+                let body = if el.text.is_empty() {
+                    "<a:p/>".to_string()
+                } else {
+                    format!("<a:p><a:pPr algn=\"{algn}\"/>{}</a:p>", runs_xml(&el.text, sz, el.bold, el.ital, &ink))
+                };
+                out.push_str(&format!(
+                    "<p:sp><p:nvSpPr><p:cNvPr id=\"{idv}\" name=\"laido:el:{}\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>\
+                     <p:spPr><a:xfrm{rot}><a:off x=\"{x}\" y=\"{y}\"/><a:ext cx=\"{cx}\" cy=\"{cy}\"/></a:xfrm>\
+                     <a:prstGeom prst=\"{}\"><a:avLst/></a:prstGeom>{fill}{ln}</p:spPr>\
+                     <p:txBody><a:bodyPr wrap=\"square\" anchor=\"mid\" anchorCtr=\"1\"/><a:lstStyle/>{body}</p:txBody></p:sp>",
+                    esc(&el.shape), preset(&el.shape)
+                ));
+            }
+            _ => {
+                // text box — transparent box, positioned runs
+                let body = if el.text.is_empty() {
+                    "<a:p/>".to_string()
+                } else {
+                    format!("<a:p><a:pPr algn=\"{algn}\"/>{}</a:p>", runs_xml(&el.text, sz, el.bold, el.ital, &ink))
+                };
+                out.push_str(&format!(
+                    "<p:sp><p:nvSpPr><p:cNvPr id=\"{idv}\" name=\"laido:el:text\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr>\
+                     <p:spPr><a:xfrm{rot}><a:off x=\"{x}\" y=\"{y}\"/><a:ext cx=\"{cx}\" cy=\"{cy}\"/></a:xfrm>\
+                     <a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr>\
+                     <p:txBody><a:bodyPr wrap=\"square\" anchor=\"mid\" anchorCtr=\"1\"/><a:lstStyle/>{body}</p:txBody></p:sp>"
+                ));
+            }
+        }
+    }
+    out
+}
+
 /// one slide's xml — layout decides the shape set; bg hex → slide fill
-fn slide_xml(s: &SlideOut, bg: &str, fg: &str, sub: &str, accent: &str, img_rid: Option<(&str, i64, i64)>) -> String {
+fn slide_xml(s: &SlideOut, bg: &str, fg: &str, sub: &str, accent: &str, img_rid: Option<(&str, i64, i64)>, el_rids: &[Option<String>]) -> String {
     let w: i64 = 12192000;
     let h: i64 = 6858000;
     let mx: i64 = 731520; // 0.8" margin
@@ -302,13 +448,15 @@ fn slide_xml(s: &SlideOut, bg: &str, fg: &str, sub: &str, accent: &str, img_rid:
         ),
         None => String::new(),
     };
+    // freeform insert objects — rendered above the layout content
+    let elxml = els_xml(&s.els, w, h, fg, accent, el_rids, &mut id);
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
          <p:sld xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\">\
          <p:cSld>{bgxml}<p:spTree>\
          <p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>\
          <p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"0\" cy=\"0\"/></a:xfrm></p:grpSpPr>\
-         {shapes}</p:spTree></p:cSld><p:clrMapOvr><a:overrideClrMapping/></p:clrMapOvr></p:sld>"
+         {shapes}{elxml}</p:spTree></p:cSld><p:clrMapOvr><a:overrideClrMapping/></p:clrMapOvr></p:sld>"
     )
 }
 
@@ -378,22 +526,39 @@ pub fn deck_pptx_export(path: String, deck: DeckOut, theme: Option<serde_json::V
     // image media types actually used get Defaults below
     let mut media: Vec<(String, Vec<u8>)> = Vec::new(); // (name.ext, bytes)
     let mut used_ext: Vec<String> = Vec::new();
+    // per-slide media names aligned to src order — [s.img, ...img els]; a
+    // failed load stays None so rels never point at the wrong image
+    let mut slide_media: Vec<Vec<Option<String>>> = Vec::new();
     for s in &deck.slides {
-        if !s.img.is_empty() {
-            let imgp = resolve(&s.img).unwrap_or_else(|_| Path::new(&s.img).to_path_buf());
-            if let Ok(bytes) = fs::read(&imgp) {
-                let ext = imgp
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("png")
-                    .to_lowercase();
-                let ext = if ext == "jpeg" { "jpg".into() } else { ext };
-                media.push((format!("image{}.{}", media.len() + 1, ext), bytes));
-                if !used_ext.contains(&ext) {
-                    used_ext.push(ext);
+        let srcs: Vec<&str> = std::iter::once(s.img.as_str())
+            .chain(s.els.iter().filter(|e| e.kind == "img").map(|e| e.src.as_str()))
+            .collect();
+        let mut aligned: Vec<Option<String>> = Vec::new();
+        for src in srcs {
+            if src.is_empty() {
+                aligned.push(None);
+                continue;
+            }
+            let imgp = resolve(src).unwrap_or_else(|_| Path::new(src).to_path_buf());
+            match fs::read(&imgp) {
+                Ok(bytes) => {
+                    let ext = imgp
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("png")
+                        .to_lowercase();
+                    let ext = if ext == "jpeg" { "jpg".into() } else { ext };
+                    let name = format!("image{}.{}", media.len() + 1, ext);
+                    media.push((name.clone(), bytes));
+                    aligned.push(Some(name));
+                    if !used_ext.contains(&ext) {
+                        used_ext.push(ext);
+                    }
                 }
+                Err(_) => aligned.push(None),
             }
         }
+        slide_media.push(aligned);
     }
     for e in &used_ext {
         let mime = match e.as_str() {
@@ -554,25 +719,33 @@ pub fn deck_pptx_export(path: String, deck: DeckOut, theme: Option<serde_json::V
          </Relationships>")?;
 
     // slides + optional notes + media
-    let mut media_i = 0;
     for (i, s) in deck.slides.iter().enumerate() {
         let n = i + 1;
+        let aligned = &slide_media[i];
         let mut img_rid: Option<(&str, i64, i64)> = None;
         let mut srels_extra = String::new();
         if !s.img.is_empty() {
-            media_i += 1;
-            if let Some((name, _bytes)) = media.get(media_i - 1) {
-                // only embed when the file actually loaded
-                let imgp = resolve(&s.img).unwrap_or_else(|_| Path::new(&s.img).to_path_buf());
-                if imgp.exists() {
-                    img_rid = Some(("rId2", 9600000, 4200000));
-                    srels_extra = format!(
-                        "<Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"../media/{name}\"/>");
+            if let Some(Some(name)) = aligned.first() {
+                img_rid = Some(("rId2", 9600000, 4200000));
+                srels_extra.push_str(&format!(
+                    "<Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"../media/{name}\"/>"));
+            }
+        }
+        // element images take rId 10+ — rId2 is the layout img, rId3 notes
+        let mut el_rids: Vec<Option<String>> = Vec::new();
+        for (k, _e) in s.els.iter().filter(|e| e.kind == "img").enumerate() {
+            match aligned.get(k + 1).and_then(|n| n.as_ref()) {
+                Some(name) => {
+                    let rid = format!("rId{}", 10 + k);
+                    srels_extra.push_str(&format!(
+                        "<Relationship Id=\"{rid}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"../media/{name}\"/>"));
+                    el_rids.push(Some(rid));
                 }
+                None => el_rids.push(None),
             }
         }
         let slide_bg = if s.bg.is_empty() { bg.as_str() } else { s.bg.as_str() };
-        put(&mut z, &format!("ppt/slides/slide{n}.xml"), &slide_xml(s, slide_bg, &fg, &sub, &accent, img_rid))?;
+        put(&mut z, &format!("ppt/slides/slide{n}.xml"), &slide_xml(s, slide_bg, &fg, &sub, &accent, img_rid, &el_rids))?;
         let mut srels = format!(
             "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout\" Target=\"../slideLayouts/slideLayout1.xml\"/>");
         srels.push_str(&srels_extra);
@@ -644,6 +817,7 @@ pub fn deck_pptx_import(path: String) -> Result<DeckOut, String> {
             body: String::new(),
             note: String::new(),
             bg: String::new(),
+            els: Vec::new(),
         };
         // slide background
         if let Some(bgm) = xml.find("<p:bg>") {
@@ -816,6 +990,24 @@ fn unesc(s: &str) -> String {
 mod tests {
     use super::*;
 
+    /// relative paths must stay under the vault — `..`, drive prefixes
+    /// and root markers are refused; bare names + subdirs still work
+    #[test]
+    fn resolve_stays_inside_the_vault() {
+        assert!(resolve("../escape.txt").is_err());
+        assert!(resolve("sub/../../escape.txt").is_err());
+        assert!(resolve("ok.txt").is_ok());
+        assert!(resolve("exports/ok.csv").is_ok());
+        // `/x` is a root-anchored relative on Windows (refused) but an
+        // absolute path on unix (passes through — dialog semantics)
+        #[cfg(target_os = "windows")]
+        assert!(resolve("/abs-ish.txt").is_err());
+        #[cfg(target_os = "windows")]
+        assert!(resolve("C:\\temp\\ok.csv").is_ok());
+        #[cfg(not(target_os = "windows"))]
+        assert!(resolve("/tmp/ok.csv").is_ok());
+    }
+
     #[test]
     fn xlsx_round_trip() {
         let dir = std::env::temp_dir().join("laido-xfer-x");
@@ -854,6 +1046,7 @@ mod tests {
                 cols: (vec![], vec![]),
                 quote: "".into(),
                 by: "".into(),
+                els: vec![],
             },
             SlideOut {
                 layout: "bullets".into(),
@@ -867,6 +1060,7 @@ mod tests {
                 cols: (vec![], vec![]),
                 quote: "".into(),
                 by: "".into(),
+                els: vec![],
             },
             SlideOut {
                 layout: "twocol".into(),
@@ -880,6 +1074,7 @@ mod tests {
                 cols: (vec!["left a".into(), "left b".into()], vec!["right 1".into()]),
                 quote: "".into(),
                 by: "".into(),
+                els: vec![],
             },
             SlideOut {
                 layout: "quote".into(),
@@ -893,6 +1088,14 @@ mod tests {
                 cols: (vec![], vec![]),
                 quote: "Ship it".into(),
                 by: "CEO".into(),
+                els: vec![ElOut {
+                    kind: "text".into(),
+                    x: 10.0, y: 70.0, w: 40.0, h: 12.0,
+                    text: "foot <note>".into(),
+                    size: 14.0,
+                    bold: true,
+                    ..ElOut::default()
+                }],
             },
         ];
         let theme = serde_json::json!({"bg":"#F4F1EA","fg":"#1C1A17","sub":"#7A7165","accent":"#B05C4A"});
@@ -907,6 +1110,13 @@ mod tests {
         assert_eq!(back.slides[2].cols.0, vec!["left a", "left b"]);
         assert_eq!(back.slides[2].cols.1, vec!["right 1"]);
         assert_eq!(back.slides[3].quote, "Ship it");
+        // freeform el exported as a positioned text box on slide 4
+        let mut za = zip::ZipArchive::new(fs::File::open(&path).unwrap()).unwrap();
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut za.by_name("ppt/slides/slide4.xml").unwrap(), &mut xml).unwrap();
+        assert!(xml.contains("laido:el:text"), "el text box missing from slide xml");
+        assert!(xml.contains("foot &lt;note&gt;"), "el text escaped into the run");
+        assert!(xml.contains("b=\"1\""), "el bold flag exported");
         fs::remove_file(&path).ok();
     }
 }
