@@ -110,6 +110,11 @@ function render() {
     });
     t.append(label, x);
     t.addEventListener("click", () => void select(name));
+    t.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openTabMenu(name, e.clientX, e.clientY);
+    });
     let dragFrom: { x: number; y: number } | null = null;
     t.addEventListener("pointerdown", (e) => {
       if ((e.target as HTMLElement).closest(".tab-close, .tab-snd")) return;
@@ -166,6 +171,96 @@ async function close(name: string) {
   }
   persist();
   render();
+}
+
+/** bulk close — one save, one render. If the active tab is among the
+ *  doomed, the clicked-on anchor tab becomes active (it survives every
+ *  bulk op), else the nearest survivor. */
+async function closeMany(doomed: string[], anchor: string) {
+  const gone = new Set(doomed.filter((n) => typeof n === "string" && n));
+  if (!gone.size) return;
+  await save();
+  const ai = tabs.indexOf(anchor);
+  tabs = tabs.filter((n) => !gone.has(n));
+  if (!tabs.includes(active)) {
+    active = tabs.includes(anchor)
+      ? anchor
+      : tabs[Math.min(ai, Math.max(tabs.length - 1, 0))] ?? "";
+    if (active) {
+      try {
+        await loadNote(active);
+      } catch {
+        active = "";
+      }
+    } else {
+      clearNote();
+    }
+  }
+  persist();
+  render();
+}
+
+/* ---- tab context menu: close / others / right / left (Chrome-style) ---- */
+
+let tabMenu: HTMLDivElement | null = null;
+
+function closeTabMenu() {
+  if (!tabMenu) return;
+  tabMenu.remove();
+  tabMenu = null;
+  document.removeEventListener("pointerdown", onTabMenuOutside, true);
+  document.removeEventListener("keydown", onTabMenuKey, true);
+  $("#tabs")?.removeEventListener("contextmenu", onTabMenuReopen, true);
+}
+
+function openTabMenu(name: string, x: number, y: number) {
+  closeTabMenu();
+  const i = tabs.indexOf(name);
+  if (i < 0) return;
+  const menu = document.createElement("div");
+  menu.className = "menu tab-ctx";
+  const items: { label: string; run: () => void; enabled: boolean }[] = [
+    { label: "Close", run: () => void close(name), enabled: true },
+    { label: "Close other tabs", run: () => void closeMany(tabs.filter((n) => n !== name), name), enabled: tabs.length > 1 },
+    { label: "Close tabs to the right", run: () => void closeMany(tabs.slice(i + 1), name), enabled: i < tabs.length - 1 },
+    { label: "Close tabs to the left", run: () => void closeMany(tabs.slice(0, i), name), enabled: i > 0 },
+  ];
+  for (const it of items) {
+    const b = document.createElement("button");
+    b.textContent = it.label;
+    if (!it.enabled) b.classList.add("off");
+    else
+      b.addEventListener("click", () => {
+        closeTabMenu();
+        it.run();
+      });
+    menu.append(b);
+  }
+  document.body.append(menu);
+  tabMenu = menu;
+  // keep the menu on screen — clamp inside the window
+  const r = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(4, Math.min(x, window.innerWidth - r.width - 6))}px`;
+  menu.style.top = `${Math.max(4, Math.min(y, window.innerHeight - r.height - 6))}px`;
+  window.setTimeout(() => {
+    document.addEventListener("pointerdown", onTabMenuOutside, true);
+    document.addEventListener("keydown", onTabMenuKey, true);
+    window.addEventListener("blur", closeTabMenu, { once: true });
+    $("#tabs").addEventListener("contextmenu", onTabMenuReopen, true);
+  }, 0);
+}
+
+function onTabMenuOutside(e: Event) {
+  if (tabMenu && !(e.target as HTMLElement).closest(".tab-ctx")) closeTabMenu();
+}
+function onTabMenuKey(e: KeyboardEvent) {
+  if (e.key === "Escape") {
+    e.stopPropagation();
+    closeTabMenu();
+  }
+}
+function onTabMenuReopen() {
+  closeTabMenu();
 }
 
 export async function openTab(name: string) {

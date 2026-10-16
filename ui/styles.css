@@ -175,6 +175,9 @@ body.no-rail .rail-tab { display: block; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .menu button:hover { background: var(--bg-3); }
+/* tab context menu — floats at the cursor, not under a parent */
+.menu.tab-ctx { position: fixed; width: 190px; z-index: 60; }
+.menu.tab-ctx button.off { color: var(--muted); opacity: .45; pointer-events: none; }
 .menu-sub {
   font-size: 11px; color: var(--muted); padding: 4px 10px 1px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
