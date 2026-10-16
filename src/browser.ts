@@ -223,6 +223,10 @@ let pvSeq = 0;
  * intent per engine so fresh page loads re-mute themselves. */
 const mutedPv = new Set<string>();
 const audioPv = new Map<string, { playing: boolean; muted: boolean; title: string }>();
+/* engine → the note its card lived in — stamped by enhanceCard into
+ * dataset.note, refreshed on every claim so a re-parked engine always
+ * reports to the right tab (drives the note-tab 🔊 indicator) */
+const engineNote = new Map<string, string>();
 /* engines parked by a note switch, keyed by url — a revived card whose
  * markdown never caught its bv: line can still re-claim its engine */
 const parkedByUrl = new Map<string, string>();
@@ -262,6 +266,7 @@ const renderAudioPill = () => {
         void invoke("pv_close", { id }).catch(() => {});
         audioPv.delete(id);
         mutedPv.delete(id);
+        engineNote.delete(id);
         renderAudioPill();
         return;
       }
@@ -336,9 +341,26 @@ const startAudioPoll = () => {
         } catch { /* odd page state — skip this engine */ }
       }),
     );
-    for (const id of [...audioPv.keys()]) if (!ids.includes(id)) audioPv.delete(id);
+    for (const id of [...audioPv.keys()])
+      if (!ids.includes(id)) { audioPv.delete(id); engineNote.delete(id); }
     renderAudioPill();
     paintSndButtons();
+    /* note-tab 🔊: which notes own a playing engine — tabs.ts paints the
+     * icon so a song parked in the background can be found and returned
+     * to in one click */
+    const noteAudio = new Map<string, { titles: string[]; muted: boolean }>();
+    for (const [id, a] of audioPv) {
+      if (!a.playing) continue;
+      const note = engineNote.get(id);
+      if (!note) continue;
+      const n = noteAudio.get(note) ?? { titles: [], muted: true };
+      n.titles.push(a.title || "media");
+      if (!a.muted) n.muted = false;
+      noteAudio.set(note, n);
+    }
+    document.dispatchEvent(
+      new CustomEvent("nav:audio", { detail: [...noteAudio.entries()] }),
+    );
   }, 2000);
 };
 /* run unconditionally — orphan engines can exist on notes with zero live
@@ -534,7 +556,10 @@ export function wireBrowser(card: HTMLElement) {
       renderTabs();
     }
   };
-  const claimEng = (id: string) => liveTabs.set(id, (u, t) => liveTrack(id, u, t));
+  const claimEng = (id: string) => {
+    liveTabs.set(id, (u, t) => liveTrack(id, u, t));
+    engineNote.set(id, card.dataset.note ?? "");
+  };
   for (const t of tabs) if (t.bv) claimEng(t.bv);
   /* every inactive tab's engine hides — only the active one shows */
   const hideSiblings = () => {
@@ -555,6 +580,7 @@ export function wireBrowser(card: HTMLElement) {
     if (!vic) return;
     void invoke("pv_close", { id: vic.bv }).catch(() => {});
     liveTabs.delete(vic.bv);
+    engineNote.delete(vic.bv);
     vic.bv = "";
     persistTabs();
   };
@@ -871,6 +897,7 @@ export function wireBrowser(card: HTMLElement) {
             void invoke("pv_visible", { id: t.bv, on: false }).catch(() => {});
           } else {
             void invoke("pv_close", { id: t.bv }).catch(() => {});
+            engineNote.delete(t.bv);
           }
           liveTabs.delete(t.bv);
         }

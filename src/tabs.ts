@@ -59,6 +59,30 @@ function persist() {
   localStorage.setItem(KEY, JSON.stringify({ tabs: tabs.filter((n) => typeof n === "string" && n), active }));
 }
 
+/* note → audio playing in its parked browser engines — browser.ts's
+ * audio tick broadcasts nav:audio; a 🔊 on the tab means "this note is
+ * still making sound — click it to go back" */
+let noteAudio = new Map<string, { titles: string[]; muted: boolean }>();
+
+function paintSnd() {
+  document.querySelectorAll<HTMLElement>("#tabs .tab").forEach((t) => {
+    const name = t.dataset.note ?? "";
+    const info = name ? noteAudio.get(name) : undefined;
+    let ic = t.querySelector<HTMLElement>(".tab-snd");
+    if (!info) {
+      ic?.remove();
+      return;
+    }
+    if (!ic) {
+      ic = document.createElement("span");
+      ic.className = "tab-snd";
+      t.insertBefore(ic, t.querySelector(".tab-close"));
+    }
+    ic.textContent = info.muted ? "🔇" : "🔊";
+    ic.title = `playing: ${info.titles.join(" · ")} — click to return`;
+  });
+}
+
 function render() {
   const el = $("#tabs");
   el.innerHTML = "";
@@ -66,6 +90,7 @@ function render() {
     if (typeof name !== "string" || !name) continue;
     const t = document.createElement("button");
     t.className = "tab" + (name === active ? " active" : "");
+    t.dataset.note = name;
     const label = document.createElement("span");
     label.className = "tab-label";
     label.textContent = name.replace(/\.(laido|md)$/, "");
@@ -98,6 +123,7 @@ function render() {
     });
     el.append(t);
   }
+  paintSnd();
 }
 
 async function select(name: string) {
@@ -168,6 +194,13 @@ document.addEventListener("nav:open", (e) => {
   if (typeof name === "string" && name) void openTab(name);
 });
 
+document.addEventListener("nav:audio", (e) => {
+  noteAudio = new Map(
+    (e as CustomEvent<[string, { titles: string[]; muted: boolean }][]>).detail,
+  );
+  paintSnd();
+});
+
 export async function initTabs() {
   const qp = new URLSearchParams(location.search).get("note");
   if (qp) {
@@ -232,6 +265,8 @@ export async function initTabs() {
       const i = tabs.indexOf(oldName);
       if (i >= 0) tabs[i] = next;
       if (active === oldName) active = next;
+      const snd = noteAudio.get(oldName);
+      if (snd) { noteAudio.delete(oldName); noteAudio.set(next, snd); }
       persist();
       render();
     },

@@ -1265,6 +1265,9 @@ function toggleCardSpeech(card: HTMLElement, btn: HTMLElement) {
 
 export function enhanceCard(card: HTMLElement) {
   normalizeCard(card);
+  /* the note that owns this card — browser engines parked on a switch
+   * report back to this tab (🔊 indicator) long after the DOM is gone */
+  card.dataset.note = current;
   if (!card.dataset.cid) card.dataset.cid = `c${Math.random().toString(36).slice(2, 9)}`;
   card.contentEditable = "true";
   const head = card.querySelector<HTMLElement>(".callout-head");
