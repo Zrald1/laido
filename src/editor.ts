@@ -711,7 +711,7 @@ export function popCardFloating(card: HTMLElement, clientX: number, clientY: num
   card.classList.add("floating");
   card.style.left = `${x}px`;
   card.style.top = `${y}px`;
-  card.style.zIndex = String(++genZ);
+  card.style.zIndex = String(nextZ());
   writeState(card, { x, y, z: genZ });
   scheduleFlow();
   drawCardLinks();
@@ -752,7 +752,7 @@ function restoreCardState(card: HTMLElement) {
   }
   if (s.pinned) {
     card.classList.add("pinned");
-    card.style.zIndex = "7";
+    card.style.zIndex = pinnedZ();
     card.style.overflow = "visible";
     pinMark(card);
     applyPinColor(card, PIN_COLORS[s.pinc ?? 0] ?? "red");
@@ -954,7 +954,7 @@ function togglePin(card: HTMLElement) {
     card.style.left = `${x}px`;
     card.style.top = `${y}px`;
     card.style.margin = "0";
-    card.style.zIndex = "9";
+    card.style.zIndex = pinnedZ();
     card.style.overflow = "visible";
     writeState(card, { x, y, pinned: 1 });
     pinMark(card);
@@ -1668,6 +1668,24 @@ export function drawCardLinks() {
 }
 
 let genZ = 10; // each generated card tops the last — newest always on top
+/* z bands: floating cards live at 10..79, pinned at 80..89 (always on top
+ * of the paper stack), viewport-pinned widgets at 90 (!important css),
+ * overlays/modals 96+. nextZ keeps generated cards inside their band —
+ * past 79 it renumbers the live stack instead of overrunning pinned. */
+const PIN_Z = 80;
+let pinSeq = 0;
+const pinnedZ = () => String(Math.min(89, PIN_Z + ++pinSeq));
+const nextZ = () => {
+  if (++genZ >= PIN_Z) {
+    let n = 10;
+    for (const c of body().querySelectorAll<HTMLElement>(
+      ".callout.floating:not(.pinned):not(.viewport-pin)",
+    ))
+      c.style.zIndex = String(n++);
+    genZ = n;
+  }
+  return genZ;
+};
 
 const CMD_TOKEN = /(^|\s)@(document|ask|skill|research|recall|tasks|related|loop|summary)\b/;
 
@@ -2168,7 +2186,7 @@ export function insertCallout(
   card.style.margin = "0";
   card.style.left = `${x}px`;
   card.style.top = `${y}px`;
-  card.style.zIndex = String(++genZ);
+  card.style.zIndex = String(nextZ());
   writeState(card, { x, y, pinned: 0, z: genZ });
   avoidOverlap(card);
   scheduleFlow();
@@ -2193,7 +2211,7 @@ export function pinCard(card: HTMLElement, cascade = 0) {
   card.style.left = `${x}px`;
   card.style.top = `${y}px`;
   card.style.margin = "0";
-  card.style.zIndex = "9";
+  card.style.zIndex = pinnedZ();
   card.style.overflow = "visible";
   writeState(card, { x, y, pinned: 1 });
   pinMark(card);
@@ -2300,7 +2318,7 @@ export function layoutLoopRun(run: string) {
     card.style.height = "auto";
     card.style.margin = "0";
     card.style.overflow = "visible";
-    card.style.zIndex = "9";
+    card.style.zIndex = pinnedZ();
     const h = card.offsetHeight;
     const col = bottoms[0] <= bottoms[1] ? 0 : 1;
     const x = startX + col * (W + GAP);
@@ -3445,7 +3463,7 @@ export function spawnTerminalCard(
   card.style.margin = "0";
   card.style.left = `${x}px`;
   card.style.top = `${y}px`;
-  card.style.zIndex = String(++genZ);
+  card.style.zIndex = String(nextZ());
   writeState(card, { x, y, pinned: 0, z: genZ });
   avoidOverlap(card);
   scheduleFlow();
@@ -3499,7 +3517,7 @@ export function spawnSheetCard(
   card.style.margin = "0";
   card.style.left = `${x}px`;
   card.style.top = `${y}px`;
-  card.style.zIndex = String(++genZ);
+  card.style.zIndex = String(nextZ());
   writeState(card, { x, y, pinned: 0, z: genZ });
   avoidOverlap(card);
   scheduleFlow();
@@ -3536,7 +3554,7 @@ export function spawnDeckCard(title: string, block?: HTMLElement): HTMLElement {
   card.style.margin = "0";
   card.style.left = `${x}px`;
   card.style.top = `${y}px`;
-  card.style.zIndex = String(++genZ);
+  card.style.zIndex = String(nextZ());
   writeState(card, { x, y, pinned: 0, z: genZ });
   avoidOverlap(card);
   scheduleFlow();
@@ -3571,7 +3589,7 @@ function duplicateDeckCard(card: HTMLElement) {
   clone.style.margin = "0";
   clone.style.left = `${Math.min(card.offsetLeft + 24, Math.max(8, vw - clone.offsetWidth - 8))}px`;
   clone.style.top = `${Math.min(card.offsetTop + 24, Math.max(8, vh - clone.offsetHeight - 8))}px`;
-  clone.style.zIndex = String(++genZ);
+  clone.style.zIndex = String(nextZ());
   writeState(clone, { x: clone.offsetLeft, y: clone.offsetTop, pinned: 0, z: genZ });
   scheduleFlow();
   requestAnimationFrame(drawCardLinks);
@@ -3605,7 +3623,7 @@ export function spawnTodoCard(title: string, block?: HTMLElement): HTMLElement {
   card.style.margin = "0";
   card.style.left = `${x}px`;
   card.style.top = `${y}px`;
-  card.style.zIndex = String(++genZ);
+  card.style.zIndex = String(nextZ());
   writeState(card, { x, y, pinned: 0, z: genZ });
   avoidOverlap(card);
   scheduleFlow();
@@ -3889,7 +3907,7 @@ export function spawnBrowserCard(title: string, url: string, block?: HTMLElement
   card.style.margin = "0";
   card.style.left = `${x}px`;
   card.style.top = `${y}px`;
-  card.style.zIndex = String(++genZ);
+  card.style.zIndex = String(nextZ());
   writeState(card, { x, y, pinned: 0, z: genZ });
   avoidOverlap(card);
   scheduleFlow();
@@ -3924,7 +3942,7 @@ function duplicateTodoCard(card: HTMLElement) {
   clone.style.margin = "0";
   clone.style.left = `${Math.min(card.offsetLeft + 24, Math.max(8, vw - clone.offsetWidth - 8))}px`;
   clone.style.top = `${Math.min(card.offsetTop + 24, Math.max(8, vh - clone.offsetHeight - 8))}px`;
-  clone.style.zIndex = String(++genZ);
+  clone.style.zIndex = String(nextZ());
   writeState(clone, { x: clone.offsetLeft, y: clone.offsetTop, pinned: 0, z: genZ });
   scheduleFlow();
   requestAnimationFrame(drawCardLinks);
@@ -3957,7 +3975,7 @@ function duplicateSheetCard(card: HTMLElement) {
   clone.style.margin = "0";
   clone.style.left = `${x}px`;
   clone.style.top = `${y}px`;
-  clone.style.zIndex = String(++genZ);
+  clone.style.zIndex = String(nextZ());
   writeState(clone, { x, y, pinned: 0, z: genZ });
   avoidOverlap(clone);
   scheduleFlow();
@@ -4032,7 +4050,7 @@ function duplicateTerminalCard(card: HTMLElement) {
   clone.style.margin = "0";
   clone.style.left = `${x}px`;
   clone.style.top = `${y}px`;
-  clone.style.zIndex = String(++genZ);
+  clone.style.zIndex = String(nextZ());
   writeState(clone, { x, y, pinned: 0, z: genZ });
   avoidOverlap(clone);
   scheduleFlow();
@@ -5881,7 +5899,7 @@ export function initEditor() {
       if (open) {
         void browserApi(open)!.navigate(url);
         open.scrollIntoView({ block: "nearest", behavior: "smooth" });
-        open.style.zIndex = String(++genZ);
+        open.style.zIndex = String(nextZ());
       } else {
         spawnBrowserCard(url.split("/")[2] ?? "browser", url);
       }

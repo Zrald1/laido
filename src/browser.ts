@@ -463,8 +463,52 @@ export function wireBrowser(card: HTMLElement) {
   const dpr = () => window.devicePixelRatio || 1;
   let lastBox = "";
   let coverTicks = 0;
+  /* page fullscreen (youtube ⛶ etc.): the child webview is a native HWND —
+   * DOM fullscreen succeeds but nothing resizes the surface, so the video
+   * stays card-sized. Poll document.fullscreenElement; while a page is
+   * fullscreen, window.__pvFs = our id → this card's surface covers the
+   * whole window and every other card's surface stays hidden. */
+  let fsOn = false;
+  let fsTick = 0;
+  const fsFlag = () => (window as unknown as { __pvFs?: string }).__pvFs;
+  const setFs = (on: boolean) => {
+    if (on === fsOn) return;
+    fsOn = on;
+    const w = window as unknown as { __pvFs?: string };
+    if (on) w.__pvFs = bvId;
+    else if (w.__pvFs === bvId) delete w.__pvFs;
+    void window.__TAURI__?.window
+      ?.getCurrentWindow?.()
+      .setFullscreen(on)
+      .catch(() => {});
+    lastBox = "";
+    pvSync();
+  };
   const pvSync = () => {
     if (!card.isConnected) return;
+    const fsOwner = fsFlag();
+    if (fsOwner === bvId) {
+      // our page owns fullscreen — the surface covers the whole window
+      const d = dpr();
+      const key = `fs,${window.innerWidth},${window.innerHeight},${d}`;
+      if (key === lastBox) return;
+      lastBox = key;
+      void invoke("pv_bounds", {
+        id: bvId, x: 0, y: 0,
+        w: Math.max(1, Math.round(window.innerWidth * d)),
+        h: Math.max(1, Math.round(window.innerHeight * d)),
+      }).catch(() => {});
+      void invoke("pv_visible", { id: bvId, on: true }).catch(() => {});
+      return;
+    }
+    if (fsOwner) {
+      // a sibling card is fullscreen — our surface must not punch through
+      if (lastBox !== "fs-peer") {
+        lastBox = "fs-peer";
+        void invoke("pv_visible", { id: bvId, on: false }).catch(() => {});
+      }
+      return;
+    }
     const r = view.getBoundingClientRect();
     const clipEl = card.closest<HTMLElement>("#note-body") ?? document.body;
     const clip = clipEl.getBoundingClientRect();
@@ -511,12 +555,41 @@ export function wireBrowser(card: HTMLElement) {
       if (++deadTicks >= 2) {
         window.clearInterval(pvTimer);
         ro.disconnect();
+        if (fsOn) setFs(false); // a dead card can't hold fullscreen
         void invoke("pv_close", { id: bvId }).catch(() => {});
         for (const u of unlistens) void u.then((f) => f()).catch(() => {});
       }
       return;
     }
     deadTicks = 0;
+    /* page fullscreen check — ~1s cadence, only while the live engine is
+     * on. Esc / the site's own exit clears fullscreenElement → setFs(false)
+     * drops the window back to normal and pvSync re-glues the surface. */
+    if (++fsTick >= 7 && liveOn && !fsOn) {
+      fsTick = 0;
+      void invoke<string>("pv_eval", {
+        id: bvId,
+        js: "!!document.fullscreenElement",
+      })
+        .then((s) => {
+          let on = false;
+          try { on = !!JSON.parse(s); } catch { on = s === "true"; }
+          if (on) setFs(true);
+        })
+        .catch(() => {});
+    } else if (fsOn && fsTick >= 3) {
+      fsTick = 0;
+      void invoke<string>("pv_eval", {
+        id: bvId,
+        js: "!!document.fullscreenElement",
+      })
+        .then((s) => {
+          let on = false;
+          try { on = !!JSON.parse(s); } catch { on = s === "true"; }
+          if (!on) setFs(false);
+        })
+        .catch(() => setFs(false));
+    }
     pvSync();
   }, 140);
 

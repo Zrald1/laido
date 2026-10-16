@@ -14,6 +14,7 @@ declare global {
           toggleMaximize(): Promise<void>;
           close(): Promise<void>;
           startDragging(): Promise<void>;
+          setFullscreen(on: boolean): Promise<void>;
         };
       };
       webviewWindow?: {

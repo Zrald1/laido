@@ -1328,7 +1328,9 @@ body:not(.lib-open) #library { padding: 0; border-right: 0; }
   transition: opacity .15s ease, background-color .15s ease, color .15s ease;
 }
 .card-stick:hover { opacity: 1; background: var(--sticky, #f7e9a0); color: #3a352b; }
-.callout.pinned { z-index: 6; box-shadow: 0 12px 28px #0002; }
+/* pinned band — always above every unpinned floating card (10..79);
+ * togglePin writes the exact inline slot, this is the stylesheet floor */
+.callout.pinned { z-index: 80; box-shadow: 0 12px 28px #0002; }
 
 /* ---------- a real pushpin (spherical head · tapered neck · flared rim) ---------- */
 .pin-mark {
