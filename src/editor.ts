@@ -4939,10 +4939,12 @@ export function initEditor() {
     e.preventDefault();
     const clicked = Math.floor((y - 12) / lineH);
     const lines = last ? Math.ceil((last.offsetTop + last.offsetHeight - 12) / lineH) : 0;
-    /* cap the pad, but the caret still lands on the deepest new line —
-     * never at the top: a stale scrollTop once made every click hit this
-     * branch and dumped the caret on the first block */
-    const need = Math.min(40, Math.max(1, clicked - lines + 1));
+    /* the click came from inside the viewport, so the target row is at most
+     * a screenful below the last line — pad all the way to it. The old 40-row
+     * cap stranded the caret above the fold and scrollIntoView then yanked
+     * the view up to meet it ("click at the bottom, caret at the top").
+     * Keep a hard ceiling only as a safety net. */
+    const need = Math.min(300, Math.max(1, clicked - lines + 1));
     for (let i = 0; i < need; i++) {
       const p = document.createElement("p");
       p.append(document.createElement("br"));
