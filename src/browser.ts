@@ -827,6 +827,7 @@ export function wireBrowser(card: HTMLElement) {
    * floating card, or leaves the note — it has no z-order of its own */
   const dpr = () => window.devicePixelRatio || 1;
   let lastBox = "";
+  let lastVis = "";
   let coverTicks = 0;
   /* page fullscreen (youtube ⛶ etc.): the child webview is a native HWND —
    * DOM fullscreen succeeds but nothing resizes the surface, so the video
@@ -864,12 +865,14 @@ export function wireBrowser(card: HTMLElement) {
         h: Math.max(1, Math.round(window.innerHeight * d)),
       }).catch(() => {});
       void invoke("pv_visible", { id: bvId, on: true }).catch(() => {});
+      lastVis = "true";
       return;
     }
     if (fsOwner) {
       // a sibling card is fullscreen — our surface must not punch through
       if (lastBox !== "fs-peer") {
         lastBox = "fs-peer";
+        lastVis = "false";
         void invoke("pv_visible", { id: bvId, on: false }).catch(() => {});
       }
       return;
@@ -917,20 +920,47 @@ export function wireBrowser(card: HTMLElement) {
     coverTicks = !mid || !card.contains(mid) ? coverTicks + 1 : 0;
     const vis = liveOn && !!cur().url && coverTicks < 2 && iw > 8 && ih > 8;
     const d = dpr();
-    const key = `${Math.round(ix)},${Math.round(iy)},${Math.round(iw)},${Math.round(ih)},${vis},${d}`;
-    if (key === lastBox) return;
-    lastBox = key;
-    void invoke("pv_bounds", {
-      id: bvId,
-      x: Math.round(ix * d), y: Math.round(iy * d),
-      w: Math.round(Math.max(1, iw) * d), h: Math.round(Math.max(1, ih) * d),
-    }).catch(() => {});
-    void invoke("pv_visible", { id: bvId, on: vis }).catch(() => {});
+    /* bounds and visibility post independently — a pure scroll changes the
+     * rect on every frame, and re-sending visibility each time doubles the
+     * IPC the HWND has to chew through while it's trying to keep up */
+    const boxKey = `${Math.round(ix)},${Math.round(iy)},${Math.round(iw)},${Math.round(ih)},${d}`;
+    const visKey = `${vis}`;
+    if (boxKey === lastBox && visKey === lastVis) return;
+    if (boxKey !== lastBox) {
+      lastBox = boxKey;
+      void invoke("pv_bounds", {
+        id: bvId,
+        x: Math.round(ix * d), y: Math.round(iy * d),
+        w: Math.round(Math.max(1, iw) * d), h: Math.round(Math.max(1, ih) * d),
+      }).catch(() => {});
+    }
+    if (visKey !== lastVis) {
+      lastVis = visKey;
+      void invoke("pv_visible", { id: bvId, on: vis }).catch(() => {});
+    }
   };
   /* ResizeObserver catches card drags/resizes instantly instead of waiting
    * for the poll — the page surface tracks the grip in real time */
   const ro = new ResizeObserver(() => pvSync());
   ro.observe(view);
+  /* the 140ms poll alone trails a scroll by ~9 frames — the native surface
+   * visibly detaches from the card then snaps back. Sync on every scroll
+   * frame (capture-phase sees every scroll container: the note body, chat
+   * docks, side panels) so the HWND tracks ~1 frame behind instead. A
+   * trailing settle pass catches the last position after inertial tail-off. */
+  let scrollRaf = 0;
+  let scrollSettle = 0;
+  const onScroll = () => {
+    if (!scrollRaf) {
+      scrollRaf = requestAnimationFrame(() => {
+        scrollRaf = 0;
+        pvSync();
+      });
+    }
+    window.clearTimeout(scrollSettle);
+    scrollSettle = window.setTimeout(pvSync, 90);
+  };
+  document.addEventListener("scroll", onScroll, true);
   let deadTicks = 0;
   const pvTimer = window.setInterval(() => {
     if (!card.isConnected) {
@@ -942,6 +972,9 @@ export function wireBrowser(card: HTMLElement) {
         window.clearInterval(pvTimer);
         ro.disconnect();
         extResize.disconnect();
+        window.clearTimeout(scrollSettle);
+        if (scrollRaf) cancelAnimationFrame(scrollRaf);
+        document.removeEventListener("scroll", onScroll, true);
         window.removeEventListener("resize", extWinFit);
         document.removeEventListener("pointerdown", closeExt);
         document.removeEventListener("keydown", escExt, true);
