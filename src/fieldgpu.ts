@@ -19,6 +19,10 @@ type GPUDevice = {
   createCommandEncoder(): GPUCommandEncoder;
   queue: { submit(c: unknown[]): void; writeBuffer(b: GPUBuffer, o: number, d: Float32Array | Uint32Array): void };
   destroy(): void;
+  lost?: Promise<{ reason: string; message: string }>;
+  onuncapturederror?: ((e: { error: { message?: string } }) => void) | null;
+  pushErrorScope?(s: string): void;
+  popErrorScope?(): Promise<{ message?: string } | null>;
 };
 type GPUBuffer = { destroy(): void };
 type GPUShaderModule = object;
@@ -52,6 +56,7 @@ interface GpuNav { gpu?: { requestAdapter(): Promise<GPUAdapter | null>; getPref
 export type GpuMode = "wave" | "em" | "quantum";
 export interface GpuField {
   readonly mode: GpuMode;
+  readonly lost: string | null;
   step(substeps: number): void;
   disturb(gx: number, gy: number, amp: number): void;
   seed(mode: GpuMode): void;
@@ -172,14 +177,41 @@ fn probMap(v: f32) -> vec3<f32> {
   return vec4(signedMap(a[c] / p.norm), 1.0);
 }`;
 
-const SU = 0x0010 | 0x0004; // STORAGE | COPY_DST
+const SU = 0x0080 | 0x0008; // STORAGE | COPY_DST
+
+/* One shared device for every card — requestDevice is the slow part
+ * (and unbounded device-per-card is how you lose them); canvases and
+ * pipelines stay per-card. */
+let deviceP: Promise<GPUDevice | null> | null = null;
+const getDevice = () => {
+  if (!deviceP) {
+    const nav = navigator as Navigator & GpuNav;
+    deviceP = nav.gpu
+      ? nav.gpu.requestAdapter()
+          .then((a) => (a ? a.requestDevice() : null))
+          .then((d) => {
+            if (d) {
+              d.lost?.then((info) => {
+                console.warn("fieldgpu: device lost:", info.reason, info.message);
+                deviceP = null; // allow re-request on next card
+              });
+              d.onuncapturederror = (e) => console.warn("fieldgpu:", e.error?.message);
+            }
+            return d;
+          })
+          .catch(() => null)
+      : Promise.resolve(null);
+    // retry next call after a failed boot-time attempt
+    deviceP.then((d) => { if (!d) deviceP = null; });
+  }
+  return deviceP;
+};
 
 export async function createGpuField(mode0: GpuMode, cv: HTMLCanvasElement): Promise<GpuField | null> {
   try {
+    const device = await getDevice();
+    if (!device) return null;
     const nav = navigator as Navigator & GpuNav;
-    const adapter = await nav.gpu?.requestAdapter();
-    if (!adapter) return null;
-    const device = await adapter.requestDevice();
     const ctx = cv.getContext("webgpu" as unknown as "2d") as unknown as GPUCanvasContext | null;
     if (!ctx) return null;
     const fmt = nav.gpu!.getPreferredCanvasFormat();
@@ -187,7 +219,7 @@ export async function createGpuField(mode0: GpuMode, cv: HTMLCanvasElement): Pro
 
     const cells = N * N * 4;
     const mk = (usage = SU) => device.createBuffer({ size: cells, usage });
-    const params = device.createBuffer({ size: 40, usage: 0x0040 | 0x0004 }); // UNIFORM|COPY_DST
+    const params = device.createBuffer({ size: 40, usage: 0x0040 | 0x0008 }); // UNIFORM|COPY_DST
     const buf = {
       uA: mk(), uB: mk(), uN: mk(), imp: mk(), zeroBuf: mk(),
       ez0: mk(), ez1: mk(), hx: mk(), hy: mk(),
@@ -361,14 +393,17 @@ export async function createGpuField(mode0: GpuMode, cv: HTMLCanvasElement): Pro
       device.queue.submit([enc.finish()]);
     };
 
+    const self = { lost: null as string | null };
+    device.lost?.then((info) => { self.lost = `${info.reason}: ${info.message}`; });
     seed(mode0);
     return {
       get mode() { return mode; },
+      get lost() { return self.lost; },
       step, render, seed, disturb,
       destroy() {
         for (const b of Object.values(buf)) b.destroy();
         params.destroy();
-        device.destroy();
+        // device is shared across cards — never destroy it here
       },
     };
   } catch (e) {

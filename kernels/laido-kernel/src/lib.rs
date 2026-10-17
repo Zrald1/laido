@@ -18,6 +18,18 @@ static mut VEL: [f32; MAX_NODES * 2] = [0.0; MAX_NODES * 2];
 static mut EDGES: [i32; MAX_EDGES * 2] = [0; MAX_EDGES * 2];
 static mut SCRATCH: [f32; MAX_NODES] = [0.0; MAX_NODES];
 
+/* Spatial grid for the repel pass — uniform-cell linked list.
+ * Repel force is 1400/d², under ~0.02 past 300px, so pairs beyond
+ * CELL are dropped (truncated Coulomb — same cutoff as the clustered
+ * /multilevel repel approximations in the GPU-layout literature).
+ * Pairs only exist within a 3x3 neighborhood → ~O(n) when spread out. */
+const GRID_W: usize = 64;
+const GRID_H: usize = 64;
+const GRID_CELLS: usize = GRID_W * GRID_H;
+const CELL: f32 = 300.0;
+static mut GHEAD: [i32; GRID_CELLS] = [-1; GRID_CELLS];
+static mut GNEXT: [i32; MAX_NODES] = [-1; MAX_NODES];
+
 #[no_mangle]
 pub extern "C" fn pos_ptr() -> *mut f32 {
     core::ptr::addr_of_mut!(POS) as *mut f32
@@ -274,31 +286,86 @@ pub extern "C" fn graph_step(
     let cy = h / 2.0;
     const LINK: f32 = 90.0;
 
-    // repel + center — symmetric pairs like the JS inner loop
+    // repel via spatial grid — bin nodes into CELL-sized cells, then test
+    // each cell against itself + 4 forward neighbors (right, down-left,
+    // down, down-right) so every 3x3-neighbor pair is visited exactly once.
+    let ghead = unsafe { &mut *core::ptr::addr_of_mut!(GHEAD) };
+    let gnext = unsafe { &mut *core::ptr::addr_of_mut!(GNEXT) };
+    ghead.fill(-1);
     for i in 0..n {
-        let xi = pos[i * 2];
-        let yi = pos[i * 2 + 1];
-        for j in (i + 1)..n {
-            let mut dx = xi - pos[j * 2];
-            let mut dy = yi - pos[j * 2 + 1];
-            let mut d2 = dx * dx + dy * dy;
-            if d2 < 4.0 {
-                dx = 0.31;
-                dy = -0.27; // deterministic jitter — JS uses Math.random()
-                d2 = 4.0;
-            }
-            let f = (1400.0 / d2).min(8.0) * cool;
-            let d = d2.sqrt();
-            let ux = dx / d * f;
-            let uy = dy / d * f;
-            vel[i * 2] += ux;
-            vel[i * 2 + 1] += uy;
-            vel[j * 2] -= ux;
-            vel[j * 2 + 1] -= uy;
+        let gx = (pos[i * 2] / CELL) as i32;
+        let gy = (pos[i * 2 + 1] / CELL) as i32;
+        let c = (gy.clamp(0, GRID_H as i32 - 1) as usize) * GRID_W
+            + gx.clamp(0, GRID_W as i32 - 1) as usize;
+        gnext[i] = ghead[c];
+        ghead[c] = i as i32;
+    }
+
+    let cutoff2 = CELL * CELL;
+    let mut repel_pair = |i: usize, j: usize| {
+        let mut dx = pos[i * 2] - pos[j * 2];
+        let mut dy = pos[i * 2 + 1] - pos[j * 2 + 1];
+        let mut d2 = dx * dx + dy * dy;
+        if d2 >= cutoff2 {
+            return;
         }
+        if d2 < 4.0 {
+            dx = 0.31;
+            dy = -0.27; // deterministic jitter — JS uses Math.random()
+            d2 = 4.0;
+        }
+        let f = (1400.0 / d2).min(8.0) * cool;
+        let d = d2.sqrt();
+        let ux = dx / d * f;
+        let uy = dy / d * f;
+        vel[i * 2] += ux;
+        vel[i * 2 + 1] += uy;
+        vel[j * 2] -= ux;
+        vel[j * 2 + 1] -= uy;
+    };
+
+    for gy in 0..GRID_H {
+        for gx in 0..GRID_W {
+            let c0 = gy * GRID_W + gx;
+            // pairs inside the cell — walk the list pairwise
+            let mut i = ghead[c0];
+            while i >= 0 {
+                let mut j = gnext[i as usize];
+                while j >= 0 {
+                    repel_pair(i as usize, j as usize);
+                    j = gnext[j as usize];
+                }
+                i = gnext[i as usize];
+            }
+            // pairs vs forward neighbors
+            for (nx, ny) in [
+                (gx + 1, gy),
+                (gx.wrapping_sub(1), gy + 1),
+                (gx, gy + 1),
+                (gx + 1, gy + 1),
+            ] {
+                if nx >= GRID_W || ny >= GRID_H {
+                    continue;
+                }
+                let c1 = ny * GRID_W + nx;
+                let mut i = ghead[c0];
+                while i >= 0 {
+                    let mut j = ghead[c1];
+                    while j >= 0 {
+                        repel_pair(i as usize, j as usize);
+                        j = gnext[j as usize];
+                    }
+                    i = gnext[i as usize];
+                }
+            }
+        }
+    }
+
+    // center pull — once per node, after repel like the JS
+    for i in 0..n {
         let pull = if i as i32 == center { 0.08 } else { 0.012 };
-        vel[i * 2] += (cx - xi) * pull * cool;
-        vel[i * 2 + 1] += (cy - yi) * pull * cool;
+        vel[i * 2] += (cx - pos[i * 2]) * pull * cool;
+        vel[i * 2 + 1] += (cy - pos[i * 2 + 1]) * pull * cool;
     }
 
     // springs — dx*f*0.05 per endpoint (algebra of the JS formula)

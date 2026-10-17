@@ -142,13 +142,14 @@ export function wireField(card: HTMLElement) {
     (window as unknown as { __gpuInfo?: { tier?: string } }).__gpuInfo?.tier === "webgpu";
   if (wgpuOk) {
     const ready = () => { gpuReady = true; kick(); };
-    // GPU init can orphan (boot-time reload races) — never wait on it forever
+    // GPU init can orphan (boot-time reload races) — never wait on it forever;
+    // but a late-resolved GPU is still adopted: it already owns the canvas ctx
+    // and renders better than the JS path, so swap it in whenever it lands
+    const attempt = import("./fieldgpu.js").then((m) => m.createGpuField(mode as GpuMode, cv));
     const timeout = new Promise<null>((r) => setTimeout(() => r(null), 3000));
-    void Promise.race([
-      import("./fieldgpu.js").then((m) => m.createGpuField(mode as GpuMode, cv)),
-      timeout,
-    ])
-      .then((g) => { gpu = g; ready(); })
+    void Promise.race([attempt, timeout]).then(() => ready());
+    attempt
+      .then((g) => { if (g) { gpu = g; ready(); } })
       .catch((e) => { console.warn("fieldgpu init failed, JS fallback:", e); ready(); });
   } else {
     gpuReady = true;
@@ -356,6 +357,22 @@ export function wireField(card: HTMLElement) {
 
   let running = false;
   let simThrows = 0;
+
+  /* CFL-for-frames: the wave schemes derive dt ≤ dx/c — the app version
+   * derives substeps ≤ budget/stepCost. EMA of measured per-frame sim
+   * cost scales the substep count down on slow machines instead of
+   * blowing the frame; slow cards degrade gracefully, fast ones get
+   * the full rate. LTS (arXiv 2005.13350) supplies the second half:
+   * edge-visible cards step at 1/3 rate — local dt per element. */
+  const BUDGET_MS = 1.6;
+  const BASE_SUB: Record<Mode, number> = { wave: 4, em: 3, quantum: 2 };
+  let frameCost = 0.5; // EMA of measured sim+paint ms (debug only)
+  let stepCost = 0.1;  // EMA of measured per-substep ms — drives the count
+  let rate = 1;        // 1 = full rate, 3 = every 3rd frame (edge-visible)
+  let tickN = 0;
+  const substeps = (m: Mode) =>
+    Math.max(1, Math.min(BASE_SUB[m], Math.floor(BUDGET_MS / Math.max(0.05, stepCost))));
+
   const kick = () => {
     if (seen && gpuReady && !running && card.isConnected) {
       running = true;
@@ -364,19 +381,31 @@ export function wireField(card: HTMLElement) {
   };
   const tick = () => {
     if (!seen || !card.isConnected || !gpuReady) { running = false; raf = 0; return; }
+    // LTS: edge-visible cards still schedule but only simulate every Nth
+    if (rate > 1 && tickN++ % rate !== 0) {
+      raf = requestAnimationFrame(tick);
+      return;
+    }
+    const t0 = performance.now();
     try {
       perfMark("field", () => {
+        const sub = substeps(mode);
+        const s0 = performance.now();
         if (gpu) {
-          gpu.step(mode === "wave" ? 4 : mode === "em" ? 3 : 2);
+          gpu.step(sub);
           gpu.render();
         } else {
-          if (mode === "wave") { for (let s = 0; s < 4; s++) stepWave(); }
-          else if (mode === "em") { for (let s = 0; s < 3; s++) stepEm(); }
-          else { for (let s = 0; s < 2; s++) stepQm(); }
+          for (let s = 0; s < sub; s++) {
+            if (mode === "wave") stepWave();
+            else if (mode === "em") stepEm();
+            else stepQm();
+          }
           paint();
         }
+        stepCost = stepCost * 0.85 + ((performance.now() - s0) / sub) * 0.15;
       });
       simThrows = 0;
+      frameCost = frameCost * 0.85 + (performance.now() - t0) * 0.15;
     } catch (e) {
       if (++simThrows > 5) {
         running = false; raf = 0;
@@ -390,20 +419,28 @@ export function wireField(card: HTMLElement) {
   /* only burn cycles while the card is actually on screen — IO re-fires
    * whenever the card re-enters the viewport, restarting the loop */
   new IntersectionObserver((en) => {
-    seen = en[0]?.isIntersecting ?? true;
+    const e = en[0];
+    seen = e?.isIntersecting ?? true;
+    if (e && e.isIntersecting) rate = e.intersectionRatio > 0.5 ? 1 : 3;
     kick();
-  }, { threshold: 0.05 }).observe(card);
+  }, { threshold: [0.02, 0.5] }).observe(card);
 
   // IO has proven flaky inside WebView2 (visible cards report non-intersecting)
   // — a 1Hz rect check is the source of truth, and it also resurrects the
   // loop after any kill (IO lies, thrown frame, init ordering)
   const onScreen = () => {
     const r = card.getBoundingClientRect();
-    return r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth;
+    const w = Math.min(r.right, innerWidth) - Math.max(r.left, 0);
+    const h = Math.min(r.bottom, innerHeight) - Math.max(r.top, 0);
+    if (w <= 0 || h <= 0) return 0;
+    return (w * h) / (r.width * r.height || 1);
   };
   const visGuard = window.setInterval(() => {
     if (!card.isConnected) { window.clearInterval(visGuard); return; }
-    seen = onScreen();
+    const v = onScreen();
+    seen = v > 0.02;
+    // LTS rate: fully visible = every frame, clipped edge = every 3rd
+    rate = v > 0.5 ? 1 : 3;
     kick();
   }, 1000);
 
@@ -425,6 +462,11 @@ export function wireField(card: HTMLElement) {
     get ezMax() { return ez.reduce((a, b) => Math.max(a, Math.abs(b)), 0); },
     get psiSum() { let s = 0; for (let i = 0; i < N * N; i++) s += psiR[i] * psiR[i] + psiI[i] * psiI[i]; return s; },
     get potSum() { return pot.reduce((a, b) => a + b, 0); },
+    get rate() { return rate; },
+    get frameCost() { return frameCost; },
+    get stepCost() { return stepCost; },
+    get sub() { return substeps(mode); },
+    get gpu() { return gpu ? `ok:${gpu.lost ?? "alive"}` : (gpuReady ? "null" : "init"); },
     kick() { seen = true; if (!raf) raf = requestAnimationFrame(tick); },
   };
 
