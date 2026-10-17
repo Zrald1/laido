@@ -680,6 +680,15 @@ body.sticky-mode #note-body::after { content: none; }
   border-left: 3px solid var(--accent);
   border-radius: 10px;
 }
+/* skip layout+paint for off-screen cards — the dominant cost on long
+   notes. `auto` keeps nodes in the DOM (find/copy/focus survive);
+   `auto 340px` remembers the real size after first render so the
+   scrollbar doesn't jitter. Floating/pinned/sticky cards are absolutely
+   positioned outside flow — containment would mis-measure them. */
+.callout:not(.floating):not(.sticky) {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 340px;
+}
 .callout-head {
   flex: 0 0 auto;
   display: flex;
@@ -3085,3 +3094,27 @@ td.base-sumlab{color:var(--dim,#94897a);font-size:10.5px;border-top:1px solid va
 .set-group-body .rail-block:last-child { margin-bottom: 4px; }
 .rail-tools { display: flex; gap: 6px; margin-bottom: 8px; }
 .rail-tools input { flex: 1; padding: 5px 8px; background: var(--bg-3); color: var(--text); border: 1px solid var(--line); border-radius: 7px; font-size: 12px; outline: none; }
+
+/* perf HUD — ?debug=perf overlay, bottom-right of the editor column */
+#perf-hud {
+  position: fixed; right: 340px; bottom: 10px; z-index: 80;
+  display: flex; gap: 14px; align-items: center;
+  font: 11px/1.4 ui-monospace, Consolas, monospace;
+  color: #d8ff9a; background: #1a1a12ee;
+  padding: 5px 10px; border-radius: 6px; pointer-events: none;
+  border: 1px solid #ffffff22;
+}
+
+/* sheet rows: table-layout:fixed means row contents can't change column
+   widths, so off-screen rows can skip layout+paint entirely — O(viewport)
+   paint on a 200×40 grid while every td stays live in the DOM (formulas,
+   meta, selection, clipboard all keep working). 26px ≈ row+padding. */
+.sheet-grid tr[data-r] {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 26px;
+}
+/* same containment for the other DOM-heavy widgets' repeated rows */
+.fc-row, .todo-item, .base-table tbody tr {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 30px;
+}

@@ -10,6 +10,8 @@ import { invoke } from "./ipc.js";
 import { stem } from "./match.js";
 import { baseMatch, buildPropMaps, type IndexLike } from "./base.js";
 import { probeGpu } from "./gpu.js";
+import { perfMark } from "./perf.js";
+import { loadKernel, type Kernel } from "./kernel.js";
 
 /* PixiJS is vendored, not an npm dep — lazy dynamic import so the 840KB
  * only downloads when a note actually contains a graph card */
@@ -161,6 +163,13 @@ export function wireGraph(card: HTMLElement) {
     raf = requestAnimationFrame(step);
   }
 
+  /* WASM kernel — positions/velocities/edges copy into linear memory,
+   * one graph_step call, copy back. O(n) marshalling vs O(n²) compute.
+   * Falls back to the JS sim below when the kernel isn't loaded yet or
+   * the graph exceeds its fixed buffers. */
+  let kernel: Kernel | null = null;
+  void loadKernel().then((k) => { kernel = k; });
+
   function sim(cool: number) {
     /* scene coords are CSS px in both renderers (2d scales via setTransform,
      * Pixi via autoDensity) — clientWidth is correct under either owner */
@@ -168,7 +177,29 @@ export function wireGraph(card: HTMLElement) {
     const h = cv.clientHeight || 380;
     const cx = w / 2, cy = h / 2;
     const LINK = 90;
-    for (let i = 0; i < nodes.length; i++) {
+    const n = nodes.length;
+    if (kernel && n <= kernel.maxNodes && edges.length <= kernel.maxEdges) {
+      const ci = center ? nodes.findIndex((nd) => nd.note === center) : -1;
+      for (let i = 0; i < n; i++) {
+        kernel.pos[i * 2] = nodes[i].x;
+        kernel.pos[i * 2 + 1] = nodes[i].y;
+        kernel.vel[i * 2] = nodes[i].vx;
+        kernel.vel[i * 2 + 1] = nodes[i].vy;
+      }
+      for (let e = 0; e < edges.length; e++) {
+        kernel.edges[e * 2] = edges[e].a;
+        kernel.edges[e * 2 + 1] = edges[e].b;
+      }
+      kernel.graphStep(n, edges.length, w, h, cool, ci);
+      for (let i = 0; i < n; i++) {
+        nodes[i].x = kernel.pos[i * 2];
+        nodes[i].y = kernel.pos[i * 2 + 1];
+        nodes[i].vx = kernel.vel[i * 2];
+        nodes[i].vy = kernel.vel[i * 2 + 1];
+      }
+      return;
+    }
+    for (let i = 0; i < n; i++) {
       const n = nodes[i];
       // repel (inverse-square-ish, capped)
       for (let j = i + 1; j < nodes.length; j++) {
@@ -263,12 +294,14 @@ export function wireGraph(card: HTMLElement) {
       const g = new px.PIXI.Graphics();
       g.circle(0, 0, r).fill({ color: 0xb4aa9b, alpha: 0.75 });
       g.position.set(n.x, n.y);
+      g.cullable = true; // offscreen nodes skip their draw call entirely
       const t = new px.PIXI.Text({
         text: stem(n.note),
         style: { fontSize: 10.5, fill: 0xa09687, fontFamily: "system-ui" },
       });
       t.anchor.set(0.5, 1);
       t.position.set(n.x, n.y - r - 4);
+      t.cullable = true;
       px.app.stage.addChild(g, t);
       px.dots.push(g);
       px.labels.push(t);
@@ -301,11 +334,14 @@ export function wireGraph(card: HTMLElement) {
         l.scale.set(i === hover ? 1.1 : 1);
       }
     }
+    /* v8 culling is manual — skip draw calls for scene objects outside
+     * the viewport (dense graphs overrun the canvas edges) */
+    px.PIXI.Culler?.shared?.cull(px.app.stage, px.app.renderer.screen);
     px.app.render();
   }
 
   function paint() {
-    if (px) return paintPixi();
+    if (px) return perfMark("graph", paintPixi);
     /* Pixi init still in flight — painting now would lock the canvas to
      * 2d and make the GPU init fail for certain. Skip; init's finally
      * repaints once the race settles. */

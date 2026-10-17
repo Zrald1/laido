@@ -5,6 +5,7 @@ import { initCalendar } from "./calendar.js";
 import { initLibrary, toggleLibrary } from "./rag.js";
 import { initFsPane } from "./fspane.js";
 import { probeGpu, reportGpu } from "./gpu.js";
+import { initPerf } from "./perf.js";
 import { refreshStatus, testConnection, initAgent, initModels, syncModelSelects } from "./agent.js";
 import { initI18n, LANGS, setLang } from "./i18n.js";
 import { addActivity } from "./log.js";
@@ -103,8 +104,16 @@ async function init() {
   $("#win-max").addEventListener("click", () => void win.toggleMaximize());
   $("#win-close").addEventListener("click", () => void win.close());
 
-  const prefs = await invoke<{ language: string }>("settings_get");
-  const detected = await invoke<string>("detect_locale").catch(() => "en");
+  /* a reload mid-flight orphans invoke callbacks (Rust's async op outlives
+   * the page) — a bare await then hangs boot forever. Time-box the early
+   * calls so a dropped callback degrades instead of stalling init. */
+  const early = <T>(p: Promise<T>, fb: T, ms = 4000): Promise<T> =>
+    Promise.race([p, new Promise<T>((r) => setTimeout(() => r(fb), ms))]);
+  const prefs = await early(
+    invoke<{ language: string }>("settings_get").catch(() => ({ language: "" })),
+    { language: "" },
+  );
+  const detected = await early(invoke<string>("detect_locale").catch(() => "en"), "en");
   const lang = initI18n(prefs.language ?? "", detected);
   if (!prefs.language) {
     void invoke("settings_set", { patch: { language: lang } });
@@ -128,6 +137,7 @@ async function init() {
   /* GPU tier probe — one activity line so a software-raster machine is
    * visible in the feed instead of silently slow */
   void probeGpu().then(reportGpu);
+  initPerf();
   initEditor();
   initCalendar();
   initLibrary();

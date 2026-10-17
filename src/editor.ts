@@ -295,7 +295,7 @@ function scheduleFlow() {
   requestAnimationFrame(() => {
     flowQueued = false;
     flowAroundCards();
-    drawCardLinks();
+    scheduleCardLinks();
   });
 }
 
@@ -726,7 +726,7 @@ export function popCardFloating(card: HTMLElement, clientX: number, clientY: num
   card.style.zIndex = String(nextZ());
   writeState(card, { x, y, z: genZ });
   scheduleFlow();
-  drawCardLinks();
+  scheduleCardLinks();
   markEdited();
 }
 
@@ -1048,7 +1048,7 @@ function makeResizable(card: HTMLElement) {
           if (dy < 0) card.style.marginTop = `${start.mt - (h - start.h)}px`;
         }
         card.classList.add("sized");
-        drawCardLinks();
+        scheduleCardLinks();
       };
       const up = () => {
         g.removeEventListener("pointermove", move);
@@ -1092,7 +1092,7 @@ function makeDraggable(card: HTMLElement) {
     const ny = Math.max(-(h - 60), fy + (e.clientY - sy) / Z());
     card.style.left = `${nx}px`;
     card.style.top = `${ny}px`;
-    drawCardLinks();
+    scheduleCardLinks();
     if (isSticky()) {
       const outside =
         e.clientX < 0 ||
@@ -1167,7 +1167,7 @@ function makeDraggable(card: HTMLElement) {
     card.style.top = `${y}px`;
     writeState(card, { x, y });
     scheduleFlow();
-    drawCardLinks();
+    scheduleCardLinks();
   };
 
   card.addEventListener("pointermove", onMove);
@@ -1509,7 +1509,7 @@ export function enhanceCard(card: HTMLElement) {
     localStorage.removeItem(stateKey(card));
     card.remove();
     addActivity("card deleted — the topic can be researched again");
-    drawCardLinks();
+    scheduleCardLinks();
     markEdited();
   });
   chrome.append(del);
@@ -1638,6 +1638,18 @@ export function enhanceCard(card: HTMLElement) {
    #note-body so it scrolls with the content automatically --------------- */
 
 let linksCv: HTMLCanvasElement | null = null;
+let linksRaf = 0;
+
+/* card ops call this in clusters (spawn → enhance → place → flow) — one
+ * rAF coalesces them into a single rect-reading repaint instead of N
+ * full-page passes per gesture */
+export function scheduleCardLinks() {
+  if (!linksRaf)
+    linksRaf = requestAnimationFrame(() => {
+      linksRaf = 0;
+      drawCardLinks();
+    });
+}
 
 export function drawCardLinks() {
   const el = body();
@@ -2224,7 +2236,7 @@ export function insertCallout(
   writeState(card, { x, y, pinned: 0, z: genZ });
   avoidOverlap(card);
   scheduleFlow();
-  requestAnimationFrame(drawCardLinks);
+  scheduleCardLinks();
   dirty = true;
   setState(t("ed.saving"));
   void save();
@@ -2431,7 +2443,7 @@ export async function loadNote(name: string) {
     // positions are restored exactly as saved — nothing here may move a
     // widget the user placed. (Explicit re-layout lives on the align button.)
     flowAroundCards();
-    drawCardLinks();
+    scheduleCardLinks();
     el.scrollTop = sv?.t ?? 0; // re-apply after the card layout settles
     el.scrollLeft = sv?.l ?? 0;
   });
@@ -3538,7 +3550,7 @@ export function spawnTerminalCard(
   writeState(card, { x, y, pinned: 0, z: genZ });
   avoidOverlap(card);
   scheduleFlow();
-  requestAnimationFrame(drawCardLinks);
+  scheduleCardLinks();
   dirty = true;
   setState(t("ed.saving"));
   void save();
@@ -3592,7 +3604,7 @@ export function spawnSheetCard(
   writeState(card, { x, y, pinned: 0, z: genZ });
   avoidOverlap(card);
   scheduleFlow();
-  requestAnimationFrame(drawCardLinks);
+  scheduleCardLinks();
   dirty = true;
   setState(t("ed.saving"));
   void save();
@@ -3629,7 +3641,7 @@ export function spawnDeckCard(title: string, block?: HTMLElement): HTMLElement {
   writeState(card, { x, y, pinned: 0, z: genZ });
   avoidOverlap(card);
   scheduleFlow();
-  requestAnimationFrame(drawCardLinks);
+  scheduleCardLinks();
   dirty = true;
   setState(t("ed.saving"));
   void save();
@@ -3663,7 +3675,7 @@ function duplicateDeckCard(card: HTMLElement) {
   clone.style.zIndex = String(nextZ());
   writeState(clone, { x: clone.offsetLeft, y: clone.offsetTop, pinned: 0, z: genZ });
   scheduleFlow();
-  requestAnimationFrame(drawCardLinks);
+  scheduleCardLinks();
   dirty = true;
   void save();
   addActivity(`⧉ duplicated deck: ${card.dataset.topic ?? "deck"}`);
@@ -3698,7 +3710,7 @@ export function spawnTodoCard(title: string, block?: HTMLElement): HTMLElement {
   writeState(card, { x, y, pinned: 0, z: genZ });
   avoidOverlap(card);
   scheduleFlow();
-  requestAnimationFrame(drawCardLinks);
+  scheduleCardLinks();
   dirty = true;
   setState(t("ed.saving"));
   void save();
@@ -3757,7 +3769,7 @@ export function spawnCardsCard(title: string, block?: HTMLElement, cards?: { fro
   writeState(card, { x, y, pinned: 0, z: genZ });
   avoidOverlap(card);
   scheduleFlow();
-  requestAnimationFrame(drawCardLinks);
+  scheduleCardLinks();
   dirty = true;
   void save();
   return card;
@@ -3797,7 +3809,7 @@ export function spawnMapCard(title: string, block?: HTMLElement, seed?: typeof P
   writeState(card, { x, y, pinned: 0, z: genZ });
   avoidOverlap(card);
   scheduleFlow();
-  requestAnimationFrame(drawCardLinks);
+  scheduleCardLinks();
   dirty = true;
   void save();
   return card;
@@ -3829,7 +3841,7 @@ export function spawnAgendaCard(title: string, block?: HTMLElement): HTMLElement
   writeState(card, { x, y, pinned: 0, z: genZ });
   avoidOverlap(card);
   scheduleFlow();
-  requestAnimationFrame(drawCardLinks);
+  scheduleCardLinks();
   dirty = true;
   void save();
   return card;
@@ -3862,7 +3874,7 @@ export function spawnGraphCard(title: string, block?: HTMLElement): HTMLElement 
   writeState(card, { x, y, pinned: 0, z: genZ });
   avoidOverlap(card);
   scheduleFlow();
-  requestAnimationFrame(drawCardLinks);
+  scheduleCardLinks();
   dirty = true;
   void save();
   return card;
@@ -3895,7 +3907,7 @@ export function spawnCanvasCard(title: string, block?: HTMLElement): HTMLElement
   writeState(card, { x, y, pinned: 0, z: genZ });
   avoidOverlap(card);
   scheduleFlow();
-  requestAnimationFrame(drawCardLinks);
+  scheduleCardLinks();
   dirty = true;
   void save();
   return card;
@@ -3929,7 +3941,7 @@ export function spawnBaseCard(title: string, block?: HTMLElement, q = ""): HTMLE
   writeState(card, { x, y, pinned: 0, z: genZ });
   avoidOverlap(card);
   scheduleFlow();
-  requestAnimationFrame(drawCardLinks);
+  scheduleCardLinks();
   dirty = true;
   void save();
   return card;
@@ -3982,7 +3994,7 @@ export function spawnBrowserCard(title: string, url: string, block?: HTMLElement
   writeState(card, { x, y, pinned: 0, z: genZ });
   avoidOverlap(card);
   scheduleFlow();
-  requestAnimationFrame(drawCardLinks);
+  scheduleCardLinks();
   dirty = true;
   setState(t("ed.saving"));
   void save();
@@ -4016,7 +4028,7 @@ function duplicateTodoCard(card: HTMLElement) {
   clone.style.zIndex = String(nextZ());
   writeState(clone, { x: clone.offsetLeft, y: clone.offsetTop, pinned: 0, z: genZ });
   scheduleFlow();
-  requestAnimationFrame(drawCardLinks);
+  scheduleCardLinks();
   dirty = true;
   void save();
   addActivity(`⧉ duplicated todo: ${card.dataset.topic ?? "todo"}`);
@@ -4050,7 +4062,7 @@ function duplicateSheetCard(card: HTMLElement) {
   writeState(clone, { x, y, pinned: 0, z: genZ });
   avoidOverlap(clone);
   scheduleFlow();
-  requestAnimationFrame(drawCardLinks);
+  scheduleCardLinks();
   markEdited();
 }
 
@@ -4125,7 +4137,7 @@ function duplicateTerminalCard(card: HTMLElement) {
   writeState(clone, { x, y, pinned: 0, z: genZ });
   avoidOverlap(clone);
   scheduleFlow();
-  requestAnimationFrame(drawCardLinks);
+  scheduleCardLinks();
   dirty = true;
   setState(t("ed.saving"));
   void save();
@@ -4671,7 +4683,7 @@ export function initEditor() {
     });
     flowAroundCards();
     resolvePinnedOverlaps();
-    drawCardLinks();
+    scheduleCardLinks();
     markEdited();
     addActivity(`✓ aligned ${cards.length} widget${cards.length === 1 ? "" : "s"} — ${cols} per row`);
   };
@@ -4729,7 +4741,7 @@ export function initEditor() {
     }
     flowAroundCards();
     resolvePinnedOverlaps();
-    drawCardLinks();
+    scheduleCardLinks();
     markEdited();
     const kc = cards.length - parents.length;
     addActivity(`✓ web threads — ${parents.length} card${parents.length === 1 ? "" : "s"} + ${kc} follow-up${kc === 1 ? "" : "s"} grouped`);
@@ -5958,7 +5970,7 @@ export function initEditor() {
   document.addEventListener("keyup", (e) => {
     if (e.key === "Shift" || e.key.startsWith("Arrow")) updateSelPop(); // keyboard selections
   });
-  window.addEventListener("resize", () => drawCardLinks());
+  window.addEventListener("resize", () => scheduleCardLinks());
   // right-click shows the tool popover instead of a browser menu; with a
   // collapsed caret it first selects the word under the cursor (Word-style)
   el.addEventListener("contextmenu", (e) => {
