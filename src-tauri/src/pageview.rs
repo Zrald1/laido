@@ -125,7 +125,11 @@ pub async fn pv_open(
                 .map_err(|e| e.to_string())?;
             wv.set_position(pos).ok();
             wv.set_size(size).ok();
-            wv.show().ok();
+            /* no wv.show() here — visibility is owned by the card's
+             * pvSync truth. Force-showing an offscreen card's engine
+             * after a watchdog re-nav strands it visible forever: the
+             * card already posted vis=false and the dedup never sends
+             * it again */
             return Ok(());
         }
         {
@@ -357,7 +361,8 @@ pub async fn wv_open(
                 .map_err(|e| e.to_string())?;
             wv.set_position(pos).ok();
             wv.set_size(size).ok();
-            wv.show().ok();
+            /* same rule as pv_open: no force-show — the mount's sync owns
+             * visibility, a re-doc must not un-hide an offscreen widget */
             return Ok(());
         }
         let _ = wv.hide();
@@ -441,26 +446,67 @@ pub async fn pv_bounds(
 pub async fn pv_visible(caller: tauri::Webview, id: String, on: bool) -> Result<(), String> {
     let wv = get_for(&id, &caller, false)?;
     if on {
-        wv.show().map_err(|e| e.to_string())?;
-        /* WebView2Feedback#5673 — a view shown after being hidden can hold
-         * blank/stale pixels until an unrelated repaint lands. Re-putting
-         * its bounds (1px shimmy + restore in the same main-thread call)
-         * forces WM_SIZE and the compositor presents immediately. */
-        com_call(&id, |pw| unsafe {
-            let mut r = windows::Win32::Foundation::RECT::default();
-            pw.controller()
-                .Bounds(&mut r)
-                .map_err(|e| e.to_string())?;
-            let mut shim = r;
-            shim.bottom -= 1;
-            pw.controller().SetBounds(shim).ok();
-            pw.controller().SetBounds(r).ok();
-            Ok(())
-        })?;
-        Ok(())
+        show_with_shimmy(&id, &wv)
     } else {
         wv.hide().map_err(|e| e.to_string())
     }
+}
+
+/* a view shown after being hidden can hold blank/stale pixels until an
+ * unrelated repaint lands (WebView2Feedback#5673). Re-putting its bounds
+ * (1px shimmy + restore in the same main-thread call) forces WM_SIZE and
+ * the compositor presents immediately — shared by pv_visible and the
+ * batched pv_sync path */
+fn show_with_shimmy(id: &str, wv: &Webview<Wry>) -> Result<(), String> {
+    wv.show().map_err(|e| e.to_string())?;
+    com_call(id, |pw| unsafe {
+        let mut r = windows::Win32::Foundation::RECT::default();
+        pw.controller()
+            .Bounds(&mut r)
+            .map_err(|e| e.to_string())?;
+        let mut shim = r;
+        shim.bottom -= 1;
+        pw.controller().SetBounds(shim).ok();
+        pw.controller().SetBounds(r).ok();
+        Ok(())
+    })
+}
+
+#[derive(serde::Deserialize)]
+pub struct SurfOp {
+    id: String,
+    #[serde(rename = "box")]
+    bounds: Option<[i32; 4]>,
+    vis: Option<bool>,
+}
+
+/// batched surface sync — the frontend's shared pump posts ONE invoke
+/// per tick carrying every changed rect/visibility op across all
+/// engines, instead of N cards × 2 invokes each. Per-id owner check
+/// stays non-destructive like pv_bounds/pv_visible (a foreign or
+/// mid-attach engine is skipped, never killed) and skipped ids are
+/// returned so callers re-dirty their dedup keys and retry next tick.
+#[tauri::command]
+pub async fn pv_sync(caller: tauri::Webview, ops: Vec<SurfOp>) -> Result<Vec<String>, String> {
+    let mut failed: Vec<String> = Vec::new();
+    for op in ops {
+        let Ok(wv) = get_for(&op.id, &caller, false) else {
+            failed.push(op.id);
+            continue;
+        };
+        if let Some([x, y, w, h]) = op.bounds {
+            wv.set_position(PhysicalPosition::new(x, y)).ok();
+            wv.set_size(PhysicalSize::new(w.max(1) as u32, h.max(1) as u32)).ok();
+        }
+        if let Some(on) = op.vis {
+            if on {
+                let _ = show_with_shimmy(&op.id, &wv);
+            } else {
+                wv.hide().ok();
+            }
+        }
+    }
+    Ok(failed)
 }
 
 /// live engine ids — the sound pill polls these for playing audio

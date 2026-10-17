@@ -13,6 +13,7 @@
 import { invoke, refocusField } from "./ipc.js";
 import { wireChatTools, type ChatImage } from "./chatplus.js";
 import { addActivity } from "./log.js";
+import { surfTick, surfBounds, surfVis } from "./surfsync.js";
 
 const S = (v: unknown): string => typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : "";
 const DS = (v: string | undefined): string => { const s = v ?? ""; return /^(?:undefined|null|NaN|-?Infinity|[object [^]]*])$/.test(s) ? "" : s; };
@@ -279,14 +280,17 @@ const parkedByUrl = new Map<string, string>();
 /* engines sent to sleep (WebView2 TrySuspend — Edge's sleeping tabs):
  * frozen scripts reclaim renderer memory; skipped by the audio poll and
  * woken via pv_resume + re-show when their tab activates again */
-const suspendedPv = new Set<string>();
+export const suspendedPv = new Set<string>();
 (window as unknown as { __suspendedPv?: Set<string> }).__suspendedPv = suspendedPv; // CDP testability
+/* engines currently painted on screen — the audio poll skips hidden
+ * quiet ones at 1/4 rate and offscreen suspension consults it */
+export const visiblePv = new Set<string>();
 /* a hidden background engine either SLEEPS (quiet — full suspend) or
  * presses to Low memory target (still audible — can't pause sound).
  * The cached audioPv flag lags up to a poll-tick — a video that started
  * a second ago reads quiet and would get frozen mid-play — so we take a
  * fresh media sample at hide time before committing the suspend. */
-const sleepEngine = (id: string, stillHidden: () => boolean) => {
+export const sleepEngine = (id: string, stillHidden: () => boolean) => {
   if (suspendedPv.has(id)) return; // already frozen — an eval would just stall
   const commit = (playing: boolean) => {
     /* the media sample took tens of ms — a tab switch in that window made
@@ -319,7 +323,7 @@ const sleepEngine = (id: string, stillHidden: () => boolean) => {
 };
 /* shown/navigated engines auto-resume a suspend, but a Low memory target
  * does NOT auto-restore — flip it back or the live page crawls */
-const wakeEngine = (id: string) => {
+export const wakeEngine = (id: string) => {
   // Resume is required — TrySuspend does not undo itself on re-show, so a
   // cleared-but-frozen engine would fail every eval and paint dead pixels.
   if (suspendedPv.delete(id)) void invoke("pv_resume", { id }).catch(() => {});
@@ -396,6 +400,7 @@ const paintSndButtons = () => {
 
 let audioTimer = 0;
 const unclaimedTicks = new Map<string, number>();
+let quietTicks = 0; // staggers hidden-engine audio samples at 1/4 rate
 const startAudioPoll = () => {
   if (audioTimer) return;
   audioTimer = window.setInterval(async () => {
@@ -435,9 +440,19 @@ const startAudioPoll = () => {
     /* parallel evals — a serial loop over many parked engines stretches
      * the effective poll past several seconds and SPA tracking lags.
      * Suspended engines are skipped entirely: their scripts are frozen,
-     * they can't be playing, and evals just queue into timeouts */
+     * they can't be playing, and evals just queue into timeouts.
+     * Hidden-and-quiet engines sample at 1/4 rate — a background tab
+     * CAN autoplay so skipping outright would miss the start, but they
+     * don't need the full 2s cadence either */
+    quietTicks++;
     await Promise.all(
-      ids.filter((id) => !suspendedPv.has(id)).map(async (id) => {
+      ids
+        .filter((id) => !suspendedPv.has(id))
+        .filter((id) => {
+          if (visiblePv.has(id) || audioPv.get(id)?.playing) return true;
+          return (quietTicks + [...id].reduce((a, c) => a + c.charCodeAt(0), 0)) % 4 === 0;
+        })
+        .map(async (id) => {
         const s = await invoke<string>("pv_eval", { id, js: AUD_JS }).catch(() => "");
         if (!s) return;
         try {
@@ -957,6 +972,8 @@ export function wireBrowser(card: HTMLElement) {
   let lastVis = "";
   let reaffirmTicks = 0;
   let coverTicks = 0;
+  let coverSample = 0; // hit-test cadence — elementFromPoint runs ~every 3rd tick
+  let offTicks = 0; // consecutive fully-clipped ticks → auto-suspend at 20
   /* page fullscreen (youtube ⛶ etc.): the child webview is a native HWND —
    * DOM fullscreen succeeds but nothing resizes the surface, so the video
    * stays card-sized. Poll document.fullscreenElement; while a page is
@@ -989,13 +1006,13 @@ export function wireBrowser(card: HTMLElement) {
       const key = `fs,${window.innerWidth},${window.innerHeight},${d}`;
       if (key === lastBox) return;
       lastBox = key;
-      void invoke("pv_bounds", {
-        id: bvId, x: 0, y: 0,
-        w: Math.max(1, Math.round(window.innerWidth * d)),
-        h: Math.max(1, Math.round(window.innerHeight * d)),
-      }).catch(() => {});
-      void invoke("pv_visible", { id: bvId, on: true }).catch(() => {});
+      surfBounds(bvId, 0, 0,
+        Math.max(1, Math.round(window.innerWidth * d)),
+        Math.max(1, Math.round(window.innerHeight * d)),
+        () => { lastBox = ""; });
+      surfVis(bvId, true, () => { lastVis = ""; });
       lastVis = "true";
+      visiblePv.add(bvId);
       return;
     }
     if (fsOwner) {
@@ -1003,7 +1020,8 @@ export function wireBrowser(card: HTMLElement) {
       if (lastBox !== "fs-peer") {
         lastBox = "fs-peer";
         lastVis = "false";
-        void invoke("pv_visible", { id: bvId, on: false }).catch(() => {});
+        visiblePv.delete(bvId);
+        surfVis(bvId, false, () => { lastVis = ""; });
       }
       return;
     }
@@ -1040,30 +1058,45 @@ export function wireBrowser(card: HTMLElement) {
         }
       }
     }
-    /* a native webview punches through the DOM — if another card covers
-     * the visible middle, the widget underneath must hide. Two consecutive
-     * samples required so a transient hit-test gap can't flicker it */
-    const mid =
-      iw > 0 && ih > 0
-        ? document.elementFromPoint(ix + iw / 2, iy + ih / 2)
-        : null;
-    coverTicks = !mid || !card.contains(mid) ? coverTicks + 1 : 0;
-    const vis = liveOn && !!cur().url && coverTicks < 2 && iw > 8 && ih > 8;
     const d = dpr();
-    /* bounds and visibility post independently — a pure scroll changes the
-     * rect on every frame, and re-sending visibility each time doubles the
-     * IPC the HWND has to chew through while it's trying to keep up */
     const boxKey = `${Math.round(ix)},${Math.round(iy)},${Math.round(iw)},${Math.round(ih)},${d}`;
+    /* elementFromPoint is a full hit-test (layout + paint-order walk) —
+     * the single most expensive call in this loop. It only needs a fresh
+     * sample when our box actually moved (scroll/resize) or on a slow
+     * re-check cadence for popovers that cover without moving us —
+     * every ~3rd tick, not every tick */
+    if (boxKey !== lastBox || ++coverSample >= 3) {
+      coverSample = 0;
+      const mid =
+        iw > 0 && ih > 0
+          ? document.elementFromPoint(ix + iw / 2, iy + ih / 2)
+          : null;
+      coverTicks = !mid || !card.contains(mid) ? coverTicks + 1 : 0;
+    }
+    const vis = liveOn && !!cur().url && coverTicks < 2 && iw > 8 && ih > 8;
     const visKey = `${vis}`;
+    /* offscreen sleep — a fully clipped engine still burns a renderer
+     * (timers, GC, raster). ~3s hidden + quiet → TrySuspend via
+     * sleepEngine; the needVis branch wakes it the moment it returns */
+    offTicks = vis ? 0 : offTicks + 1;
+    /* exactly-once was a lost window: an engine still mid-attach at
+     * tick 20 makes sleepEngine's calls no-op and the === gate never
+     * fired again — engines stayed hidden-but-awake forever. Retry on
+     * a slow cadence; sleepEngine itself early-outs once suspended and
+     * a busy controller just refuses until the next retry */
+    if (offTicks >= 20 && offTicks % 10 === 0 && !suspendedPv.has(bvId)) {
+      sleepEngine(bvId, () => lastVis !== "true");
+    }
     /* self-heal: a stray hide (raced suspend, sweep, park) leaves truth
-     * false while lastVis says true — the dedup would then NEVER repost
-     * and the page stays dead. If the live engine is marked suspended it
-     * is by definition not showing, so force the branch. And even when
-     * nothing suspects a hide, re-affirm the wanted state on a ~2s
-     * cadence — out-of-band hides (sweep, reclaim teardown) bypass this
-     * card's lastVis entirely */
+     * false while lastVis says true — and a stray SHOW (pv_open's nav
+     * path, an out-of-band re-show) leaves truth true while lastVis
+     * says false — either way the dedup alone never heals it. Re-affirm
+     * the wanted state BOTH directions on a ~2s cadence; a suspended
+     * engine that wants showing gets the wake immediately */
     const needVis =
-      visKey !== lastVis || (vis && (suspendedPv.has(bvId) || ++reaffirmTicks >= 15));
+      visKey !== lastVis ||
+      (vis && suspendedPv.has(bvId)) ||
+      ++reaffirmTicks >= 15;
     if (needVis && reaffirmTicks >= 15) reaffirmTicks = 0;
     if (boxKey === lastBox && !needVis) return;
     /* grip-resize posts a new rect EVERY pointer frame — put_Bounds is an
@@ -1081,67 +1114,56 @@ export function wireBrowser(card: HTMLElement) {
       lastBoundsAt = Date.now();
       if (boxKey !== lastBox) {
         lastBox = boxKey;
-        void invoke("pv_bounds", {
-          id: bvId,
-          x: Math.round(ix * d), y: Math.round(iy * d),
-          w: Math.round(Math.max(1, iw) * d), h: Math.round(Math.max(1, ih) * d),
-        }).catch(() => {});
+        surfBounds(bvId,
+          Math.round(ix * d), Math.round(iy * d),
+          Math.round(Math.max(1, iw) * d), Math.round(Math.max(1, ih) * d),
+          () => { lastBox = ""; });
       }
       return; // visibility frozen until the grip releases
     }
     if (boxKey !== lastBox) {
       lastBox = boxKey;
-      void invoke("pv_bounds", {
-        id: bvId,
-        x: Math.round(ix * d), y: Math.round(iy * d),
-        w: Math.round(Math.max(1, iw) * d), h: Math.round(Math.max(1, ih) * d),
-      }).catch(() => {});
+      surfBounds(bvId,
+        Math.round(ix * d), Math.round(iy * d),
+        Math.round(Math.max(1, iw) * d), Math.round(Math.max(1, ih) * d),
+        /* a skipped op (engine mid-attach / foreign-owned) re-dirties the
+         * key — otherwise the dedup stamps it "done" and the surface sits
+         * at its creation rect forever */
+        () => { lastBox = ""; });
     }
     if (needVis) {
       lastVis = visKey;
       /* false→true means a suspended engine is about to paint — clear the
        * sleep mark and lift any Low memory target before it shows */
-      if (vis) wakeEngine(bvId);
-      void invoke("pv_visible", { id: bvId, on: vis }).catch(() => {});
+      if (vis) {
+        wakeEngine(bvId);
+        visiblePv.add(bvId);
+      } else {
+        visiblePv.delete(bvId);
+      }
+      surfVis(bvId, vis, () => { lastVis = ""; });
     }
   };
   /* ResizeObserver catches card drags/resizes instantly instead of waiting
    * for the poll — the page surface tracks the grip in real time */
   const ro = new ResizeObserver(() => pvSync());
   ro.observe(view);
-  /* the 140ms poll alone trails a scroll by ~9 frames — the native surface
-   * visibly detaches from the card then snaps back. Sync on every scroll
-   * frame (capture-phase sees every scroll container: the note body, chat
-   * docks, side panels) so the HWND tracks ~1 frame behind instead. A
-   * trailing settle pass catches the last position after inertial tail-off. */
-  let scrollRaf = 0;
-  let scrollSettle = 0;
-  const onScroll = () => {
-    if (!scrollRaf) {
-      scrollRaf = requestAnimationFrame(() => {
-        scrollRaf = 0;
-        pvSync();
-      });
-    }
-    window.clearTimeout(scrollSettle);
-    scrollSettle = window.setTimeout(pvSync, 90);
-  };
-  document.addEventListener("scroll", onScroll, true);
+  /* one shared clock drives every surface's sync (surfsync owns the
+   * single document scroll/resize listeners and feeds frames to this
+   * tick) — before, each card fanned out its own 140ms interval + a
+   * capture listener apiece: N cards × 7 hit-tests/s on the DOM thread */
   let deadTicks = 0;
-  const pvTimer = window.setInterval(() => {
+  const offPvTick = surfTick(() => {
     if (!card.isConnected) {
       /* DOM detach has two meanings: a real card delete kills the engine,
        * but a note switch (loadNote marks data-park first) PARKS it —
        * hidden, still alive, so playing media keeps going and reopening
        * the note re-glues the same webview without a reload */
       if (++deadTicks >= 2) {
-        window.clearInterval(pvTimer);
+        offPvTick();
         ro.disconnect();
         extResize.disconnect();
-        window.clearTimeout(scrollSettle);
         window.clearTimeout(gripDefer);
-        if (scrollRaf) cancelAnimationFrame(scrollRaf);
-        document.removeEventListener("scroll", onScroll, true);
         window.removeEventListener("resize", extWinFit);
         document.removeEventListener("pointerdown", closeExt);
         document.removeEventListener("keydown", escExt, true);
@@ -1168,9 +1190,9 @@ export function wireBrowser(card: HTMLElement) {
     }
     deadTicks = 0;
     /* page fullscreen check — ~1s cadence, only while the live engine is
-     * on. Esc / the site's own exit clears fullscreenElement → setFs(false)
-     * drops the window back to normal and pvSync re-glues the surface. */
-    if (++fsTick >= 7 && liveOn && !fsOn) {
+     * on AND painted. A hidden/offscreen engine can't hold meaningful
+     * fullscreen — skipping its eval is one less IPC per card per sec */
+    if (++fsTick >= 7 && liveOn && !fsOn && lastVis === "true") {
       fsTick = 0;
       void invoke<string>("pv_eval", {
         id: bvId,
@@ -1196,7 +1218,7 @@ export function wireBrowser(card: HTMLElement) {
         .catch(() => setFs(false));
     }
     pvSync();
-  }, 140);
+  });
 
   /* walled pages need sign-in — the live engine handles them natively;
    * ⧉ opens a full window for sites that want more room */

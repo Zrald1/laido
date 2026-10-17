@@ -571,6 +571,7 @@ fn main() {
             pageview::pv_nav,
             pageview::pv_bounds,
             pageview::pv_visible,
+            pageview::pv_sync,
             pageview::pv_close,
             pageview::pv_list,
             pageview::pv_url,

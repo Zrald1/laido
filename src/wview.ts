@@ -11,6 +11,8 @@
  *   wv.dispose()         — close the engine + stop syncing
  */
 import { invoke } from "./ipc.js";
+import { surfTick, surfBounds, surfVis } from "./surfsync.js";
+import { sleepEngine, wakeEngine, suspendedPv, visiblePv } from "./browser.js";
 
 const dpr = () => window.devicePixelRatio || 1;
 
@@ -44,6 +46,9 @@ export function mountWv(
   let lastVis = "";
   let linkFn: ((url: string) => void) | null = null;
   let ticks = 0;
+  let coverSample = 0;
+  let coverTicks = 0; // consecutive covered hit-tests
+  let offTicks = 0;
   claims.add(id);
 
   let parked = false;
@@ -82,33 +87,54 @@ export function mountWv(
     const iy = Math.max(r.top, clip.top);
     const iw = Math.min(r.right, clip.right) - ix;
     const ih = Math.min(r.bottom, clip.bottom) - iy;
-    const mid =
-      iw > 0 && ih > 0 ? document.elementFromPoint(ix + iw / 2, iy + ih / 2) : null;
-    const covered = !mid || (!el.contains(mid) && mid !== el);
-    const vis = !covered && iw > 8 && ih > 8;
     const d = dpr();
     const boxKey = `${Math.round(ix)},${Math.round(iy)},${Math.round(iw)},${Math.round(ih)},${d}`;
+    /* elementFromPoint = layout+paint-order hit-test — the expensive
+     * call. Sample on box-change or every ~3rd tick, not every tick */
+    let covered = coverTicks > 0;
+    if (boxKey !== lastBox || ++coverSample >= 3) {
+      coverSample = 0;
+      const mid =
+        iw > 0 && ih > 0 ? document.elementFromPoint(ix + iw / 2, iy + ih / 2) : null;
+      coverTicks = !mid || (!el.contains(mid) && mid !== el) ? coverTicks + 1 : 0;
+      covered = coverTicks > 0;
+    }
+    const vis = !covered && iw > 8 && ih > 8;
+    /* a hidden wv surface is a pure renderer — safe to freeze after the
+     * same ~3s grace the browser engines get */
+    offTicks = vis ? 0 : offTicks + 1;
+    /* retry on a slow cadence, not once: an engine still mid-attach at
+     * tick 20 eats the single shot and stays awake-forever */
+    if (offTicks >= 20 && offTicks % 10 === 0 && !suspendedPv.has(id)) {
+      sleepEngine(id, () => lastVis !== "true");
+    }
     if (boxKey !== lastBox) {
       lastBox = boxKey;
       /* a failed post (engine still mid-attach in the env-churn gap)
        * re-dirties the key — otherwise the surface sits at its creation
        * rect forever because the dedup thinks it already landed */
-      void invoke("pv_bounds", {
+      surfBounds(
         id,
-        x: Math.round(ix * d), y: Math.round(iy * d),
-        w: Math.round(Math.max(1, iw) * d), h: Math.round(Math.max(1, ih) * d),
-      }).catch(() => { lastBox = ""; });
+        Math.round(ix * d), Math.round(iy * d),
+        Math.round(Math.max(1, iw) * d), Math.round(Math.max(1, ih) * d),
+        () => { lastBox = ""; });
     }
     const visKey = `${vis}`;
     if (visKey !== lastVis) {
       lastVis = visKey;
-      void invoke("pv_visible", { id, on: vis }).catch(() => { lastVis = ""; });
+      if (vis) {
+        wakeEngine(id);
+        visiblePv.add(id);
+      } else {
+        visiblePv.delete(id);
+      }
+      surfVis(id, vis, () => { lastVis = ""; });
     }
-    /* self-heal, same as pvSync: a stray hide from any out-of-band path
-     * (sweep tick between unmount/remount, reclaim teardown) bypasses
-     * the dedup — re-affirm on a slow cadence so it can never stick */
-    if (vis && ++ticks % 14 === 0)
-      void invoke("pv_visible", { id, on: true }).catch(() => {});
+    /* self-heal BOTH directions: a stray hide OR a stray show (wv_open's
+     * old force-show, sweep, reclaim) bypasses the dedup — re-affirm the
+     * wanted state on a slow cadence so neither can stick */
+    if (++ticks % 14 === 0)
+      surfVis(id, vis);
   };
 
   const r = el.getBoundingClientRect();
@@ -122,9 +148,9 @@ export function mountWv(
 
   const ro = new ResizeObserver(sync);
   ro.observe(el);
-  const onScroll = () => requestAnimationFrame(sync);
-  document.addEventListener("scroll", onScroll, true);
-  const timer = window.setInterval(sync, 140);
+  /* shared pump — interval + scroll/resize fan-in live in surfsync so a
+   * note full of surfaces isn't N loops × N listeners */
+  const offTick = surfTick(sync);
 
   const unlisten = window.__TAURI__.event
     .listen<{ id: string; url: string }>("wv:nav", (e) => {
@@ -136,6 +162,9 @@ export function mountWv(
     id,
     setDoc(html: string) {
       if (!dead) {
+        /* a suspended engine freezes script timers — wake before posting
+         * the nav or the doc stalls behind a dead renderer */
+        if (suspendedPv.has(id)) wakeEngine(id);
         pendingDoc = html;
         sync();
       }
@@ -149,9 +178,10 @@ export function mountWv(
     dispose() {
       dead = true;
       claims.delete(id);
-      window.clearInterval(timer);
+      visiblePv.delete(id);
+      suspendedPv.delete(id);
+      offTick();
       ro.disconnect();
-      document.removeEventListener("scroll", onScroll, true);
       void unlisten.then((f) => f()).catch(() => {});
       void invoke("pv_close", { id }).catch(() => {});
       onDispose?.();
