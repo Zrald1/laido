@@ -4295,12 +4295,31 @@ async function openStickyWindow(id: string, x?: number, y?: number): Promise<boo
   /* Rust-side pop_window: the shared WebView2 env rejects JS-built
    * windows (env options mismatch). build() returning only means an
    * HWND exists — the card is removed only when the sticky window
-   * emits pop:ready from its own booted init */
+   * emits pop:ready from its own booted init. The listener registers
+   * BEFORE the spawn — the emit lands at the top of the child's init
+   * and a late listener misses it */
+  const ready = new Promise<boolean>((resolve) => {
+    let un: (() => void) | undefined;
+    const done = (ok: boolean) => {
+      un?.();
+      resolve(ok);
+    };
+    void window.__TAURI__.event
+      .listen<string>("pop:ready", (e) => {
+        if (e.payload === label) done(true);
+      })
+      .then((u) => (un = u));
+    /* pop_window retries a dead attach up to 3 times + destroy-gap
+     * waits — ~40s worst */
+    setTimeout(() => done(false), 45000);
+  });
   try {
     await invoke("pop_window", {
       label,
       url: "index.html",
-      init: `window.__POP_STICKY__=${JSON.stringify(`~${id}`)}`,
+      /* __POP_TOKEN__: pop_window can retry under a fresh label — the
+       * ready match must track the token, not the window label */
+      init: `window.__POP_STICKY__=${JSON.stringify(`~${id}`)};window.__POP_TOKEN__=${JSON.stringify(label)}`,
       x: x ?? 0,
       y: y ?? 0,
       w: 270,
@@ -4313,25 +4332,17 @@ async function openStickyWindow(id: string, x?: number, y?: number): Promise<boo
     addActivity(`✕ ${String(err)}`);
     return false;
   }
-  return await new Promise<boolean>((resolve) => {
-    let un: (() => void) | undefined;
-    const done = (ok: boolean) => {
-      un?.();
-      if (!ok) {
-        addActivity(`✕ the sticky window didn't finish loading`);
-        void window.__TAURI__.webviewWindow?.WebviewWindow.getByLabel(label)
-          .then((w) => void w?.close())
-          .catch(() => {});
-      }
-      resolve(ok);
-    };
-    void window.__TAURI__.event
-      .listen<string>("pop:ready", (e) => {
-        if (e.payload === label) done(true);
-      })
-      .then((u) => (un = u));
-    setTimeout(() => done(false), 10000);
-  });
+  const ok = await ready;
+  if (!ok) {
+    addActivity(`✕ the sticky window didn't finish loading`);
+    try {
+      const w = await window.__TAURI__.webviewWindow?.WebviewWindow.getByLabel(label);
+      void w?.close();
+    } catch {
+      /* already gone */
+    }
+  }
+  return ok;
 }
 
 export function popOutSticky(card: HTMLElement, x?: number, y?: number) {

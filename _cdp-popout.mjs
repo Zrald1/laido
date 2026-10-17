@@ -62,9 +62,16 @@ for (let i = 1; i <= 12; i++) {
   await sleep(30);
 }
 await main.s("Input.dispatchMouseEvent", { type: "mouseReleased", x: rect.x + 1200, y: rect.y + 260, button: "left", clickCount: 1 });
-await sleep(5000);
-
-const wins = (await pages()).filter((t) => t.url.includes("tauri.localhost"));
+/* pop:ready → close-tab lands when the child finishes booting — a few
+ * seconds on a warm spawn, longer while a previous popout's env is
+ * still tearing down. Poll, don't snapshot. */
+let wins = [];
+for (let i = 0; i < 20; i++) {
+  await sleep(1500);
+  wins = (await pages()).filter((t) => t.url.includes("tauri.localhost"));
+  const mainTabs = await main.ev(`[...document.querySelectorAll("#tabs .tab")].map(t=>t.dataset.note)`);
+  if (wins.length === before + 1 && !mainTabs.includes("untitled-48.laido")) break;
+}
 check("new window spawned", wins.length === before + 1, `${before}→${wins.length}`);
 const mainTabs = await main.ev(`[...document.querySelectorAll("#tabs .tab")].map(t=>t.dataset.note)`);
 check("tab left main", !mainTabs.includes("untitled-48.laido"), JSON.stringify(mainTabs));

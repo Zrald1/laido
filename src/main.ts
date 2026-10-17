@@ -59,7 +59,12 @@ async function init() {
    * eaten the tab. init() running at all is the proof — emit immediately */
   const ownLabel = window.__TAURI__.window.getCurrentWindow().label;
   if (ownLabel.startsWith("note-") || ownLabel.startsWith("sticky-")) {
-    void window.__TAURI__.event.emit("pop:ready", ownLabel);
+    /* emit the spawn TOKEN, not the window label — pop_window retries
+     * under fresh labels after a dead attach, so the label the parent
+     * asked for may not be the label this window ended up with */
+    const token =
+      (window as unknown as { __POP_TOKEN__?: string }).__POP_TOKEN__ ?? ownLabel;
+    void window.__TAURI__.event.emit("pop:ready", token);
   }
   const sticky =
     new URLSearchParams(location.search).get("sticky") ??

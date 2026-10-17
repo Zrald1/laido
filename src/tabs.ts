@@ -455,21 +455,10 @@ async function popOutTab(name: string, e: PointerEvent) {
    * tab leaves main only when the child emits pop:ready from its own
    * booted init, so a silent webview failure can never eat the tab */
   const label = `note-${Date.now().toString(36)}`;
-  try {
-    await invoke("pop_window", {
-      label,
-      url: "index.html",
-      init: `window.__POP_NOTE__=${JSON.stringify(name)}`,
-      x: Math.round(window.screenX + Math.max(0, e.clientX - 150)),
-      y: Math.round(window.screenY + Math.max(0, e.clientY - 20)),
-      w: 900,
-      h: 640,
-    });
-  } catch (err) {
-    addActivity(`✕ couldn't open a new window: ${String(err)}`);
-    return;
-  }
-  const ready = await new Promise<boolean>((resolve) => {
+  /* the listener must exist BEFORE the window spawns — the child emits
+   * pop:ready at the top of its init, which can land before invoke()
+   * returns; registering after the spawn races the emit and misses it */
+  const ready = new Promise<boolean>((resolve) => {
     let un: (() => void) | undefined;
     const done = (ok: boolean) => {
       un?.();
@@ -480,9 +469,29 @@ async function popOutTab(name: string, e: PointerEvent) {
         if (ev.payload === label) done(true);
       })
       .then((u) => (un = u));
-    setTimeout(() => done(false), 10000);
+    /* pop_window can silently retry a dead attach up to 3 times, and
+     * each attempt may wait out a destroy tail — ~40s worst case plus
+     * the child's own boot */
+    setTimeout(() => done(false), 45000);
   });
-  if (!ready) {
+  try {
+    await invoke("pop_window", {
+      label,
+      url: "index.html",
+      /* __POP_TOKEN__: the child emits this back on pop:ready — the
+       * window's own label can differ if pop_window retried a dead
+       * attach under a fresh label */
+      init: `window.__POP_NOTE__=${JSON.stringify(name)};window.__POP_TOKEN__=${JSON.stringify(label)}`,
+      x: Math.round(window.screenX + Math.max(0, e.clientX - 150)),
+      y: Math.round(window.screenY + Math.max(0, e.clientY - 20)),
+      w: 900,
+      h: 640,
+    });
+  } catch (err) {
+    addActivity(`✕ couldn't open a new window: ${String(err)}`);
+    return;
+  }
+  if (!(await ready)) {
     addActivity(`✕ the new window didn't finish loading — tab kept`);
     // the dead shell is clutter — close it if the handle resolves
     try {
