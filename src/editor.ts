@@ -138,12 +138,15 @@ function avoidOverlap(card: HTMLElement) {
   }
 }
 
-export function markEdited() {
+export function markEdited(flow = true) {
   dirty = true;
   setState(t("ed.saving"));
   clearTimeout(timer);
   timer = window.setTimeout(() => void save(), 800);
-  scheduleFlow();
+  /* flow=false skips the card-flow pass — callers that dirty the note
+   * without moving text (typing inside a card's own fields) must not pay
+   * a full-page reflow + link redraw per keystroke */
+  if (flow) scheduleFlow();
 }
 
 /* ---------- card undo host — snapshot/restore widget cards ----------
@@ -4746,13 +4749,17 @@ export function initEditor() {
   });
 
   el.addEventListener("input", (e) => {
-    markEdited();
-    const ie = e as InputEvent;
     /* edits inside a card's own fields (browser chat, url bar, sheet
-     * cells…) are widget state, not note text — arming a picker from them
-     * would read a stale document selection and let the next space/enter
-     * run a command while the user is only typing in the card */
-    if (!(e.target as HTMLElement | null)?.closest?.(".callout") && !ie.isComposing) {
+     * cells…) are widget state, not note text — they still mark the note
+     * dirty (widget DOM is what serialize() persists) but skip the
+     * card-flow pass: a forced whole-page reflow per keystroke is what
+     * made card inputs lag. The command picker must stay off too — arming
+     * it would read a stale document selection and let the next space/
+     * enter run a command while the user is only typing in the card */
+    const inCard = !!(e.target as HTMLElement | null)?.closest?.(".callout");
+    markEdited(!inCard);
+    const ie = e as InputEvent;
+    if (!inCard && !ie.isComposing) {
       // typing a command word + space opens the no-@ picker anywhere on the
       // line; at line start a hand-typed word becomes a chip right away.
       // pasted or dropped text never chips or pops — only manual typing arms.

@@ -43,6 +43,50 @@ export function toUrl(input: string): string {
   return `https://www.google.com/search?q=${encodeURIComponent(clean)}`;
 }
 
+/** Imperative control asks → the browser fence that does it, no model
+ * needed. Returns null for anything ambiguous so the model still gets
+ * page questions, multi-step plans and odd phrasing. Patterns are
+ * anchored and args sanity-checked so "what does open source mean"
+ * never turns into a navigation. */
+function directAction(q: string, title: string): string[] | null {
+  const s = q
+    .trim()
+    .replace(/^(?:please|can you|could you|would you|hey|okay|ok)[,!\s]+/i, "");
+  const clean = (a: string | undefined) =>
+    (a ?? "").trim().replace(/^["'`]+|["'`]+$/g, "");
+  const fence = (verb: string, a = "") =>
+    [`${verb} ${title}${a ? ` ${a}` : ""}`];
+  // "new tab", "open a new tab", "new tab to youtube.com", "open youtube
+  // in a new tab" (the suffix case lands below)
+  let m = s.match(
+    /^(?:open\s+)?(?:a\s+)?new\s+tab(?::?\s+(?:to\s+|with\s+|for\s+)?(.+))?$/i,
+  );
+  if (m) return fence("newtab", clean(m[1]));
+  m = s.match(
+    /^(?:open|navigate(?:\s+to)?|go\s+to|goto|visit|load|browse\s+to|take\s+me\s+to|head\s+to)\s+(.+)$/i,
+  );
+  if (m) {
+    const a = clean(m[1]);
+    const tab = a.match(/^(.*?)\s+in\s+(?:a\s+)?new\s+tab$/i);
+    if (tab) return fence("newtab", clean(tab[1]));
+    // question-shaped args ("what is…", "how does…", trailing ?) mean the
+    // verb was part of a sentence, not a command — let the model answer
+    if (a && !/\?$/.test(a) && !/^(?:what|why|how|which|who|tell|explain|describe|about)\b/i.test(a))
+      return fence("navigate", a);
+    return null;
+  }
+  // "search cats", "google laido docs" — results should render IN the
+  // page, so it's a navigation to duckduckgo (the app's search lane);
+  // "search this page" is a find, leave it to the model
+  m = s.match(/^(?:search|google|look\s+up)(?:\s+for)?\s+(.+)$/i);
+  if (m) {
+    const a = clean(m[1]);
+    if (a && !/^(?:this page|the page|it\b|here\b)/i.test(a) && !/\?$/.test(a))
+      return fence("navigate", `https://duckduckgo.com/?q=${encodeURIComponent(a)}`);
+  }
+  return null;
+}
+
 /* ---------- markdown <-> card ---------- */
 
 /** `[!browser] title` + `url: …` + `tab: url | title` + `tool:`/`chat:`
@@ -1882,6 +1926,11 @@ export function wireBrowser(card: HTMLElement) {
       return t ? `page text (fetch lane): ${t}` : "";
     }
   };
+  interface BrowserAi {
+    text: string; sheet: string[]; slides: string[]; todo: string[];
+    chart: string[]; cards: string[]; maps: string[]; base: string[];
+    browser: string[]; laido: string[];
+  }
   const askBrowser = async (q: string, images: ChatImage[] = []) => {
     if (!chatIn) return;
     asking = true;
@@ -1889,31 +1938,6 @@ export function wireBrowser(card: HTMLElement) {
     chatIn.placeholder = "ai is answering…";
     const pend = chatAdd("wait", "…");
     const title = card.dataset.topic ?? "browser";
-    const digest = await digestPage();
-    const others =
-      `browser "${title}" on ${cur().url || "(blank tab)"} — a REAL webview2 ` +
-      `page (js ran, post-render dom). Tabs: ` +
-      `${tabs.map((t) => t.url || "blank").join(", ") || "one"}. ` +
-      `Saved tools: ${tools.map((t) => t.name).join(", ") || "none"}.\n` +
-      `${digest}\n` +
-      `The user asks about THIS card. Answer page questions from the live ` +
-      `digest above — no fence needed for "summarize/what does it say". ` +
-      `Emit a \`\`\`browser fence aimed at "${title}" only when you need data ` +
-      `the digest lacks, or to ACT (navigate/click/tab/tool/clip/grab). ` +
-      `Answering an action request with prose alone does NOTHING — no fence, ` +
-      `no action. ` +
-      `Verbs: read/extract/tables/click/eval/navigate/back/forward/` +
-      `tabs/newtab/tab/clip/bookmark/search/open. Multi-step asks chain in ` +
-      `one reply: \`tab ${title} 2\` then \`extract ${title}\`. Save a ` +
-      `reusable page tool with \`tool ${title} {"name":"x","js":"…"}\` ` +
-      `(js runs in the page, JSON back) then \`runtool ${title} x\`; ` +
-      `tooldel removes. Other widgets use their own \`\`\` fences with a ` +
-      `\`new <title>\` verb. Keep answers short — this is a side panel.`;
-    interface BrowserAi {
-      text: string; sheet: string[]; slides: string[]; todo: string[];
-      chart: string[]; cards: string[]; maps: string[]; base: string[];
-      browser: string[]; laido: string[];
-    }
     try {
       const { runWidgetFence } = await import("./term.js");
       const kinds: [keyof BrowserAi, string][] = [
@@ -1923,30 +1947,77 @@ export function wireBrowser(card: HTMLElement) {
       ];
       /* run every fence a reply carries; outs collect for the narration
        * pass, nav-class verbs wait for the page to settle first */
-      const dispatch = async (r: BrowserAi): Promise<{ outs: string[]; readBack: boolean }> => {
+      const dispatch = async (r: Partial<BrowserAi>): Promise<{ outs: string[]; readBack: boolean }> => {
         const outs: string[] = [];
         let readBack = false;
-        for (const [field, kind] of kinds) {
-          for (const body of (r[field] as string[]) ?? []) {
-            const out = await runWidgetFence(kind, body);
-            const head = body.trim().split("\n")[0];
-            outs.push(`${kind}: ${head} → ${out}`);
-            chatAdd("out", out);
-            const v = (head.split(/\s+/)[0] ?? "").toLowerCase();
-            if (kind === "browser" && /^(read|get|extract|data|digest|tables|table|eval|js|runtool|click|links|tabs|list)$/.test(v))
-              readBack = true;
-            if (kind === "browser" && /^(open|new|navigate|go|goto|back|forward|fwd|tab|newtab|closetab|click)$/.test(v)) {
-              const t0 = Date.now();
-              while (loading && Date.now() - t0 < 9000)
-                await new Promise((r) => setTimeout(r, 150));
-            }
-            void window.__TAURI__?.event?.emit("agent:activity", {
-              text: `browser ✦ ${title}: ${kind} ${head.slice(0, 60)}`,
-            });
+        /* flatten first so the settle-wait only runs when another fence
+         * still follows — a trailing nav otherwise holds `asking` for the
+         * full 9s on slow sites and stalls the whole ask queue */
+        const bodies = kinds.flatMap(([field, kind]) =>
+          ((r[field] as string[]) ?? []).map((body) => ({ kind, body })));
+        for (let i = 0; i < bodies.length; i++) {
+          const { kind, body } = bodies[i];
+          const out = await runWidgetFence(kind, body);
+          const head = body.trim().split("\n")[0];
+          outs.push(`${kind}: ${head} → ${out}`);
+          chatAdd("out", out);
+          const v = (head.split(/\s+/)[0] ?? "").toLowerCase();
+          if (kind === "browser" && /^(read|get|extract|data|digest|tables|table|eval|js|runtool|click|links|tabs|list)$/.test(v))
+            readBack = true;
+          if (kind === "browser" && i < bodies.length - 1 && /^(open|new|navigate|go|goto|back|forward|fwd|tab|newtab|closetab|click)$/.test(v)) {
+            const t0 = Date.now();
+            while (loading && Date.now() - t0 < 9000)
+              await new Promise((r) => setTimeout(r, 150));
           }
+          void window.__TAURI__?.event?.emit("agent:activity", {
+            text: `browser ✦ ${title}: ${kind} ${head.slice(0, 60)}`,
+          });
         }
         return { outs, readBack };
       };
+      /* unambiguous control asks skip the model entirely — "open youtube
+       * in a new tab" can't be misread as a page question, and instant
+       * beats clever. The fence is synthesized here and run through the
+       * same dispatch path, so nav-waits, activity traces and history all
+       * stay identical. Anything the pattern can't nail still goes to
+       * the model with the live digest. */
+      const direct = !images.length ? directAction(q, title) : null;
+      if (direct) {
+        chatHist.push({ role: "user", content: q });
+        const done = await dispatch({ browser: direct });
+        pend?.remove();
+        chatHist.push({ role: "assistant", content: done.outs.join(" · ") || "done" });
+        return;
+      }
+      const digest = await digestPage();
+      const others =
+        `browser "${title}" on ${cur().url || "(blank tab)"} — a REAL webview2 ` +
+        `page (js ran, post-render dom). Tabs: ` +
+        `${tabs.map((t) => t.url || "blank").join(", ") || "one"}. ` +
+        `Saved tools: ${tools.map((t) => t.name).join(", ") || "none"}.\n` +
+        `${digest}\n` +
+        `The user asks about THIS card. Decide the INTENT first:\n` +
+        `• PAGE QUESTION — "what does it say", "summarize", "explain", ` +
+        `"what's the price", "find X on this page" → answer from the live ` +
+        `digest, plain prose, NO fence.\n` +
+        `• CONTROL — anything that should CHANGE the browser: open, ` +
+        `navigate, go to, visit, new tab, switch tab, click, search, ` +
+        `type, fill, grab, clip, close → the reply MUST carry a ` +
+        `\`\`\`browser fence aimed at "${title}". Prose performs NOTHING ` +
+        `— a control ask answered in prose has failed even if it reads ` +
+        `helpfully.\n` +
+        `Examples — "open youtube in a new tab" → \`\`\`browser\n` +
+        `newtab ${title} youtube.com\n\`\`\`\n` +
+        `"go to github.com" → \`\`\`browser\nnavigate ${title} github.com\n\`\`\`\n` +
+        `"what is this page about" → plain answer, no fence.\n` +
+        `Verbs: read/extract/tables/click/eval/navigate/back/forward/` +
+        `tabs/newtab/tab/clip/bookmark/search/open. Multi-step asks chain ` +
+        `in one reply: \`tab ${title} 2\` then \`extract ${title}\`. ` +
+        `Save a reusable page tool with \`tool ${title} ` +
+        `{"name":"x","js":"…"}\` (js runs in the page, JSON back) then ` +
+        `\`runtool ${title} x\`; tooldel removes. Other widgets use their ` +
+        `own \`\`\` fences with a \`new <title>\` verb. Keep answers ` +
+        `short — this is a side panel.`;
       const r = await invoke<BrowserAi>("term_ai", {
         prompt: q, history: chatHist.slice(-8), others,
         model: null, persona: null, images,
@@ -1961,7 +2032,7 @@ export function wireBrowser(card: HTMLElement) {
        * replied with prose and no fence — narrating does nothing, so push
        * back once and make it emit the fence. One pass, no loops. */
       let tail = r.text.trim();
-      if (!outs.length && /\b(open|new tab|switch|navigate|go to|visit|load|browse|click|grab|delete|close|runtool|create|make)\b/i.test(q)) {
+      if (!outs.length && /\b(open|new tab|switch|navigate|go to|visit|load|browse|click|grab|delete|close|runtool|create|make|search|find|play|reload|refresh|type|fill|scroll|follow|sign in|log ?in|tab)\b/i.test(q)) {
         const rc = await invoke<BrowserAi>("term_ai", {
           prompt: `you described doing something but emitted no fence — narrating does nothing. emit the needed \`\`\`browser fence(s) now (or say plainly why not): ${q}`,
           history: chatHist.slice(-8), others, model: null, persona: null,
@@ -1998,14 +2069,21 @@ export function wireBrowser(card: HTMLElement) {
     } finally {
       asking = false;
       chatIn.placeholder = idlePlaceholder;
-      refocusField(chatIn);
+      /* queued asks run next — a send that landed mid-answer (nav settle
+       * waits can hold asking for seconds on slow pages) was silently
+       * dropped before; now it echoes immediately and runs in order */
+      const next = askQueue.shift();
+      if (next) void askBrowser(next.q, next.images);
+      else refocusField(chatIn);
     }
   };
+  const askQueue: { q: string; images: ChatImage[] }[] = [];
+  const queueAsk = (send: { prompt: string; images: ChatImage[] }) =>
+    askQueue.push({ q: send.prompt, images: send.images });
   chatIn?.addEventListener("keydown", (e) => {
     e.stopPropagation(); // widget keys never reach note-level chip/picker logic
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      if (asking) return; // one in-flight ask — the field stays editable
       const q = chatIn.value.trim();
       if (!q && !chatTools.hasPending()) return;
       const send = chatTools.collect(q);
@@ -2013,7 +2091,8 @@ export function wireBrowser(card: HTMLElement) {
       chatTools.reset();
       chatIn.value = "";
       chatAdd("user", q || `📎 ${names.join(", ")}`);
-      void askBrowser(send.prompt, send.images);
+      if (asking) queueAsk(send);
+      else void askBrowser(send.prompt, send.images);
     }
   });
   chatIn?.addEventListener("pointerdown", (e) => e.stopPropagation());
