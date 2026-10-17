@@ -218,7 +218,24 @@ pub async fn pv_open(
             use tauri::webview::DownloadEvent;
             match event {
                 DownloadEvent::Requested { url, destination } => {
-                    // real-browser behavior: save into the OS Downloads
+                    /* http(s) downloads go through the segmented engine —
+                     * parallel ranges + the toast (speed/pause/cancel).
+                     * The extension's onCreated may forward the same click
+                     * through the localhost bridge; dl_start dedupes it. */
+                    let u = url.to_string();
+                    if u.starts_with("http://") || u.starts_with("https://") {
+                        let app2 = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let _ = crate::download::dl_start(app2, u, None).await;
+                        });
+                        let _ = app.emit_to(
+                            &owner,
+                            "pv:dl",
+                            json!({ "id": id, "url": url.to_string(), "done": false, "ok": true, "handled": "laido" }),
+                        );
+                        return false;
+                    }
+                    // non-web schemes: save into the OS Downloads
                     // folder, keep the suggested filename when present
                     if let Some(dl) = dirs::download_dir() {
                         if destination.starts_with(&dl) == false {
@@ -301,6 +318,98 @@ pub async fn pv_open(
         });
     }
     Ok(())
+}
+
+/* ---------- wv_* — app-document surfaces: widget content rendered by a
+ * real engine while the card keeps only DOM chrome. A wv engine is a
+ * child webview exactly like bv-* but navigated to a data: html doc the
+ * widget composes — isolated styles, native scroll/selection, zero DOM
+ * weight in the editor. It lives in the same VIEWS/OWNERS maps so every
+ * ambient command (pv_bounds/pv_visible/pv_eval/pv_close/pv_list) works
+ * on it untouched. Links inside a doc never navigate the surface —
+ * they emit wv:nav to the owner and the frontend opens a browser card. */
+fn doc_url(html: &str) -> Result<String, String> {
+    use base64::Engine;
+    Ok(format!(
+        "data:text/html;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(html)
+    ))
+}
+
+#[tauri::command]
+pub async fn wv_open(
+    app: AppHandle,
+    caller: tauri::Webview,
+    id: String,
+    html: String,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+) -> Result<(), String> {
+    let pos = PhysicalPosition::new(x, y);
+    let size = PhysicalSize::new(w.max(1), h.max(1));
+    /* reuse-if-live: a same-window wv re-open just swaps the document —
+     * cheaper than close+create and no env churn */
+    if let Some(wv) = with_views(|m| m.get(&id).cloned()) {
+        if with_owners(|m| m.get(&id).cloned()).as_deref() == Some(caller.window().label()) {
+            wv.navigate(doc_url(&html)?.parse().map_err(|e| format!("bad doc {e}"))?)
+                .map_err(|e| e.to_string())?;
+            wv.set_position(pos).ok();
+            wv.set_size(size).ok();
+            wv.show().ok();
+            return Ok(());
+        }
+        let _ = wv.hide();
+        let _ = wv.close();
+        crate::stamp_destroy();
+        with_views(|m| {
+            m.remove(&id);
+        });
+        with_owners(|m| {
+            m.remove(&id);
+        });
+    }
+    let owner = caller.window().label().to_string();
+    let id2 = id.clone();
+    let app2 = app.clone();
+    let builder = tauri::webview::WebviewBuilder::new(
+        id.clone(),
+        tauri::WebviewUrl::External(doc_url(&html)?.parse().map_err(|e| format!("bad doc {e}"))?),
+    )
+    /* shared user-data folder: env options must match every other env
+     * in the process or WebView2 fails the attach (0x8007139F) */
+    .browser_extensions_enabled(true)
+    .extensions_path(crate::extensions::ext_root(&app))
+    .on_navigation({
+        let owner = owner.clone();
+        move |u| {
+            let s = u.as_str();
+            if s.starts_with("data:") || s.starts_with("about:") {
+                return true;
+            }
+            /* an http link inside a widget doc means "open this in a real
+             * browser card" — veto the surface nav, hand it to the owner */
+            let _ = app2.emit_to(&owner, "wv:nav", json!({ "id": id2, "url": s }));
+            false
+        }
+    });
+    crate::wait_destroy_gap().await;
+    let wv = caller
+        .window()
+        .add_child(builder, pos, size)
+        .map_err(|e| e.to_string())?;
+    crate::stamp_create();
+    with_views(|m| m.insert(id.clone(), wv));
+    with_owners(|m| m.insert(id, owner));
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn wv_doc(caller: tauri::Webview, id: String, html: String) -> Result<(), String> {
+    get_for(&id, &caller, true)?
+        .navigate(doc_url(&html)?.parse().map_err(|e| format!("bad doc {e}"))?)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

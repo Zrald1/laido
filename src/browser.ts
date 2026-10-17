@@ -420,6 +420,12 @@ const startAudioPoll = () => {
        * 140ms hide/show fight the user sees as blinking. engineNote is
        * written the moment the card claims it, so it covers the gap */
       if (claimed.has(id) || engineNote.has(id)) { unclaimedTicks.delete(id); continue; }
+      /* wv-* widget surfaces claim through mountWv's registry, not
+       * browser cards — a live one must never be swept hidden */
+      if (id.startsWith("wv-") && (window.__WV_CLAIMS__?.has(id) ?? false)) {
+        unclaimedTicks.delete(id);
+        continue;
+      }
       const n = (unclaimedTicks.get(id) ?? 0) + 1;
       unclaimedTicks.set(id, n);
       if (n >= 2) void invoke("pv_visible", { id, on: false }).catch(() => {});

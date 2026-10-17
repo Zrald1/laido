@@ -1,0 +1,9 @@
+{
+  "manifest_version": 3,
+  "name": "Laido Downloader",
+  "version": "1.0",
+  "description": "Hands browser downloads to the Laido segmented engine — parallel range streams, pause/resume, bottom-right progress toasts. For Laido's embedded browser this loads automatically; for desktop Chrome/Edge load this folder unpacked at chrome://extensions (Developer mode).",
+  "permissions": ["downloads"],
+  "host_permissions": ["http://127.0.0.1:47472/*"],
+  "background": { "service_worker": "bg.js" }
+}

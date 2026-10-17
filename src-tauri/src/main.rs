@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod agent;
+mod dlhttp;
 mod download;
 mod extensions;
 mod llm;
@@ -135,6 +136,9 @@ async fn pop_window(
     on_top: Option<bool>,
     title: Option<String>,
     init: Option<String>,
+    unfocused: Option<bool>,
+    skip_taskbar: Option<bool>,
+    resizable: Option<bool>,
 ) -> Result<(), String> {
     let _gate = POP_GATE.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
     let boot = BOOT.get_or_init(std::time::Instant::now);
@@ -182,7 +186,7 @@ async fn pop_window(
         };
         match pop_window_once(
             &app, &try_label, &label, &url, x, y, w, h, centered, on_top,
-            title.as_deref(), init.as_deref(),
+            title.as_deref(), init.as_deref(), unfocused, skip_taskbar, resizable,
         )
         .await
         {
@@ -209,6 +213,9 @@ async fn pop_window_once(
     on_top: Option<bool>,
     title: Option<&str>,
     init: Option<&str>,
+    unfocused: Option<bool>,
+    skip_taskbar: Option<bool>,
+    resizable: Option<bool>,
 ) -> Result<(), String> {
     /* stage-2 proof: the child emitting pop:ready with our token means
      * its JS actually booted — the only success signal that can't lie.
@@ -225,7 +232,11 @@ async fn pop_window_once(
             }
         }
     });
-    let out = pop_window_inner(app, label, url, x, y, w, h, centered, on_top, title, init).await;
+    let out = pop_window_inner(
+        app, label, url, x, y, w, h, centered, on_top, title, init, unfocused,
+        skip_taskbar, resizable,
+    )
+    .await;
     /* inner Ok only proves attach — stage 2 still gates the caller */
     let wv = match out {
         Ok(w) => w,
@@ -264,6 +275,9 @@ async fn pop_window_inner(
     on_top: Option<bool>,
     title: Option<&str>,
     init: Option<&str>,
+    unfocused: Option<bool>,
+    skip_taskbar: Option<bool>,
+    resizable: Option<bool>,
 ) -> Result<tauri::WebviewWindow, String> {
     /* ?query in WebviewUrl::App never resolves — the webview sits at
      * about:blank. Boot state (which note/sticky to open) goes through
@@ -281,6 +295,15 @@ async fn pop_window_inner(
          * main window's env — observed as the document stalling at
          * about:blank for the full ready-timeout */
         .browser_extensions_enabled(true);
+    if unfocused == Some(true) {
+        b = b.focused(false);
+    }
+    if skip_taskbar == Some(true) {
+        b = b.skip_taskbar(true);
+    }
+    if let Some(rz) = resizable {
+        b = b.resizable(rz);
+    }
     if let Some(js) = init {
         b = b.initialization_script(js);
     }
@@ -436,6 +459,9 @@ fn main() {
                 use tauri::{WebviewUrl, WebviewWindowBuilder};
                 let ext_dir = extensions::ext_root(app.handle());
                 let _ = std::fs::create_dir_all(&ext_dir);
+                /* seed BEFORE the env exists — extensions are scanned
+                 * once when the first webview spins up the shared env */
+                extensions::seed_bridge(app.handle());
                 WebviewWindowBuilder::new(
                     app.handle(),
                     "main",
@@ -451,6 +477,9 @@ fn main() {
                 .build()?;
             }
             skills::seed_defaults();
+            #[cfg(not(windows))]
+            extensions::seed_bridge(app.handle());
+            dlhttp::start(app.handle().clone());
             scheduler::start(app.handle().clone());
             if let Some(name) = pending_note_from_args() {
                 *PENDING_OPEN
@@ -550,10 +579,15 @@ fn main() {
             pageview::pv_resume,
             pageview::pv_memlevel,
             pageview::pv_focus_main,
+            pageview::wv_open,
+            pageview::wv_doc,
             download::dl_start,
             download::dl_info,
             download::dl_list,
             download::dl_cancel,
+            download::dl_pause,
+            download::dl_resume,
+            download::dl_open,
             download::dl_reveal,
             extensions::ext_list,
             extensions::ext_install_path,

@@ -38,6 +38,21 @@ fn script_root(app: &AppHandle) -> PathBuf {
     ext_root(app).join("scripts")
 }
 
+/* the bundled Laido Downloader bridge — written into ext_root on boot
+ * so every WebView2 engine loads it automatically (extensions_path
+ * scans the dir). The same folder is what a user loads unpacked into
+ * real Chrome/Edge at chrome://extensions → Developer mode. Always
+ * overwrite: the installed copy tracks the shipped version. */
+pub fn seed_bridge(app: &AppHandle) {
+    let dir = ext_root(app).join("laido-dl");
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(
+        dir.join("manifest.json"),
+        include_str!("../ext/laido-dl/manifest.json"),
+    );
+    let _ = std::fs::write(dir.join("bg.js"), include_str!("../ext/laido-dl/bg.js"));
+}
+
 fn slug(s: &str) -> String {
     let s: String = s
         .to_lowercase()

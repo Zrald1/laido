@@ -1,0 +1,57 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+:root { --card:#f6ead4; --ink:#3a352b; --muted:#94897a; --accent:#a05a2c; --line:#e0d4b8; --red:#a8452f; }
+* { box-sizing: border-box; margin: 0; }
+html,body { height: 100%; overflow: hidden; }
+body {
+  background: var(--card); color: var(--ink);
+  font: 12.5px/1.45 "Segoe UI", system-ui, sans-serif;
+  border: 1px solid var(--line); border-radius: 12px;
+  display: flex; flex-direction: column;
+}
+.head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 9px 12px 7px; border-bottom: 1px solid var(--line);
+  font-family: Georgia, serif; font-weight: 600; font-size: 13px;
+  -webkit-app-region: drag; user-select: none;
+}
+.head .x {
+  margin-left: auto; -webkit-app-region: no-drag; cursor: pointer;
+  border: 0; background: none; color: var(--muted); font-size: 13px; padding: 0 4px;
+}
+.head .x:hover { color: var(--red); }
+#list { flex: 1; overflow-y: auto; padding: 7px 10px 10px; }
+#list:empty::before {
+  content: "no downloads"; display: block; color: var(--muted);
+  font-style: italic; padding: 14px 4px;
+}
+.dl { padding: 7px 2px 8px; border-bottom: 1px solid var(--line); }
+.dl:last-child { border-bottom: 0; }
+.dl .top { display: flex; align-items: center; gap: 7px; }
+.dl .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.dl .pct { color: var(--accent); font-weight: 600; white-space: nowrap; }
+.bar { height: 4px; background: #00000014; border-radius: 3px; margin: 5px 0 4px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--accent); border-radius: 3px; width: 0; transition: width .3s; }
+.dl.paused .bar i { background: var(--muted); }
+.dl.error .bar i { background: var(--red); }
+.meta { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11.5px; }
+.meta .sp { flex: 1; }
+button.act {
+  border: 1px solid var(--line); background: #fffdf7; color: var(--ink);
+  border-radius: 6px; padding: 1px 7px; font-size: 11.5px; cursor: pointer;
+}
+button.act:hover { border-color: var(--accent); color: var(--accent); }
+.st { text-transform: capitalize; }
+.st.paused { color: #a5762a; } .st.error, .st.canceled { color: var(--red); }
+.st.done { color: #5f7f3a; }
+</style>
+</head>
+<body>
+<div class="head">⬇ Downloads<button class="x" id="close" title="close">✕</button></div>
+<div id="list"></div>
+<script type="module" src="./dltoast.js"></script>
+</body>
+</html>

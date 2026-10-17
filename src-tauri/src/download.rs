@@ -46,6 +46,11 @@ struct Job {
     state: Mutex<String>,
     err: Mutex<String>,
     cancel: AtomicBool,
+    paused: AtomicBool,
+    /* pause keeps these alive — resume respawns workers on the same
+     * pending range queue + positional .part file */
+    queue: OnceLock<std::sync::Arc<Mutex<Queue>>>,
+    file: OnceLock<std::sync::Arc<std::fs::File>>,
     started: Instant,
 }
 
@@ -221,8 +226,30 @@ impl Queue {
     }
 }
 
+/* url → (job id, when) — intercepts the same click arriving through two
+ * lanes (webview on_download AND the extension's POST) and user double-
+ * clicks: the second caller gets the live job back, not a second file */
+fn recent() -> &'static Mutex<HashMap<String, (String, Instant)>> {
+    static R: OnceLock<Mutex<HashMap<String, (String, Instant)>>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 #[tauri::command]
 pub async fn dl_start(app: tauri::AppHandle, url: String, conns: Option<u8>) -> Result<serde_json::Value, String> {
+    {
+        let mut r = recent().lock().unwrap();
+        r.retain(|_, (_, at)| at.elapsed().as_secs() < 8);
+        if let Some((id, _)) = r.get(&url) {
+            let j = jobs().lock().unwrap().get(id).cloned();
+            if let Some(j) = j {
+                ensure_toast(&app);
+                return Ok(serde_json::json!({
+                    "id": id, "path": j.path, "category": j.category,
+                    "total": j.total.load(Ordering::Relaxed), "dedupe": true,
+                }));
+            }
+        }
+    }
     let client = reqwest::Client::builder()
         .user_agent("Laido/0.3 (segmented downloader)")
         .redirect(reqwest::redirect::Policy::limited(8))
@@ -290,10 +317,25 @@ pub async fn dl_start(app: tauri::AppHandle, url: String, conns: Option<u8>) -> 
         state: Mutex::new("running".into()),
         err: Mutex::new(String::new()),
         cancel: AtomicBool::new(false),
+        paused: AtomicBool::new(false),
+        queue: OnceLock::new(),
+        file: OnceLock::new(),
         started: Instant::now(),
     });
+    /* an identical url mid-flight is the same download — webview
+     * on_download + extension can both forward one click */
+    {
+        let mut r = recent().lock().unwrap();
+        r.retain(|_, (_, at)| at.elapsed().as_secs() < 8);
+        r.insert(url.clone(), (id.clone(), Instant::now()));
+    }
     jobs().lock().unwrap().insert(id.clone(), job.clone());
 
+    ensure_toast(&app);
+    {
+        use tauri::Emitter;
+        let _ = app.emit("dl:prog", info_of(&id, &job));
+    }
     tauri::async_runtime::spawn(run_job(app, id.clone(), job, client));
     Ok(serde_json::json!({
         "id": id, "path": path.to_string_lossy(), "category": category,
@@ -305,6 +347,11 @@ pub async fn dl_start(app: tauri::AppHandle, url: String, conns: Option<u8>) -> 
 async fn run_job(app: tauri::AppHandle, id: String, job: std::sync::Arc<Job>, client: reqwest::Client) {
     use tauri::Emitter;
     let res = run_inner(&app, &id, &job, &client).await;
+    if job.paused.load(Ordering::Relaxed) {
+        *job.state.lock().unwrap() = "paused".into();
+        let _ = app.emit("dl:prog", info_of(&id, &job));
+        return;
+    }
     match res {
         Ok(()) => *job.state.lock().unwrap() = "done".into(),
         Err(e) => {
@@ -326,7 +373,6 @@ async fn run_inner(
     job: &std::sync::Arc<Job>,
     client: &reqwest::Client,
 ) -> Result<(), String> {
-    use tauri::Emitter;
     let total = job.total.load(Ordering::Relaxed);
     /* temp .part file pre-sized — workers seek_write into it; renamed on
      * completion so a half file never impersonates a finished one */
@@ -339,46 +385,17 @@ async fn run_inner(
         }
     }
     let file = std::sync::Arc::new(std::fs::File::options().write(true).open(&tmp).map_err(|e| e.to_string())?);
+    let _ = job.file.set(file.clone());
 
     let queue = std::sync::Arc::new(Mutex::new(Queue {
         pending: VecDeque::from([(0u64, if total > 0 { total } else { u64::MAX })]),
         live: HashMap::new(),
     }));
-    let n_workers = job.conns.max(1);
-    let mut handles = Vec::with_capacity(n_workers);
-    for wid in 0..n_workers {
-        handles.push(tokio::spawn(worker(
-            wid,
-            job.clone(),
-            client.clone(),
-            file.clone(),
-            queue.clone(),
-        )));
-    }
-    /* progress emitter + stall watchdog at 500ms */
-    let prog_job = job.clone();
-    let prog_app = app.clone();
-    let prog_id = id.to_string();
-    let prog = tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            if prog_job.state.lock().unwrap().as_str() != "running" {
-                break;
-            }
-            let _ = prog_app.emit(
-                "dl:prog",
-                serde_json::json!({
-                    "id": prog_id,
-                    "got": prog_job.got.load(Ordering::Relaxed),
-                    "total": prog_job.total.load(Ordering::Relaxed),
-                    "mbps": mbps(&prog_job),
-                    "state": "running",
-                }),
-            );
-        }
-    });
+    let _ = job.queue.set(queue.clone());
+    let mut handles = spawn_workers(&job, &client, &file, &queue);
+    let prog = spawn_prog(app, id, &job);
     let mut first_err = String::new();
-    for h in handles {
+    for h in handles.drain(..) {
         match h.await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
@@ -399,7 +416,23 @@ async fn run_inner(
         let _ = std::fs::remove_file(&tmp);
         return Err("canceled".into());
     }
-    /* unknown length (chunked) — total learns itself from got at the end */
+    if job.paused.load(Ordering::Relaxed) {
+        /* workers requeued their ranges into job.queue — keep the .part,
+         * keep the queue; dl_resume respawns from here */
+        return Ok(());
+    }
+    finalize_tail(&final_path, &tmp, total, &job, first_err)
+}
+
+/* the tail shared by run_inner and a resume: learn total for chunked
+ * streams, guard materially-incomplete files, then .part → rename */
+fn finalize_tail(
+    final_path: &std::path::Path,
+    tmp: &std::path::Path,
+    total: u64,
+    job: &std::sync::Arc<Job>,
+    mut first_err: String,
+) -> Result<(), String> {
     if total == 0 {
         job.total.store(job.got.load(Ordering::Relaxed), Ordering::Relaxed);
     }
@@ -416,15 +449,61 @@ async fn run_inner(
         let _ = std::fs::remove_file(&tmp);
         return Err(first_err);
     }
-    std::fs::rename(&tmp, &final_path).map_err(|e| format!("finalize: {e}"))?;
+    std::fs::rename(tmp, final_path).map_err(|e| format!("finalize: {e}"))?;
     /* windows file manager refresh */
-    let _ = std::fs::File::open(&final_path);
+    let _ = std::fs::File::open(final_path);
     Ok(())
 }
 
 fn mbps(job: &Job) -> f64 {
     let el = job.started.elapsed().as_secs_f64().max(0.05);
     job.got.load(Ordering::Relaxed) as f64 / 1048576.0 / el
+}
+
+fn spawn_workers(
+    job: &std::sync::Arc<Job>,
+    client: &reqwest::Client,
+    file: &std::sync::Arc<std::fs::File>,
+    queue: &std::sync::Arc<Mutex<Queue>>,
+) -> Vec<tokio::task::JoinHandle<Result<(), String>>> {
+    (0..job.conns.max(1))
+        .map(|wid| {
+            tokio::spawn(worker(
+                wid,
+                job.clone(),
+                client.clone(),
+                file.clone(),
+                queue.clone(),
+            ))
+        })
+        .collect()
+}
+
+fn spawn_prog(app: &tauri::AppHandle, id: &str, job: &std::sync::Arc<Job>) -> tokio::task::JoinHandle<()> {
+    use tauri::Emitter;
+    let job = job.clone();
+    let app = app.clone();
+    let id = id.to_string();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if job.state.lock().unwrap().as_str() != "running" {
+                break;
+            }
+            let _ = app.emit(
+                "dl:prog",
+                serde_json::json!({
+                    "id": id,
+                    "got": job.got.load(Ordering::Relaxed),
+                    "total": job.total.load(Ordering::Relaxed),
+                    "mbps": mbps(&job),
+                    "state": "running",
+                    "path": job.path,
+                    "url": job.url,
+                }),
+            );
+        }
+    })
 }
 
 async fn worker(
@@ -435,7 +514,7 @@ async fn worker(
     queue: std::sync::Arc<Mutex<Queue>>,
 ) -> Result<(), String> {
     loop {
-        if job.cancel.load(Ordering::Relaxed) {
+        if job.cancel.load(Ordering::Relaxed) || job.paused.load(Ordering::Relaxed) {
             return Ok(());
         }
         let Some((_, _, live)) = Queue::take(&queue, wid) else {
@@ -443,7 +522,8 @@ async fn worker(
         };
         let mut tries = 0u32;
         'segment: loop {
-            if job.cancel.load(Ordering::Relaxed) {
+            if job.cancel.load(Ordering::Relaxed) || job.paused.load(Ordering::Relaxed) {
+                Queue::requeue(&queue, wid);
                 return Ok(());
             }
             let pos = live.pos.load(Ordering::Relaxed);
@@ -460,16 +540,24 @@ async fn worker(
                 let range = format!("bytes={}-{}", pos, end.saturating_sub(1));
                 r = r.header(reqwest::header::RANGE, &range);
             }
-            let req = r.send().await;
+            /* the stall watchdog covers chunks, not the request itself —
+             * a server that accepts the socket but never answers (common
+             * right after a pause/reconnect storm) would hang the worker
+             * forever and freeze the job at "running" with zero bytes */
+            let req = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                r.send(),
+            )
+            .await;
             let mut resp = match req {
-                Ok(r) if r.status().is_success() || r.status() == reqwest::StatusCode::PARTIAL_CONTENT => {
+                Ok(Ok(r)) if r.status().is_success() || r.status() == reqwest::StatusCode::PARTIAL_CONTENT => {
                     tries = 0;
                     r
                 }
                 /* 429/5xx + transient connect fails — the range isn't dead,
                  * the server is rate-limiting; honor Retry-After, else
                  * exponential backoff, bounded */
-                Ok(r) if (r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+                Ok(Ok(r)) if (r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
                     || r.status().is_server_error())
                     && tries < 6 =>
                 {
@@ -484,16 +572,27 @@ async fn worker(
                     tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
                     continue 'segment;
                 }
-                Ok(r) => return Err(format!("http {}", r.status())),
-                Err(e) if tries < 6 => {
+                Ok(Ok(r)) => return Err(format!("http {}", r.status())),
+                Ok(Err(e)) if tries < 6 => {
                     tries += 1;
                     tokio::time::sleep(std::time::Duration::from_millis(500 * tries as u64)).await;
                     let _ = e;
                     continue 'segment;
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     Queue::requeue(&queue, wid);
                     return Err(format!("connect: {e}"));
+                }
+                /* send() itself timed out — same as a connect failure:
+                 * brief backoff then another socket */
+                Err(_) if tries < 6 => {
+                    tries += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(500 * tries as u64)).await;
+                    continue 'segment;
+                }
+                Err(_) => {
+                    Queue::requeue(&queue, wid);
+                    return Err("request timed out".into());
                 }
             };
             let mut cursor = pos;
@@ -502,6 +601,11 @@ async fn worker(
             /* stream the range; per-chunk stall watchdog — a dead pipe
              * tunnels: remaining range requeues, a fresh socket takes it */
             while cursor < live.end.load(Ordering::Relaxed) {
+                if job.paused.load(Ordering::Relaxed) || job.cancel.load(Ordering::Relaxed) {
+                    live.pos.store(cursor, Ordering::Relaxed);
+                    Queue::requeue(&queue, wid);
+                    return Ok(());
+                }
                 let item = tokio::time::timeout(
                     std::time::Duration::from_millis(STALL_MS as u64 * 2),
                     resp.chunk(),
@@ -596,6 +700,113 @@ pub async fn dl_cancel(id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn dl_pause(id: String) -> Result<(), String> {
+    let job = jobs().lock().unwrap().get(&id).cloned().ok_or("no download")?;
+    if job.state.lock().unwrap().as_str() != "running" {
+        return Err("not running".into());
+    }
+    /* workers drain: each requeues its in-flight range then exits —
+     * run_inner sees `paused` and parks the .part + queue for resume */
+    job.paused.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn dl_resume(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    use tauri::Emitter;
+    let job = jobs().lock().unwrap().get(&id).cloned().ok_or("no download")?;
+    if job.state.lock().unwrap().as_str() != "paused" {
+        return Err("not paused".into());
+    }
+    let (Some(queue), Some(file)) = (job.queue.get().cloned(), job.file.get().cloned()) else {
+        return Err("nothing to resume".into());
+    };
+    /* a non-rangeable stream can't seek — its remaining range is
+     * meaningless, restart from byte 0 (part file is overwritten) */
+    if !job.rangeable {
+        job.got.store(0, Ordering::Relaxed);
+        let mut q = queue.lock().unwrap();
+        q.pending.clear();
+        q.live.clear();
+        q.pending.push_back((0u64, u64::MAX));
+    }
+    job.paused.store(false, Ordering::Relaxed);
+    *job.state.lock().unwrap() = "running".into();
+    let _ = app.emit("dl:prog", info_of(&id, &job));
+    let client = reqwest::Client::builder()
+        .user_agent("Laido/0.3 (segmented downloader)")
+        .redirect(reqwest::redirect::Policy::limited(8))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let app2 = app.clone();
+    tauri::async_runtime::spawn(async move {
+        use tauri::Emitter;
+        let mut handles = spawn_workers(&job, &client, &file, &queue);
+        let prog = spawn_prog(&app2, &id, &job);
+        let mut first_err = String::new();
+        for h in handles.drain(..) {
+            match h.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    if first_err.is_empty() {
+                        first_err = e;
+                    }
+                }
+                Err(e) => {
+                    if first_err.is_empty() {
+                        first_err = e.to_string();
+                    }
+                }
+            }
+        }
+        prog.abort();
+        if job.paused.load(Ordering::Relaxed) {
+            *job.state.lock().unwrap() = "paused".into();
+            let _ = app2.emit("dl:prog", info_of(&id, &job));
+            return;
+        }
+        if job.cancel.load(Ordering::Relaxed) {
+            *job.state.lock().unwrap() = "canceled".into();
+            let tmp = std::path::PathBuf::from(&job.path).with_extension("laido-part");
+            let _ = std::fs::remove_file(&tmp);
+            let _ = app2.emit("dl:prog", info_of(&id, &job));
+            return;
+        }
+        let final_path = std::path::PathBuf::from(&job.path);
+        let tmp = final_path.with_extension("laido-part");
+        let res = finalize_tail(&final_path, &tmp, job.total.load(Ordering::Relaxed), &job, first_err);
+        match res {
+            Ok(()) => *job.state.lock().unwrap() = "done".into(),
+            Err(e) => {
+                *job.err.lock().unwrap() = e;
+                *job.state.lock().unwrap() = "error".into();
+            }
+        }
+        let _ = app2.emit("dl:prog", info_of(&id, &job));
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn dl_open(id: String) -> Result<(), String> {
+    let job = jobs().lock().unwrap().get(&id).cloned().ok_or("no download")?;
+    #[cfg(windows)]
+    {
+        let p = job.path.replace('/', "\\");
+        std::process::Command::new("explorer")
+            .arg(&p)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(&job.path).spawn()
+            .or_else(|_| std::process::Command::new("open").arg(&job.path).spawn());
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn dl_reveal(id: String) -> Result<(), String> {
     let job = jobs().lock().unwrap().get(&id).cloned().ok_or("no download")?;
     #[cfg(windows)]
@@ -616,6 +827,62 @@ pub async fn dl_reveal(id: String) -> Result<(), String> {
             .or_else(|_| std::process::Command::new("open").arg(&dir).spawn());
     }
     Ok(())
+}
+
+/* ---------- the toast — a small always-on-top surface pinned to the
+ * bottom-right of the work area; every download shows speed + pause/
+ * cancel there instead of a shelf. Spawned lazily on the first job and
+ * re-spawned any time it was closed — webview creation goes through the
+ * same env-churn gate as popouts/engines. */
+static TOAST_SPAWNING: AtomicBool = AtomicBool::new(false);
+pub fn ensure_toast(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    /* retries relabel the toast (dl-toast, -r1, -r2) — the "exists"
+     * check scans by prefix so a recovered attempt still counts */
+    if app
+        .webview_windows()
+        .keys()
+        .any(|l| l.starts_with("dl-toast"))
+    {
+        return;
+    }
+    if TOAST_SPAWNING.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        /* bottom-right of the primary monitor's work area */
+        let mut x = 100.0f64;
+        let mut y = 100.0f64;
+        const W: f64 = 372.0;
+        const H: f64 = 236.0;
+        if let Ok(Some(mon)) = app.primary_monitor() {
+            let wa = mon.work_area();
+            x = wa.position.x as f64 + wa.size.width as f64 - W - 14.0;
+            y = wa.position.y as f64 + wa.size.height as f64 - H - 14.0;
+        }
+        /* same spawn path as note popouts: env-churn gates, fresh-label
+         * retries, nav + ready proofs — a stalled about:blank gets torn
+         * down and rebuilt instead of sticking as a black shell */
+        let _ = crate::pop_window(
+            app.clone(),
+            "dl-toast".into(),
+            "dltoast.html".into(),
+            x,
+            y,
+            W,
+            H,
+            None,
+            Some(true),
+            Some("Downloads".into()),
+            None,
+            Some(true),
+            Some(true),
+            Some(false),
+        )
+        .await;
+        TOAST_SPAWNING.store(false, Ordering::Relaxed);
+    });
 }
 
 fn info_of(id: &str, job: &std::sync::Arc<Job>) -> DlInfo {

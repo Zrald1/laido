@@ -2,7 +2,14 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Laido windows: frameless drag, window controls, events, child windows",
-  "windows": ["main", "note-*", "sticky-*", "notice", "reader"],
+  "windows": [
+    "main",
+    "note-*",
+    "sticky-*",
+    "notice",
+    "reader",
+    "dl-toast*"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",

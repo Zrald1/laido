@@ -1,4 +1,5 @@
 import { invoke } from "./ipc.js";
+import { mountWv } from "./wview.js";
 import { addActivity } from "./log.js";
 import { currentNote, spawnTerminalCard, spawnSheetCard, spawnDeckCard, insertClip, spawnCardsCard, loadNote } from "./editor.js";
 import { sheetApi, cellName, refRC, expandRange, isStyleSpec } from "./sheet.js";
@@ -2024,12 +2025,84 @@ export const runWidgetFence = async (kind: string, body: string): Promise<string
   }
 };
 
+let wvSeq = 0;
+
 export function wireTerminal(card: HTMLElement) {
   if (!card?.dataset) return;
   const log = card.querySelector<HTMLElement>(".term-log");
   const input = card.querySelector<HTMLTextAreaElement>(".term-input");
   if (!log || !input || card.dataset.wired) return;
   card.dataset.wired = "1";
+  /* the scrollback renders in a native wv-* surface — the DOM .term-log
+   * stays as the hidden store (serialization + AI history read it), a
+   * MutationObserver repaints the engine doc on any change so pending-
+   * line swaps, appends and deletes all just work. Links inside the
+   * doc veto their own nav and land as wv:nav → real browser cards. */
+  const view = document.createElement("div");
+  view.className = "term-view";
+  log.before(view);
+  log.classList.add("store");
+  const escH = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const linkify = (s: string) =>
+    escH(s).replace(
+      /\bhttps?:\/\/[^\s<]+/g,
+      (u) => `<a href="${u}">${u}</a>`,
+    );
+  const cardBg = () =>
+    getComputedStyle(card).backgroundColor || "#f6ead4";
+  const TERM_CSS = () =>
+    `body{margin:0;padding:4px 6px;background:${cardBg()};color:#3a352b;` +
+    `font:13.5px/1.5 Georgia,'Times New Roman',serif;}` +
+    `.l{white-space:pre-wrap;word-break:break-word;margin:1px 0}` +
+    `.ask{color:#3a352b;font-weight:600}.ask::before{content:"› ";color:#a05a2c}` +
+    `.cmd{color:#a05a2c}.cmd::before{content:"! ";opacity:.75}` +
+    `.laido{color:#a05a2c}.laido::before{content:"→ ";opacity:.75}` +
+    `.out{color:#94897a}.ai{color:#3a352b}` +
+    `.err{color:#a8452f}.err::before{content:"✕ "}` +
+    `.pending{color:#94897a;animation:p 1.2s ease-in-out infinite}@keyframes p{50%{opacity:.35}}` +
+    `.confirm{color:#a5762a;font-weight:600}` +
+    `.incoming{color:#a5762a;font-weight:600}.incoming::before{content:"⇠ "}` +
+    `a{color:#a05a2c;text-decoration:underline;cursor:pointer}`;
+  const termDoc = () => {
+    const rows = [...log.querySelectorAll<HTMLElement>(".term-line")]
+      .map((l) => `<div class="l ${l.dataset.t ?? "out"}">${linkify(l.textContent ?? "")}</div>`)
+      .join("");
+    return (
+      `<!doctype html><html><head><meta charset="utf-8"><style>${TERM_CSS()}</style></head>` +
+      `<body><div id="L">${rows}</div><script>window.scrollTo(0,1e9)</` + `script></body></html>`
+    );
+  };
+  /* chatId can be "" on restored cards that never had a number — two of
+   * those would collide on one engine, so every mount gets a unique
+   * suffix regardless */
+  const wv = mountWv(
+    view,
+    `wv-term-${card.dataset.chatId || "x"}-${++wvSeq}`,
+    termDoc(),
+    () => mo.disconnect(),
+  );
+  wv.onLink((u) => {
+    /* a link inside the chat scrollback = a real browser card in this note */
+    void runWidgetFence("browser", `open ${u}`).catch(() => {});
+  });
+  /* the card's height is content-derived (no explicit height until the
+   * user resizes) — the old .term-log grew with its lines, so mirror
+   * that: view height follows the hidden store's content, same cap */
+  const sizeView = () => {
+    if (card.classList.contains("sized")) return;
+    view.style.height = `${Math.max(30, Math.min(118, log.scrollHeight))}px`;
+  };
+  sizeView();
+  let moTimer = 0;
+  const mo = new MutationObserver(() => {
+    if (moTimer) return;
+    moTimer = window.setTimeout(() => {
+      moTimer = 0;
+      sizeView();
+      wv.setDoc(termDoc());
+    }, 120);
+  });
+  mo.observe(log, { childList: true, subtree: true, characterData: true });
   const history: Array<{ role: string; content: string }> = [];
   const searched = new Set<string>();
   let steps = 0;

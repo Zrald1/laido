@@ -452,6 +452,11 @@ body.sticky-mode .term-card { width: auto; }
 /* once the user resizes the card, the log fills it and the input row stays
    pinned at the bottom; unresized cards stay compact (~4 lines) */
 .term-card.sized .term-log { flex: 1 1 auto; max-height: none; min-height: 0; }
+/* the log's native surface mount — same box the .term-log used to paint;
+ * the DOM log stays as the hidden serialization store */
+.term-view { max-height: 118px; min-height: 30px; }
+.term-card.sized .term-view { flex: 1 1 auto; max-height: none; min-height: 30px; }
+.term-log.store { display: none; }
 .term-line.ask { color: var(--text); font-weight: 600; }
 .term-line.ask::before { content: "› "; color: var(--accent); }
 .term-line.cmd { color: var(--accent); }
