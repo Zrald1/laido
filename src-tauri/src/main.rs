@@ -72,7 +72,37 @@ static POP_GATE: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLo
  * fails the attach (HWND ok, webview never navigates). Every popped
  * window stamps this on Destroyed; new spawns wait out the gap. */
 static LAST_DESTROY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/* millis-since-boot of the most recent webview-env CREATE anywhere in
+ * the process. Engine add_child calls during note restore churn the
+ * shared browser process the same way a teardown does — a popout env
+ * create racing one dead-attaches exactly like creates-in-teardown.
+ * Every create site stamps this; pop_window waits for it to settle */
+pub(crate) static LAST_CREATE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 static BOOT: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+pub(crate) fn boot_ms() -> u64 {
+    BOOT.get().map(|b| b.elapsed().as_millis() as u64).unwrap_or(0)
+}
+
+pub(crate) fn stamp_create() {
+    LAST_CREATE.store(boot_ms(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/* engine webviews carry their own env too — closing one churns the
+ * shared browser process exactly like a window teardown */
+pub(crate) fn stamp_destroy() {
+    LAST_DESTROY.store(boot_ms(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/* wait out the ~10.5s teardown tail — an env create inside a dying
+ * env's window silently dead-attaches */
+pub(crate) async fn wait_destroy_gap() {
+    let d = boot_ms().saturating_sub(LAST_DESTROY.load(std::sync::atomic::Ordering::Relaxed));
+    if d < 10_500 {
+        tokio::time::sleep(std::time::Duration::from_millis(10_500 - d)).await;
+    }
+}
 
 /* transient diagnostic — every spawn outcome lands in
  * appdata/pop.log so field failures are visible without a console */
@@ -115,7 +145,12 @@ async fn pop_window(
      * Each attempt gets a fresh label; the frontend matches the child
      * by the __POP_TOKEN__ carried in the init script, not the label */
     let mut last_err = String::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(38);
     for attempt in 0..3 {
+        if std::time::Instant::now() > deadline {
+            pop_log("pop_window deadline hit — bailing");
+            break;
+        }
         if attempt > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(900)).await;
         }
@@ -130,6 +165,15 @@ async fn pop_window(
         if since < 10_500 {
             tokio::time::sleep(std::time::Duration::from_millis(10_500 - since)).await;
         }
+        /* …and recent env CREATES — engine add_child calls during boot/
+         * note-restore churn the same shared browser process; spawning a
+         * top-level env inside that churn dead-attaches (observed: drags
+         * in the seconds right after engine-heavy restores) */
+        let since_c = boot.elapsed().as_millis() as u64
+            - LAST_CREATE.load(std::sync::atomic::Ordering::Relaxed);
+        if LAST_CREATE.load(std::sync::atomic::Ordering::Relaxed) > 0 && since_c < 4_000 {
+            tokio::time::sleep(std::time::Duration::from_millis(4_000 - since_c)).await;
+        }
         /* label charset is alphanumeric + - / : _ — no ~ */
         let try_label = if attempt == 0 {
             label.clone()
@@ -137,8 +181,8 @@ async fn pop_window(
             format!("{label}-r{attempt}")
         };
         match pop_window_once(
-            &app, &try_label, &url, x, y, w, h, centered, on_top, title.as_deref(),
-            init.as_deref(),
+            &app, &try_label, &label, &url, x, y, w, h, centered, on_top,
+            title.as_deref(), init.as_deref(),
         )
         .await
         {
@@ -155,6 +199,7 @@ async fn pop_window(
 async fn pop_window_once(
     app: &tauri::AppHandle,
     label: &str,
+    token: &str,
     url: &str,
     x: f64,
     y: f64,
@@ -165,7 +210,61 @@ async fn pop_window_once(
     title: Option<&str>,
     init: Option<&str>,
 ) -> Result<(), String> {
-    let ext_dir = extensions::ext_root(app);
+    /* stage-2 proof: the child emitting pop:ready with our token means
+     * its JS actually booted — the only success signal that can't lie.
+     * Registered before the build so a fast boot can't beat us to it */
+    let (rdy_tx, rdy_rx) = tokio::sync::oneshot::channel::<()>();
+    let rdy_tx = std::sync::Mutex::new(Some(rdy_tx));
+    let want = token.to_string();
+    let unl = tauri::Listener::listen(app, "pop:ready", move |e: tauri::Event| {
+        if e.payload().trim_matches('"') == want {
+            if let Ok(mut g) = rdy_tx.lock() {
+                if let Some(tx) = g.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+    });
+    let out = pop_window_inner(app, label, url, x, y, w, h, centered, on_top, title, init).await;
+    /* inner Ok only proves attach — stage 2 still gates the caller */
+    let wv = match out {
+        Ok(w) => w,
+        Err(e) => {
+            tauri::Listener::unlisten(app, unl);
+            return Err(e);
+        }
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(15), rdy_rx).await {
+        Ok(_) => {
+            tauri::Listener::unlisten(app, unl);
+            pop_log(&format!("ready-ok {label}"));
+            Ok(())
+        }
+        Err(_) => {
+            tauri::Listener::unlisten(app, unl);
+            pop_log(&format!("ready-timeout {label}"));
+            let _ = wv.close();
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            Err("the new window couldn't finish loading — tab kept".into())
+        }
+    }
+}
+
+/* stage 1: build + attach proof. Ok carries the live window so the
+ * caller can destroy it if stage 2 (real boot) never lands */
+async fn pop_window_inner(
+    app: &tauri::AppHandle,
+    label: &str,
+    url: &str,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    centered: Option<bool>,
+    on_top: Option<bool>,
+    title: Option<&str>,
+    init: Option<&str>,
+) -> Result<tauri::WebviewWindow, String> {
     /* ?query in WebviewUrl::App never resolves — the webview sits at
      * about:blank. Boot state (which note/sticky to open) goes through
      * an initialization script instead — window.__POP_* globals the
@@ -174,8 +273,14 @@ async fn pop_window_once(
         .title(title.unwrap_or("Laido"))
         .inner_size(w, h)
         .decorations(false)
-        .browser_extensions_enabled(true)
-        .extensions_path(&ext_dir);
+        /* browser_extensions_enabled is a shared-profile env option and
+         * MUST match every other env (its absence was the 0x8007139F).
+         * extensions_path is deliberately NOT set: it isn't part of the
+         * env-compat contract, extensions already installed live in the
+         * profile, and re-scanning the dir during child boot races the
+         * main window's env — observed as the document stalling at
+         * about:blank for the full ready-timeout */
+        .browser_extensions_enabled(true);
     if let Some(js) = init {
         b = b.initialization_script(js);
     }
@@ -189,15 +294,20 @@ async fn pop_window_once(
     }
     /* build() Ok only proves the HWND exists — the WebView2 controller
      * attaches asynchronously and can still fail silently (env races,
-     * teardown overlap). The first navigation is the real attach
-     * signal; wait for it before telling the caller the window lived */
+     * teardown overlap). NavigationStarting is the real attach signal —
+     * but it ALSO fires for the webview's stock about:blank nav, so
+     * only a nav to the real app url counts: an attach that stalls at
+     * about:blank must still time out and be rebuilt */
     let (nav_tx, nav_rx) = tokio::sync::oneshot::channel::<()>();
     let nav_tx = std::sync::Mutex::new(Some(nav_tx));
     let wv = match b
-        .on_navigation(move |_url| {
-            if let Ok(mut g) = nav_tx.lock() {
-                if let Some(tx) = g.take() {
-                    let _ = tx.send(());
+        .on_navigation(move |url| {
+            let u = url.as_str();
+            if u.contains("tauri.localhost") || u.starts_with("tauri://") {
+                if let Ok(mut g) = nav_tx.lock() {
+                    if let Some(tx) = g.take() {
+                        let _ = tx.send(());
+                    }
                 }
             }
             true
@@ -210,6 +320,7 @@ async fn pop_window_once(
             return Err(e.to_string());
         }
     };
+    stamp_create();
     let lab = label.to_string();
     wv.on_window_event(move |event| {
         if let tauri::WindowEvent::Destroyed = event {
@@ -246,7 +357,7 @@ async fn pop_window_once(
     };
     if attached {
         pop_log(&format!("nav-ok {label}"));
-        Ok(())
+        Ok(wv)
     } else {
         let _ = wv.close();
         /* env teardown is async — let it settle before the gate
@@ -314,6 +425,7 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            let _ = BOOT.set(std::time::Instant::now());
             vault::ensure_vault()?;
             /* the WebView2 environment is created by the FIRST webview —
              * extensions must be enabled here or the child page-views can
