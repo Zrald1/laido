@@ -268,22 +268,35 @@ pub async fn pv_open(
     crate::stamp_create();
     with_views(|m| m.insert(id.clone(), wv));
     with_owners(|m| m.insert(id.clone(), owner));
-    /* attach-kick: an env create inside churn can stall the initial nav
-     * (nav starts, document never commits — same failure the popout
-     * path rebuilds on). If the engine is still parked on about:blank
-     * shortly after create, push the url at it again; a live engine
-     * that simply missed its first nav heals silently */
+    /* nav watchdog: an env create inside churn can stall the initial
+     * nav (NavigationStarting fires, the document never commits — the
+     * same failure pop_window rebuilds on) or land the renderer half-
+     * suspended — both leave the card's beige underlay showing while
+     * every pv_* command reports success. For ~15s, while the engine
+     * still reports about:blank: Resume() (no-op on a healthy engine,
+     * wakes a dead-painted one) then push the url again */
     {
         let id = id.clone();
         tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(3500)).await;
-            if let Ok(wv) = get(&id) {
+            for _ in 0..10 {
+                tokio::time::sleep(std::time::Duration::from_millis(1400)).await;
+                let Ok(wv) = get(&id) else { return };
                 let parked = wv.url().map(|u| u.as_str() == "about:blank").unwrap_or(false);
-                if parked {
-                    let _ = wv.navigate(url.parse().unwrap_or_else(|_| {
-                        "about:blank".parse().expect("about:blank is a valid url")
-                    }));
+                if !parked {
+                    return;
                 }
+                let _ = com_call(&id, |pw| unsafe {
+                    use webview2_com::Microsoft::Web::WebView2::Win32::*;
+                    use windows::core::Interface;
+                    let core = pw.controller().CoreWebView2().map_err(|e| e.to_string())?;
+                    if let Ok(wv3) = core.cast::<ICoreWebView2_3>() {
+                        let _ = wv3.Resume();
+                    }
+                    Ok(())
+                });
+                let _ = wv.navigate(url.parse().unwrap_or_else(|_| {
+                    "about:blank".parse().expect("about:blank is a valid url")
+                }));
             }
         });
     }

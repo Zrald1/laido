@@ -949,6 +949,7 @@ export function wireBrowser(card: HTMLElement) {
   const dpr = () => window.devicePixelRatio || 1;
   let lastBox = "";
   let lastVis = "";
+  let reaffirmTicks = 0;
   let coverTicks = 0;
   /* page fullscreen (youtube ⛶ etc.): the child webview is a native HWND —
    * DOM fullscreen succeeds but nothing resizes the surface, so the video
@@ -1051,8 +1052,13 @@ export function wireBrowser(card: HTMLElement) {
     /* self-heal: a stray hide (raced suspend, sweep, park) leaves truth
      * false while lastVis says true — the dedup would then NEVER repost
      * and the page stays dead. If the live engine is marked suspended it
-     * is by definition not showing, so force the branch. */
-    const needVis = visKey !== lastVis || (vis && suspendedPv.has(bvId));
+     * is by definition not showing, so force the branch. And even when
+     * nothing suspects a hide, re-affirm the wanted state on a ~2s
+     * cadence — out-of-band hides (sweep, reclaim teardown) bypass this
+     * card's lastVis entirely */
+    const needVis =
+      visKey !== lastVis || (vis && (suspendedPv.has(bvId) || ++reaffirmTicks >= 15));
+    if (needVis && reaffirmTicks >= 15) reaffirmTicks = 0;
     if (boxKey === lastBox && !needVis) return;
     /* grip-resize posts a new rect EVERY pointer frame — put_Bounds is an
      * RPC + full relayout + repaint each time, and the compositor lags a
