@@ -276,6 +276,45 @@ const engineNote = new Map<string, string>();
 /* engines parked by a note switch, keyed by url — a revived card whose
  * markdown never caught its bv: line can still re-claim its engine */
 const parkedByUrl = new Map<string, string>();
+/* engines sent to sleep (WebView2 TrySuspend — Edge's sleeping tabs):
+ * frozen scripts reclaim renderer memory; skipped by the audio poll and
+ * woken via pv_resume + re-show when their tab activates again */
+const suspendedPv = new Set<string>();
+(window as unknown as { __suspendedPv?: Set<string> }).__suspendedPv = suspendedPv; // CDP testability
+/* a hidden background engine either SLEEPS (quiet — full suspend) or
+ * presses to Low memory target (still audible — can't pause sound).
+ * The cached audioPv flag lags up to a poll-tick — a video that started
+ * a second ago reads quiet and would get frozen mid-play — so we take a
+ * fresh media sample at hide time before committing the suspend. */
+const sleepEngine = (id: string) => {
+  if (suspendedPv.has(id)) return; // already frozen — an eval would just stall
+  const commit = (playing: boolean) => {
+    if (playing) {
+      void invoke("pv_memlevel", { id, low: true }).catch(() => {});
+      return;
+    }
+    void invoke<boolean>("pv_suspend", { id })
+      .then((ok) => { if (ok) suspendedPv.add(id); })
+      .catch(() => {});
+  };
+  void invoke<string>("pv_eval", { id, js: AUD_JS })
+    .then((raw) => {
+      let playing = audioPv.get(id)?.playing ?? false;
+      try {
+        playing = playing || !!(JSON.parse(raw ?? "{}") as { playing?: boolean }).playing;
+      } catch { /* keep cached flag */ }
+      commit(playing);
+    })
+    .catch(() => commit(audioPv.get(id)?.playing ?? false));
+};
+/* shown/navigated engines auto-resume a suspend, but a Low memory target
+ * does NOT auto-restore — flip it back or the live page crawls */
+const wakeEngine = (id: string) => {
+  // Resume is required — TrySuspend does not undo itself on re-show, so a
+  // cleared-but-frozen engine would fail every eval and paint dead pixels.
+  if (suspendedPv.delete(id)) void invoke("pv_resume", { id }).catch(() => {});
+  void invoke("pv_memlevel", { id, low: false }).catch(() => {});
+};
 
 const AUD_JS =
   `(()=>{const ms=[...document.querySelectorAll('video,audio')];` +
@@ -374,9 +413,11 @@ const startAudioPoll = () => {
     for (const id of [...unclaimedTicks.keys()]) if (!ids.includes(id)) unclaimedTicks.delete(id);
 
     /* parallel evals — a serial loop over many parked engines stretches
-     * the effective poll past several seconds and SPA tracking lags */
+     * the effective poll past several seconds and SPA tracking lags.
+     * Suspended engines are skipped entirely: their scripts are frozen,
+     * they can't be playing, and evals just queue into timeouts */
     await Promise.all(
-      ids.map(async (id) => {
+      ids.filter((id) => !suspendedPv.has(id)).map(async (id) => {
         const s = await invoke<string>("pv_eval", { id, js: AUD_JS }).catch(() => "");
         if (!s) return;
         try {
@@ -641,16 +682,20 @@ export function wireBrowser(card: HTMLElement) {
     engineNote.set(id, card.dataset.note ?? "");
   };
   for (const t of tabs) if (t.bv) claimEng(t.bv);
-  /* every inactive tab's engine hides — only the active one shows */
+  /* every inactive tab's engine hides — only the active one shows —
+   * and quiet engines SLEEP so background tabs stop costing real memory */
   const hideSiblings = () => {
     for (const t of tabs)
-      if (t.bv && t !== cur())
+      if (t.bv && t !== cur()) {
         void invoke("pv_visible", { id: t.bv, on: false }).catch(() => {});
+        sleepEngine(t.bv);
+      }
   };
   /* engine budget: an idle webview costs ~80MB — beyond the cap, close
    * the least-recently-active background engine; its tab falls back to a
-   * real nav on next switch (same as before per-tab engines) */
-  const MAX_ENGINES = 8;
+   * real nav on next switch (same as before per-tab engines). Suspend
+   * keeps most parked engines free now, so the cap can sit tighter. */
+  const MAX_ENGINES = 5;
   const evictIdle = () => {
     const live = tabs.filter((t) => t.bv);
     if (live.length <= MAX_ENGINES) return;
@@ -984,6 +1029,9 @@ export function wireBrowser(card: HTMLElement) {
     }
     if (visKey !== lastVis) {
       lastVis = visKey;
+      /* false→true means a suspended engine is about to paint — clear the
+       * sleep mark and lift any Low memory target before it shows */
+      if (vis) wakeEngine(bvId);
       void invoke("pv_visible", { id: bvId, on: vis }).catch(() => {});
     }
   };
@@ -1034,6 +1082,9 @@ export function wireBrowser(card: HTMLElement) {
           if (card.dataset.park) {
             if (t.url) parkedByUrl.set(normU(t.url), t.bv);
             void invoke("pv_visible", { id: t.bv, on: false }).catch(() => {});
+            /* a parked engine is the long-lived kind — sleep the quiet
+             * ones outright, press audible ones to Low */
+            sleepEngine(t.bv);
           } else {
             void invoke("pv_close", { id: t.bv }).catch(() => {});
             engineNote.delete(t.bv);

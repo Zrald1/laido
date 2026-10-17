@@ -30,6 +30,10 @@ futures-util = { version = "0.3", default-features = false, features = ["sink"] 
 calamine = "0.36.1"
 rust_xlsxwriter = "0.99.1"
 regex = "1.11"
+# engine sleep/memory levers — TrySuspend + MemoryUsageTargetLevel on the
+# child WebView2s the pageview lane owns (versions match wry's graph)
+webview2-com = "0.39"
+windows = { version = "0.62", features = ["Win32_Foundation"] }
 
 [profile.release]
 opt-level = "s"

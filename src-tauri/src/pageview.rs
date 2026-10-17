@@ -231,6 +231,105 @@ pub async fn pv_url(id: String) -> Result<String, String> {
     Ok(get(&id)?.url().map_err(|e| e.to_string())?.to_string())
 }
 
+/// run a WebView2 COM call on the main thread — controllers are bound to
+/// the window's dispatcher, and blocking a tauri worker on recv is safe
+/// here because every command in this module is async (sync would
+/// deadlock the main thread it waits on).
+fn com_call<T: Send + 'static>(
+    id: &str,
+    f: impl FnOnce(tauri::webview::PlatformWebview) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let wv = get(id)?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    wv.with_webview(move |pw| {
+        let _ = tx.send(f(pw));
+    })
+    .map_err(|e| e.to_string())?;
+    rx.recv_timeout(std::time::Duration::from_secs(5))
+        .map_err(|_| "webview com call timed out".to_string())?
+}
+
+/// sleep a hidden engine — Edge's "sleeping tab" lever (ICoreWebView2_3):
+/// pauses script timers/animations and lets the OS reclaim the renderer's
+/// memory. TrySuspend refuses a VISIBLE controller, so SetIsVisible(false)
+/// runs first inside the same closure — ordered, no IPC race. The suspend
+/// itself completes asynchronously and can silently refuse (modal dialog,
+/// debug channel, busy renderer), so we poll IsSuspended afterwards and
+/// report the truth — the frontend's suspended-set must not claim engines
+/// that are still running. Media-playing engines must keep running — the
+/// frontend only calls this on quiet tabs.
+#[tauri::command]
+pub async fn pv_suspend(id: String) -> Result<bool, String> {
+    com_call(&id, |pw| unsafe {
+        use webview2_com::Microsoft::Web::WebView2::Win32::*;
+        use windows::core::Interface;
+        pw.controller().SetIsVisible(false).ok();
+        let core = pw.controller().CoreWebView2().map_err(|e| e.to_string())?;
+        let wv3 = core.cast::<ICoreWebView2_3>().map_err(|e| e.to_string())?;
+        wv3.TrySuspend(None).map_err(|e| e.to_string())?;
+        Ok(())
+    })?;
+    // settle loop — freeze typically lands within a few hundred ms
+    for _ in 0..8 {
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        let frozen = com_call(&id, |pw| unsafe {
+            use webview2_com::Microsoft::Web::WebView2::Win32::*;
+            use windows::core::Interface;
+            let core = pw.controller().CoreWebView2().map_err(|e| e.to_string())?;
+            let wv3 = core.cast::<ICoreWebView2_3>().map_err(|e| e.to_string())?;
+            let mut b = windows::core::BOOL::default();
+            wv3.IsSuspended(&mut b).map_err(|e| e.to_string())?;
+            Ok(b.as_bool())
+        })?;
+        if frozen {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// wake a suspended engine. TrySuspend does NOT auto-undo on SetIsVisible —
+/// the WebView2 needs an explicit Resume or its scripts/timers stay frozen
+/// (every pv_eval times out and the page paints dead). Resume on a running
+/// engine is a documented no-op, so callers may fire it unconditionally.
+#[tauri::command]
+pub async fn pv_resume(id: String) -> Result<bool, String> {
+    com_call(&id, |pw| unsafe {
+        use webview2_com::Microsoft::Web::WebView2::Win32::*;
+        use windows::core::Interface;
+        let core = pw.controller().CoreWebView2().map_err(|e| e.to_string())?;
+        let wv3 = core.cast::<ICoreWebView2_3>().map_err(|e| e.to_string())?;
+        wv3.Resume().map_err(|e| e.to_string())?;
+        Ok(true)
+    })
+}
+
+/// memory pressure without pausing scripts — for engines that must keep
+/// running (audio playing) but should swap cold pages to disk. Unlike
+/// suspend this does NOT auto-restore, so callers set Normal again when
+/// the engine becomes active. The cast fails on runtimes older than 114 —
+/// treated as a quiet no-op.
+#[tauri::command]
+pub async fn pv_memlevel(id: String, low: bool) -> Result<bool, String> {
+    com_call(&id, move |pw| unsafe {
+        use webview2_com::Microsoft::Web::WebView2::Win32::*;
+        use windows::core::Interface;
+        let core = pw.controller().CoreWebView2().map_err(|e| e.to_string())?;
+        let wv19 = match core.cast::<ICoreWebView2_19>() {
+            Ok(w) => w,
+            Err(_) => return Ok(false), // runtime <114 — no API, skip quietly
+        };
+        wv19
+            .SetMemoryUsageTargetLevel(if low {
+                COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
+            } else {
+                COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(true)
+    })
+}
+
 /// pull OS keyboard focus back into the main webview. A child view that the
 /// user clicked inside keeps HWND focus until something moves it — a bare
 /// DOM `.focus()` on a chat/url field then can't receive real keystrokes.
