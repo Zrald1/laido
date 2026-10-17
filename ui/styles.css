@@ -3118,3 +3118,22 @@ td.base-sumlab{color:var(--dim,#94897a);font-size:10.5px;border-top:1px solid va
   content-visibility: auto;
   contain-intrinsic-size: auto 30px;
 }
+
+/* ---------- field: physics sim card ---------------------------------- */
+.field-card .callout-body { padding: 0; }
+.field-cv {
+  display: block; width: 100%; height: 220px;
+  border-radius: 0 0 10px 10px; cursor: crosshair;
+  touch-action: none; background: #0b0d12;
+}
+.field-tools { display: inline-flex; gap: 2px; margin-left: auto; }
+.f-t {
+  font: 10px/1 var(--ui, ui-sans-serif); padding: 3px 7px;
+  border: 1px solid var(--line2, #2a2f3a); border-radius: 6px;
+  background: transparent; color: var(--ink2, #98a2b3); cursor: pointer;
+}
+.f-t.on { background: var(--acc, #6d8dff); color: #fff; border-color: var(--acc, #6d8dff); }
+.field-hint {
+  position: absolute; right: 8px; bottom: 6px; font: 10px/1 var(--ui, ui-sans-serif);
+  color: #cfd6e4; opacity: .6; pointer-events: none; text-shadow: 0 1px 2px #000;
+}

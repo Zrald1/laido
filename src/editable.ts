@@ -7,6 +7,7 @@ import { cardsToMd } from "./cards.js";
 import { mapToMd } from "./map.js";
 import { agendaToMd } from "./agenda.js";
 import { graphToMd } from "./graph.js";
+import { fieldToMd } from "./field.js";
 import { canvasToMd } from "./canvas.js";
 import { baseToMd } from "./base.js";
 
@@ -224,6 +225,8 @@ export function cardToMd(card: HTMLElement): string {
     return agendaToMd(card);
   if (DS(card.dataset.kind) === "graph" || card.classList.contains("graph-card"))
     return graphToMd(card);
+  if (DS(card.dataset.kind) === "field" || card.classList.contains("field-card"))
+    return fieldToMd(card);
   if (DS(card.dataset.kind) === "canvas" || card.classList.contains("canvas-card"))
     return canvasToMd(card);
   if (DS(card.dataset.kind) === "base" || card.classList.contains("base-card"))

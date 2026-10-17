@@ -2,6 +2,7 @@ import { parseSheetLine } from "./sheet.js";
 import { mapCallout } from "./map.js";
 import { agendaCallout } from "./agenda.js";
 import { graphCallout } from "./graph.js";
+import { fieldCallout } from "./field.js";
 import { canvasCallout } from "./canvas.js";
 import { baseCallout } from "./base.js";
 import { parseDeck, deckInnerHtml } from "./slides.js";
@@ -146,6 +147,8 @@ function callout(block: string[]): string {
   if (marker === "map" || marker === "mindmap") return mapCallout(block);
   if (marker === "agenda" || marker === "today") return agendaCallout(block);
   if (marker === "graph") return graphCallout(block);
+  if (marker === "field" || marker === "wave" || marker === "physics" || marker === "sim")
+    return fieldCallout(block);
   if (marker === "canvas" || marker === "draw") return canvasCallout(block);
   if (marker === "base" || marker === "view" || marker === "database")
     return baseCallout(block);
