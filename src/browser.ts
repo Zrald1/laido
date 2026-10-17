@@ -971,6 +971,8 @@ export function wireBrowser(card: HTMLElement) {
     lastBox = "";
     pvSync();
   };
+  let lastBoundsAt = 0;
+  let gripDefer = 0;
   const pvSync = () => {
     if (!card.isConnected || !bvId) return; // blank tab — no engine to glue
     const fsOwner = fsFlag();
@@ -1052,6 +1054,29 @@ export function wireBrowser(card: HTMLElement) {
      * is by definition not showing, so force the branch. */
     const needVis = visKey !== lastVis || (vis && suspendedPv.has(bvId));
     if (boxKey === lastBox && !needVis) return;
+    /* grip-resize posts a new rect EVERY pointer frame — put_Bounds is an
+     * RPC + full relayout + repaint each time, and the compositor lags a
+     * frame behind (white-stretch flicker). While the drag is live the
+     * DOM tracks smoothly on its own; the engine only needs a ~60ms
+     * cadence, and visibility stays frozen — a mid-drag size dip must not
+     * hide→show the surface. The pointerup RO lands the exact final
+     * geometry. */
+    if (card.classList.contains("gripping")) {
+      if (Date.now() - lastBoundsAt < 55) {
+        if (!gripDefer) gripDefer = window.setTimeout(() => { gripDefer = 0; pvSync(); }, 60);
+        return; // don't stamp lastBox — the defer retries with fresh rects
+      }
+      lastBoundsAt = Date.now();
+      if (boxKey !== lastBox) {
+        lastBox = boxKey;
+        void invoke("pv_bounds", {
+          id: bvId,
+          x: Math.round(ix * d), y: Math.round(iy * d),
+          w: Math.round(Math.max(1, iw) * d), h: Math.round(Math.max(1, ih) * d),
+        }).catch(() => {});
+      }
+      return; // visibility frozen until the grip releases
+    }
     if (boxKey !== lastBox) {
       lastBox = boxKey;
       void invoke("pv_bounds", {
@@ -1102,6 +1127,7 @@ export function wireBrowser(card: HTMLElement) {
         ro.disconnect();
         extResize.disconnect();
         window.clearTimeout(scrollSettle);
+        window.clearTimeout(gripDefer);
         if (scrollRaf) cancelAnimationFrame(scrollRaf);
         document.removeEventListener("scroll", onScroll, true);
         window.removeEventListener("resize", extWinFit);

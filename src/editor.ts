@@ -1009,6 +1009,7 @@ function makeResizable(card: HTMLElement) {
       e.preventDefault();
       e.stopPropagation();
       card.style.transform = "none";
+      card.classList.add("gripping"); // browser cards freeze their engine sync while this is live
       g.setPointerCapture(e.pointerId);
       const r = card.getBoundingClientRect();
       const cs = getComputedStyle(card);
@@ -1037,11 +1038,14 @@ function makeResizable(card: HTMLElement) {
       const up = () => {
         g.removeEventListener("pointermove", move);
         g.removeEventListener("pointerup", up);
+        g.removeEventListener("pointercancel", up);
+        card.classList.remove("gripping");
         saveCardBox(card);
         scheduleFlow();
       };
       g.addEventListener("pointermove", move);
       g.addEventListener("pointerup", up);
+      g.addEventListener("pointercancel", up);
     });
     card.append(g);
   }
