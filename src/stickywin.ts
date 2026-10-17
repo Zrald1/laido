@@ -148,14 +148,14 @@ export async function initStickyWindow(spec: string) {
     widget.innerHTML =
       `<div class="callout-head"><span class="callout-title">${widget.dataset.topic}</span></div>` +
       `<div class="term-log"></div>` +
-      `<div class="term-input-row"><span class="term-prompt">›</span><input class="term-input" placeholder="ask anything — or ! command" spellcheck="false" autocomplete="off"/></div>`;
+      `<div class="term-input-row"><span class="term-prompt">›</span><textarea class="term-input" rows="1" placeholder="ask anything — or ! command" spellcheck="false" autocomplete="off"></textarea></div>`;
     // a sibling of the sticky card — its [!terminal] block then survives the
     // save/reload round-trip as its own card
     el.append(widget);
     wireTerminal(widget);
     const lg = widget.querySelector<HTMLElement>(".term-log");
     if (lg) lg.contentEditable = "false";
-    widget.querySelector<HTMLInputElement>(".term-input")?.focus();
+    widget.querySelector<HTMLTextAreaElement>(".term-input")?.focus();
     save();
   });
   // Laido commands fired from the sticky's chat land their cards right here

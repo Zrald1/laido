@@ -1994,7 +1994,7 @@ export const runWidgetFence = async (kind: string, body: string): Promise<string
 export function wireTerminal(card: HTMLElement) {
   if (!card?.dataset) return;
   const log = card.querySelector<HTMLElement>(".term-log");
-  const input = card.querySelector<HTMLInputElement>(".term-input");
+  const input = card.querySelector<HTMLTextAreaElement>(".term-input");
   if (!log || !input || card.dataset.wired) return;
   card.dataset.wired = "1";
   const history: Array<{ role: string; content: string }> = [];
@@ -2921,7 +2921,7 @@ export function wireTerminal(card: HTMLElement) {
   sessions.set(card, { card, line, aiTurn });
   input.addEventListener("keydown", (e) => {
     e.stopPropagation();
-    if (e.key !== "Enter" || e.isComposing) return;
+    if (e.key !== "Enter" || e.isComposing || e.shiftKey) return;
     const text = input.value.trim();
     if (!text && !chatTools.hasPending()) return;
     input.value = "";

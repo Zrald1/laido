@@ -3485,7 +3485,7 @@ export function spawnTerminalCard(
   card.innerHTML =
     `<div class="callout-head"><span class="callout-title">${card.dataset.topic} ${chatId}${persona ? ` · ${persona}` : ""}</span></div>` +
     `<div class="term-log"></div>` +
-    `<div class="term-input-row"><span class="term-prompt">›</span><input class="term-input" placeholder="ask anything — or ! command" spellcheck="false" autocomplete="off"/></div>`;
+    `<div class="term-input-row"><span class="term-prompt">›</span><textarea class="term-input" rows="1" placeholder="ask anything — or ! command" spellcheck="false" autocomplete="off"></textarea></div>`;
   enhanceCard(card);
   const log = card.querySelector<HTMLElement>(".term-log");
   if (log) log.contentEditable = "false";
@@ -3520,7 +3520,7 @@ export function spawnTerminalCard(
   dirty = true;
   setState(t("ed.saving"));
   void save();
-  const input = card.querySelector<HTMLInputElement>(".term-input");
+  const input = card.querySelector<HTMLTextAreaElement>(".term-input");
   if (seed && input) {
     input.value = seed;
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
@@ -4086,7 +4086,7 @@ function duplicateTerminalCard(card: HTMLElement) {
   clone.dataset.chatId = childId;
   const title = clone.querySelector(".callout-title");
   if (title) title.textContent = `${clone.dataset.topic ?? "chat"} ${childId}`;
-  const input = clone.querySelector<HTMLInputElement>(".term-input");
+  const input = clone.querySelector<HTMLTextAreaElement>(".term-input");
   if (input) input.value = "";
   enhanceCard(clone);
   const lg = clone.querySelector<HTMLElement>(".term-log");
@@ -4107,7 +4107,7 @@ function duplicateTerminalCard(card: HTMLElement) {
   dirty = true;
   setState(t("ed.saving"));
   void save();
-  clone.querySelector<HTMLInputElement>(".term-input")?.focus();
+  clone.querySelector<HTMLTextAreaElement>(".term-input")?.focus();
 }
 
 /** resolve "@document/@ask <file?> <question>" — the file token is optional;
@@ -5357,7 +5357,7 @@ export function initEditor() {
       e.preventDefault();
       const persona = personaMatch[2].toLowerCase();
       const card = spawnTerminalCard("chat", personaMatch[3].trim() || undefined, block, undefined, persona);
-      const input = card.querySelector<HTMLInputElement>(".term-input");
+      const input = card.querySelector<HTMLTextAreaElement>(".term-input");
       if (input) input.placeholder = `as ${persona}…`;
       return;
     }

@@ -153,8 +153,8 @@ export function browserInnerHtml(): string {
     `<div class="bc-head"><span class="bc-t">✦ ask AI</span>` +
     `<button class="bc-x" title="hide the panel">×</button></div>` +
     `<div class="bc-log"></div>` +
-    `<div class="bc-bar"><input class="bc-in" maxlength="1200" spellcheck="false" ` +
-    `placeholder="ask about this page — 'summarize it', 'grab prices', 'make a tool'…"></div>` +
+    `<div class="bc-bar"><textarea class="bc-in" rows="1" maxlength="1200" spellcheck="false" ` +
+    `placeholder="ask about this page — 'summarize it', 'grab prices', 'make a tool'…"></textarea></div>` +
     `</div>` +
     `</div>` +
     `<div class="browser-status" contenteditable="false">idle</div>`
@@ -1798,7 +1798,7 @@ export function wireBrowser(card: HTMLElement) {
    * edge; the same fence machinery as the terminal, aimed at THIS card */
   const chatPane = card.querySelector<HTMLElement>(".browser-chat");
   const chatLog = card.querySelector<HTMLElement>(".bc-log");
-  const chatIn = card.querySelector<HTMLInputElement>(".bc-in");
+  const chatIn = card.querySelector<HTMLTextAreaElement>(".bc-in");
   const chatHist: { role: string; content: string }[] = [];
   let asking = false;
   let idlePlaceholder = "";
@@ -2003,7 +2003,7 @@ export function wireBrowser(card: HTMLElement) {
   };
   chatIn?.addEventListener("keydown", (e) => {
     e.stopPropagation(); // widget keys never reach note-level chip/picker logic
-    if (e.key === "Enter") {
+    if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       if (asking) return; // one in-flight ask — the field stays editable
       const q = chatIn.value.trim();

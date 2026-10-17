@@ -138,6 +138,26 @@ export function wireChatTools(
   };
   input.addEventListener("input", syncSend);
 
+  /* multi-line composer — grows with the text up to ~6 lines, then the
+   * field scrolls internally instead of pushing the card open-ended.
+   * Enter sends (value cleared programmatically → a deferred pass shrinks
+   * the field back to one line) and Shift+Enter is the newline. */
+  const growField = () => {
+    if (!(input instanceof HTMLTextAreaElement)) return;
+    input.style.height = "auto";
+    const lh = parseFloat(getComputedStyle(input).lineHeight) || 18;
+    const max = Math.round(lh * 6 + 8);
+    input.style.height = `${Math.min(input.scrollHeight, max)}px`;
+    input.style.overflowY = input.scrollHeight > max ? "auto" : "hidden";
+  };
+  if (input instanceof HTMLTextAreaElement) {
+    growField();
+    input.addEventListener("input", growField);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) window.setTimeout(growField, 0);
+    });
+  }
+
   /* chips + VU meter live in a strip under the input row */
   const strip = document.createElement("div");
   strip.className = "ct-strip hidden";

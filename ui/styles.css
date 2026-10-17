@@ -474,6 +474,7 @@ body.sticky-mode .term-card { width: auto; }
 .term-input {
   flex: 1; min-width: 0; border: 0; outline: none; background: transparent;
   font-family: var(--note-font); font-size: 13.5px; color: var(--text);
+  resize: none; overflow: hidden; line-height: 1.45; padding: 2px 0;
 }
 /* chat+ shared tools — [📎] field [🎙] [➤] composer on every AI chat */
 .ct-tools { flex: none; display: inline-flex; align-items: center; gap: 3px; }
@@ -1278,12 +1279,13 @@ body:not(.lib-open) #library { padding: 0; border-right: 0; }
 }
 .lib-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .lib-ask { width: 100%; padding: 2px 0 4px; }
-.lib-ask input {
+.lib-ask textarea {
   width: 100%; box-sizing: border-box; padding: 6px 8px;
   border: 1px solid var(--line); border-radius: 7px;
   background: var(--bg-2); color: var(--text); font-size: 12px; outline: none;
+  resize: none; overflow: hidden; font-family: inherit; line-height: 1.4;
 }
-.lib-ask input:focus { border-color: var(--accent); }
+.lib-ask textarea:focus { border-color: var(--accent); }
 .lib-meta { font-size: 10.5px; color: var(--muted); flex: none; }
 .lib-del {
   width: 20px; height: 20px; border-radius: 5px; color: var(--muted); font-size: 11px;
@@ -2123,6 +2125,7 @@ li.todo.done .todo-box { color: var(--muted); }
 .bc-in {
   flex: 1; min-width: 0; border: 0; background: transparent;
   font: 11.5px/1.4 inherit; color: inherit; outline: none; padding: 2px 0;
+  resize: none; overflow: hidden;
 }
 .bc-in::placeholder { color: rgba(0,0,0,.35); }
 .bc-in:disabled { opacity: .55; }
@@ -2982,7 +2985,7 @@ td.base-sumlab{color:var(--dim,#94897a);font-size:10.5px;border-top:1px solid va
 .sheet-chat { display:flex; flex-direction:column; flex:0 0 auto; border-top:1px solid rgba(0,0,0,.08); background:rgba(0,0,0,.025); }
 .sheet-chat-bar { display:flex; align-items:center; gap:6px; padding:5px 8px; }
 .sheet-chat-ic { font-size:12px; color:var(--accent,#7a5c2e); flex:0 0 auto; }
-.sheet-chat-in { flex:1 1 auto; min-width:0; border:0; background:transparent; font:12px/1.4 inherit; color:inherit; outline:none; padding:2px 0; }
+.sheet-chat-in { flex:1 1 auto; min-width:0; border:0; background:transparent; font:12px/1.4 inherit; color:inherit; outline:none; padding:2px 0; resize:none; overflow:hidden; }
 .sheet-chat-in::placeholder { color:rgba(0,0,0,.35); }
 .sheet-chat-in:disabled { opacity:.55; }
 .sheet-chat-log { max-height:132px; overflow-y:auto; padding:6px 8px 2px; display:flex; flex-direction:column; gap:4px; border-bottom:1px solid rgba(0,0,0,.06); scrollbar-width:thin; }

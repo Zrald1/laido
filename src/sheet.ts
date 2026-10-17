@@ -4988,10 +4988,10 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
     `<div class="sheet-chat-log" hidden></div>` +
     `<div class="sheet-chat-bar">` +
     `<span class="sheet-chat-ic">✦</span>` +
-    `<input class="sheet-chat-in" maxlength="280" spellcheck="false" ` +
-    `placeholder="ask AI — 'bold the headers', 'sum column B', 'chart this', 'a running-total tool'…">` +
+    `<textarea class="sheet-chat-in" rows="1" maxlength="280" spellcheck="false" ` +
+    `placeholder="ask AI — 'bold the headers', 'sum column B', 'chart this', 'a running-total tool'…"></textarea>` +
     `</div>`;
-  const chatIn = chat.querySelector<HTMLInputElement>(".sheet-chat-in")!;
+  const chatIn = chat.querySelector<HTMLTextAreaElement>(".sheet-chat-in")!;
   const chatLog = chat.querySelector<HTMLElement>(".sheet-chat-log")!;
   /* 📎 + 🎙 shared chat tools — screenshots of a table become vision asks,
    * a spoken "sum column B" lands in the field; errors go to the dock */
@@ -5188,7 +5188,7 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
   };
   chatIn.addEventListener("keydown", (e) => {
     e.stopPropagation();
-    if (e.key === "Enter" && (chatIn.value.trim() || chatTools.hasPending())) {
+    if (e.key === "Enter" && !e.shiftKey && (chatIn.value.trim() || chatTools.hasPending())) {
       const typed = chatIn.value.trim();
       const send = chatTools.collect(typed);
       const names = chatTools.names();

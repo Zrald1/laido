@@ -53,7 +53,8 @@ export async function refreshLibrary() {
       // click a row → an inline ask box; the answer card lands in the note
       const ask = document.createElement("div");
       ask.className = "lib-ask hidden";
-      const input = document.createElement("input");
+      const input = document.createElement("textarea");
+      input.rows = 1;
       input.placeholder = "Ask this file…";
       input.spellcheck = false;
       ask.append(input);
@@ -77,7 +78,7 @@ export async function refreshLibrary() {
           ask.classList.add("hidden");
           return;
         }
-        if (e.key !== "Enter") return;
+        if (e.key !== "Enter" || e.shiftKey) return;
         const send = tools.collect(input.value.trim());
         if (!send.prompt.trim()) return;
         tools.reset();
