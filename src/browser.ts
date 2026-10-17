@@ -2216,6 +2216,16 @@ export function wireBrowser(card: HTMLElement) {
       e.preventDefault();
       const q = chatIn.value.trim();
       if (!q && !chatTools.hasPending()) return;
+      /* `dl <url>` typed straight in the card runs the downloader verb
+       * locally — no model round-trip needed for a mechanical command */
+      if (/^(dl|download|getf)\s+\S+/i.test(q)) {
+        chatIn.value = "";
+        chatAdd("user", q);
+        chatAdd("laido", "downloading…");
+        void import("./term.js").then(({ runWidgetFence }) =>
+          runWidgetFence("browser", q).then((out) => chatAdd("laido", out)));
+        return;
+      }
       const send = chatTools.collect(q);
       const names = chatTools.names();
       chatTools.reset();

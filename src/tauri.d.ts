@@ -10,6 +10,7 @@ declare global {
       };
       window: {
         getCurrentWindow(): {
+          label: string;
           minimize(): Promise<void>;
           toggleMaximize(): Promise<void>;
           close(): Promise<void>;

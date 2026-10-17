@@ -742,19 +742,34 @@ function saveCardBox(card: HTMLElement) {
 
 function restoreCardState(card: HTMLElement) {
   const s = readState(card);
-  if (s.w && s.h) {
-    card.style.width = `${s.w}px`;
-    card.style.height = `${s.h}px`;
+  /* geometry saved on a bigger screen (or before a sidebar/zoom change)
+   * must never bury the current paper — clamp w/h to the editor and
+   * x/y so at least an edge of the card stays reachable */
+  const editor = body();
+  const w = s.w ? Math.min(s.w, Math.max(280, editor.clientWidth - 24)) : 0;
+  /* a floating card taller than the visible paper can't ever be seen in
+   * full — its own body scrolls, so anything beyond the viewport is dead
+   * weight that just buries the text under it */
+  const h = s.h ? Math.min(s.h, Math.max(200, editor.clientHeight - 40)) : 0;
+  if (w && h) {
+    card.style.width = `${w}px`;
+    card.style.height = `${h}px`;
     card.style.marginLeft = `${s.ml ?? 0}px`;
     card.style.marginTop = `${s.mt ?? 0}px`;
     card.classList.add("sized");
+    if (w !== s.w || h !== s.h) writeState(card, { w, h });
   }
   if (s.x !== undefined && s.y !== undefined) {
+    const cw = w || card.getBoundingClientRect().width || 300;
+    const ch = h || card.getBoundingClientRect().height || 200;
+    const x = Math.min(Math.max(s.x, 40 - cw), Math.max(40, editor.scrollWidth - 48));
+    const y = Math.min(Math.max(s.y, 40 - ch), Math.max(40, editor.scrollHeight - 48));
     card.classList.add("floating");
-    card.style.left = `${s.x}px`;
-    card.style.top = `${s.y}px`;
+    card.style.left = `${x}px`;
+    card.style.top = `${y}px`;
     card.style.marginTop = "0px";
     card.style.marginLeft = "0px";
+    if (x !== s.x || y !== s.y) writeState(card, { x, y });
   }
   // a generated card keeps its stacking slot across reloads — newest on top
   // until an even newer card is generated
@@ -4267,13 +4282,9 @@ export function printNote() {
 
 async function openStickyWindow(id: string, x?: number, y?: number): Promise<boolean> {
   const api = window.__TAURI__.webviewWindow;
-  if (!api?.WebviewWindow) {
-    addActivity("✕ cannot open a new window in this build");
-    return false;
-  }
   const label = `sticky-${id}`;
   try {
-    const existing = await api.WebviewWindow.getByLabel(label);
+    const existing = await api?.WebviewWindow?.getByLabel(label);
     if (existing) {
       await existing.setFocus();
       return false;
@@ -4281,24 +4292,46 @@ async function openStickyWindow(id: string, x?: number, y?: number): Promise<boo
   } catch {
     /* older runtime: fall through and try to create */
   }
+  /* Rust-side pop_window: the shared WebView2 env rejects JS-built
+   * windows (env options mismatch). build() returning only means an
+   * HWND exists — the card is removed only when the sticky window
+   * emits pop:ready from its own booted init */
   try {
-    new api.WebviewWindow(label, {
-      url: `index.html?sticky=~${encodeURIComponent(id)}`,
-      width: 270,
-      height: 250,
-      x,
-      y,
-      center: x === undefined || y === undefined,
-      alwaysOnTop: true,
-      decorations: false,
-      resizable: true,
+    await invoke("pop_window", {
+      label,
+      url: "index.html",
+      init: `window.__POP_STICKY__=${JSON.stringify(`~${id}`)}`,
+      x: x ?? 0,
+      y: y ?? 0,
+      w: 270,
+      h: 250,
+      centered: x === undefined || y === undefined,
+      onTop: true,
       title: "Laido sticky",
     });
-    return true;
   } catch (err) {
     addActivity(`✕ ${String(err)}`);
     return false;
   }
+  return await new Promise<boolean>((resolve) => {
+    let un: (() => void) | undefined;
+    const done = (ok: boolean) => {
+      un?.();
+      if (!ok) {
+        addActivity(`✕ the sticky window didn't finish loading`);
+        void window.__TAURI__.webviewWindow?.WebviewWindow.getByLabel(label)
+          .then((w) => void w?.close())
+          .catch(() => {});
+      }
+      resolve(ok);
+    };
+    void window.__TAURI__.event
+      .listen<string>("pop:ready", (e) => {
+        if (e.payload === label) done(true);
+      })
+      .then((u) => (un = u));
+    setTimeout(() => done(false), 10000);
+  });
 }
 
 export function popOutSticky(card: HTMLElement, x?: number, y?: number) {

@@ -912,6 +912,39 @@ const browserTool = async (body: string): Promise<string> => {
     return `opened "${card.dataset.topic}" — ${out}`;
   }
 
+  // dl <url> [name] — IDM-style segmented download: HEAD probe → parallel
+  // range streams with in-half work stealing → positional writes into
+  // ~/Downloads/Laido/<category>/ — docs, programs, media, archives…
+  if (verb === "dl" || verb === "download" || verb === "getf") {
+    if (!rest) return "✕ dl needs a url — dl <url> [name]";
+    let url = rest.split(/\s+/)[0];
+    if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+    const hsize = (n: number) =>
+      n >= 1e9 ? `${(n / 1e9).toFixed(2)} GB` : n >= 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.round(n / 1e3)} KB`;
+    try {
+      const started = await invoke<{ id: string; name: string; conns: number; rangeable: boolean }>(
+        "dl_start", { url });
+      type DlInfo = {
+        id: string; url: string; path: string; category: string;
+        state: string; total: number; got: number; mbps: number;
+        segs: number; err: string;
+      };
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 600));
+        const st = await invoke<DlInfo>("dl_info", { id: started.id });
+        if (st.state === "done") {
+          const msg = `↓ ${st.path.split(/[\\/]/).pop()} → Downloads/Laido/${st.category} — ${hsize(st.got)} @ ${st.mbps.toFixed(1)} MB/s, ${started.conns} conn${started.conns > 1 ? "s" : ""}`;
+          addActivity(`download: ${msg}`);
+          return msg;
+        }
+        if (st.state === "error") return `✕ download failed: ${st.err}`;
+        if (st.state === "canceled") return `✕ download canceled`;
+      }
+    } catch (e) {
+      return `✕ ${String(e)}`;
+    }
+  }
+
   // verbs that can take either a card title or a bare url
   // read <title|url> — the page's extracted text (the AI's eyes)
   if (verb === "read" || verb === "get") {

@@ -35,6 +35,7 @@ fn get(id: &str) -> Result<Webview<Wry>, String> {
 #[tauri::command]
 pub async fn pv_open(
     app: AppHandle,
+    caller: tauri::WebviewWindow,
     id: String,
     url: String,
     x: i32,
@@ -86,7 +87,10 @@ pub async fn pv_open(
         }
     }
     let _guard = OpeningGuard(&OPENING, id.clone());
-    let win = app.get_window("main").ok_or("no main window")?;
+    /* engines belong to the window that asked — a popped-out note's
+     * browser card must glue its webview to ITS window, and every
+     * pv:* event goes back to that label, never always "main" */
+    let owner = caller.label().to_string();
     let id2 = id.clone();
     let app2 = app.clone();
     let builder = tauri::webview::WebviewBuilder::new(
@@ -101,17 +105,21 @@ pub async fn pv_open(
     /* hidden (parked) views keep playing media — note-switching must not
      * suspend a youtube/video the user is listening to */
     .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
-    .on_navigation(move |u| {
-        let _ = app2.emit_to("main", "pv:nav", json!({ "id": id2, "url": u.to_string() }));
-        true
+    .on_navigation({
+        let owner = owner.clone();
+        move |u| {
+            let _ = app2.emit_to(&owner, "pv:nav", json!({ "id": id2, "url": u.to_string() }));
+            true
+        }
     })
     .on_page_load({
         let id = id.clone();
         let app = app.clone();
+        let owner = owner.clone();
         move |_wv, payload| {
             let done = matches!(payload.event(), tauri::webview::PageLoadEvent::Finished);
             let _ = app.emit_to(
-                "main",
+                &owner,
                 "pv:load",
                 json!({ "id": id, "url": payload.url().to_string(), "done": done }),
             );
@@ -120,17 +128,19 @@ pub async fn pv_open(
     .on_document_title_changed({
         let id = id.clone();
         let app = app.clone();
+        let owner = owner.clone();
         move |_wv, title| {
-            let _ = app.emit_to("main", "pv:title", json!({ "id": id, "title": title }));
+            let _ = app.emit_to(&owner, "pv:title", json!({ "id": id, "title": title }));
         }
     })
     .on_new_window({
         let id = id.clone();
         let app = app.clone();
+        let owner = owner.clone();
         move |u, _feats| {
             // no tabs in a card — popups land in the same engine; the
             // frontend may veto (e.g. external schemes later if needed)
-            let _ = app.emit_to("main", "pv:pop", json!({ "id": id, "url": u.to_string() }));
+            let _ = app.emit_to(&owner, "pv:pop", json!({ "id": id, "url": u.to_string() }));
             if let Ok(wv) = get(&id) {
                 let _ = wv.navigate(u);
             }
@@ -140,6 +150,7 @@ pub async fn pv_open(
     .on_download({
         let id = id.clone();
         let app = app.clone();
+        let owner = owner.clone();
         move |_wv, event| {
             use tauri::webview::DownloadEvent;
             match event {
@@ -154,7 +165,7 @@ pub async fn pv_open(
                         }
                     }
                     let _ = app.emit_to(
-                        "main",
+                        &owner,
                         "pv:dl",
                         json!({ "id": id, "url": url.to_string(), "done": false, "ok": true }),
                     );
@@ -162,7 +173,7 @@ pub async fn pv_open(
                 }
                 DownloadEvent::Finished { url, path, success } => {
                     let _ = app.emit_to(
-                        "main",
+                        &owner,
                         "pv:dl",
                         json!({
                             "id": id, "url": url.to_string(), "done": true,
@@ -176,6 +187,9 @@ pub async fn pv_open(
             }
         }
     });
+    let win = app
+        .get_window(caller.label())
+        .ok_or("no window for caller")?;
     let wv = win
         .add_child(builder, pos, size)
         .map_err(|e| e.to_string())?;
@@ -359,12 +373,15 @@ pub async fn pv_memlevel(id: String, low: bool) -> Result<bool, String> {
     })
 }
 
-/// pull OS keyboard focus back into the main webview. A child view that the
-/// user clicked inside keeps HWND focus until something moves it — a bare
-/// DOM `.focus()` on a chat/url field then can't receive real keystrokes.
+/// pull OS keyboard focus back into the calling window's webview. A child
+/// view that the user clicked inside keeps HWND focus until something moves
+/// it — a bare DOM `.focus()` on a chat/url field then can't receive real
+/// keystrokes. (Caller-injected so popped windows focus their own webview.)
 #[tauri::command]
-pub async fn pv_focus_main(app: AppHandle) -> Result<(), String> {
-    let wv = app.get_webview("main").ok_or("no main webview")?;
+pub async fn pv_focus_main(app: AppHandle, caller: tauri::WebviewWindow) -> Result<(), String> {
+    let wv = app
+        .get_webview(caller.label())
+        .ok_or("no webview for this window")?;
     wv.set_focus().map_err(|e| e.to_string())
 }
 

@@ -53,7 +53,18 @@ async function saveSettings() {
 }
 
 async function init() {
-  const sticky = new URLSearchParams(location.search).get("sticky");
+  /* popouts must prove their webview attached before the source tab/card
+   * closes — build() succeeding only means an HWND exists; a silent
+   * attach failure sits at about:blank forever and would still have
+   * eaten the tab. init() running at all is the proof — emit immediately */
+  const ownLabel = window.__TAURI__.window.getCurrentWindow().label;
+  if (ownLabel.startsWith("note-") || ownLabel.startsWith("sticky-")) {
+    void window.__TAURI__.event.emit("pop:ready", ownLabel);
+  }
+  const sticky =
+    new URLSearchParams(location.search).get("sticky") ??
+    (window as unknown as { __POP_STICKY__?: string }).__POP_STICKY__ ??
+    null;
   if (sticky) {
     const { initStickyWindow } = await import("./stickywin.js");
     await initStickyWindow(sticky);

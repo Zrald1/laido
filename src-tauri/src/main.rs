@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod agent;
+mod download;
 mod extensions;
 mod llm;
 mod looprun;
@@ -45,6 +46,56 @@ fn pending_open() -> Option<String> {
         .lock()
         .unwrap()
         .take()
+}
+
+/* secondary windows must be built Rust-side: every WebView2 in this
+ * profile shares ONE environment, created with browser extensions
+ * enabled — a JS-built window (extensions off) mismatches the shared
+ * env and WebView2 refuses it with ERROR_INVALID_STATE. Here the env
+ * options match the main window's, and build() reports failure
+ * synchronously so the caller never drops a tab on a dead spawn.
+ * MUST be async: sync commands run on the main thread, and build()'s
+ * internal run_on_main_thread wait would deadlock the event loop
+ * (window HWND spawns, WebView2 completion never pumps → all IPC
+ * replies die). Same trap pageview.rs documents for add_child. */
+#[tauri::command]
+async fn pop_window(
+    app: tauri::AppHandle,
+    label: String,
+    url: String,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    centered: Option<bool>,
+    on_top: Option<bool>,
+    title: Option<String>,
+    init: Option<String>,
+) -> Result<(), String> {
+    let ext_dir = extensions::ext_root(&app);
+    /* ?query in WebviewUrl::App never resolves — the webview sits at
+     * about:blank. Boot state (which note/sticky to open) goes through
+     * an initialization script instead — window.__POP_* globals the
+     * frontend reads on init */
+    let mut b = tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App(url.into()))
+        .title(title.as_deref().unwrap_or("Laido"))
+        .inner_size(w, h)
+        .decorations(false)
+        .browser_extensions_enabled(true)
+        .extensions_path(&ext_dir);
+    if let Some(js) = init {
+        b = b.initialization_script(&js);
+    }
+    b = if centered == Some(true) {
+        b.center()
+    } else {
+        b.position(x, y)
+    };
+    if on_top == Some(true) {
+        b = b.always_on_top(true);
+    }
+    b.build().map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Windows: give .laido files the Laido icon and open-with behaviour.
@@ -130,6 +181,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            pop_window,
             vault::vault_list,
             vault::vault_dir,
             vault::reveal_note,
@@ -216,6 +268,11 @@ fn main() {
             pageview::pv_resume,
             pageview::pv_memlevel,
             pageview::pv_focus_main,
+            download::dl_start,
+            download::dl_info,
+            download::dl_list,
+            download::dl_cancel,
+            download::dl_reveal,
             extensions::ext_list,
             extensions::ext_install_path,
             extensions::ext_install_url,

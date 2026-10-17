@@ -62,6 +62,10 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   border: 1px solid transparent; border-bottom: 0;
   max-width: 190px; min-width: 110px; font-size: 12.5px; flex: none;
   margin-bottom: -1px;
+  /* the tabs strip is a window-drag region — without no-drag here the OS
+   * swallows tab pointer-downs as frame drags, so drag-out-to-new-window
+   * could never fire (the window just followed the cursor) */
+  -webkit-app-region: no-drag;
   transition: background-color .15s ease, color .15s ease, border-color .15s ease;
 }
 .tab:hover { background: var(--bg-3); color: var(--text); }
@@ -90,6 +94,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .tab-snd:hover { background: var(--bg-3); }
 #new-tab {
   align-self: flex-end; width: 28px; height: 28px; margin: 0 0 7px 4px;
+  -webkit-app-region: no-drag;
   border-radius: 8px; color: var(--muted); font-size: 16px; flex: none;
   display: inline-flex; align-items: center; justify-content: center;
   transition: background-color .15s ease, color .15s ease;

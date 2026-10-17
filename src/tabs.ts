@@ -148,11 +148,11 @@ async function select(name: string) {
   try {
     await loadNote(name);
   } catch {
-    await close(name);
+    await close(name, true);
   }
 }
 
-async function close(name: string) {
+async function close(name: string, soft = false) {
   if (typeof name !== "string" || !name) return;
   await save();
   const i = tabs.indexOf(name);
@@ -171,6 +171,18 @@ async function close(name: string) {
   }
   persist();
   render();
+  /* a popped-out note window exists for its tab — a USER closing the
+   * last one closes the window instead of leaving a chrome-only shell.
+   * soft closes (load failures) never pull the window down — a fresh
+   * window's IPC can still be spinning up, and a dead window hides it */
+  if (tabs.length === 0 && !soft) {
+    try {
+      const w = window.__TAURI__.window.getCurrentWindow();
+      if (w.label.startsWith("note-")) void w.close();
+    } catch {
+      /* not a popout */
+    }
+  }
 }
 
 /** bulk close — one save, one render. If the active tab is among the
@@ -304,7 +316,10 @@ document.addEventListener("nav:audio", (e) => {
 });
 
 export async function initTabs() {
-  const qp = new URLSearchParams(location.search).get("note");
+  const qp =
+    new URLSearchParams(location.search).get("note") ??
+    (window as unknown as { __POP_NOTE__?: string }).__POP_NOTE__ ??
+    null;
   if (qp) {
     tabs = [qp];
     active = qp;
@@ -336,6 +351,13 @@ export async function initTabs() {
   }
   tabs = repairNames(tabs, allNames);
   active = repairNames(active ? [active] : [], allNames)[0] ?? "";
+  /* a popped window's target is authoritative — vault_list can race the
+   * fresh window's IPC bridge and return empty, and repairNames would
+   * eat the only tab, leaving a dead chrome-only window */
+  if (qp) {
+    tabs = [qp];
+    active = qp;
+  }
   if (!qp) {
     // every launch opens on the instructions — close the tab and it returns
     if (!tabs.includes(GUIDE)) tabs.unshift(GUIDE);
@@ -350,7 +372,20 @@ export async function initTabs() {
       await loadNote(active);
       pushRecent(active);
     } catch {
-      await close(active);
+      /* a popped window's only tab was explicitly requested — the note
+       * exists, a failure here is the fresh IPC bridge still warming.
+       * One delayed retry before surrendering the tab */
+      if (qp && active === qp) {
+        await new Promise((r) => setTimeout(r, 400));
+        try {
+          await loadNote(active);
+          pushRecent(active);
+        } catch {
+          await close(active, true);
+        }
+      } else {
+        await close(active, true);
+      }
     }
   } else {
     clearNote();
@@ -414,23 +449,48 @@ export async function initTabs() {
 }
 
 async function popOutTab(name: string, e: PointerEvent) {
-  const api = window.__TAURI__.webviewWindow;
-  if (!api?.WebviewWindow) {
-    addActivity("✕ cannot open a new window in this build");
-    return;
-  }
+  /* the window is built Rust-side (pop_window): the shared WebView2 env
+   * requires identical options or creation is refused — the JS builder
+   * can't set them. build() returning only means an HWND exists — the
+   * tab leaves main only when the child emits pop:ready from its own
+   * booted init, so a silent webview failure can never eat the tab */
+  const label = `note-${Date.now().toString(36)}`;
   try {
-    new api.WebviewWindow(`note-${Date.now().toString(36)}`, {
-      url: `index.html?note=${encodeURIComponent(name)}`,
-      width: 900,
-      height: 640,
+    await invoke("pop_window", {
+      label,
+      url: "index.html",
+      init: `window.__POP_NOTE__=${JSON.stringify(name)}`,
       x: Math.round(window.screenX + Math.max(0, e.clientX - 150)),
       y: Math.round(window.screenY + Math.max(0, e.clientY - 20)),
-      decorations: false,
-      title: "Laido",
+      w: 900,
+      h: 640,
     });
   } catch (err) {
-    addActivity(`✕ ${String(err)}`);
+    addActivity(`✕ couldn't open a new window: ${String(err)}`);
+    return;
+  }
+  const ready = await new Promise<boolean>((resolve) => {
+    let un: (() => void) | undefined;
+    const done = (ok: boolean) => {
+      un?.();
+      resolve(ok);
+    };
+    void window.__TAURI__.event
+      .listen<string>("pop:ready", (ev) => {
+        if (ev.payload === label) done(true);
+      })
+      .then((u) => (un = u));
+    setTimeout(() => done(false), 10000);
+  });
+  if (!ready) {
+    addActivity(`✕ the new window didn't finish loading — tab kept`);
+    // the dead shell is clutter — close it if the handle resolves
+    try {
+      const w = await window.__TAURI__.webviewWindow?.WebviewWindow.getByLabel(label);
+      void w?.close();
+    } catch {
+      /* already gone */
+    }
     return;
   }
   await close(name);
