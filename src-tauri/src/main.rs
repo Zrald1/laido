@@ -445,6 +445,25 @@ fn main() {
         }
         eprintln!("{msg}");
     }));
+    /* GPU: WebView2 already composites on GPU by default, but Chromium
+     * silently falls back to software raster when a driver lands on its
+     * blocklist — that IS the "super lag" feel on marginal hardware.
+     * These flags force GPU rasterization anyway; the env var MERGES
+     * with wry's options-level args (unlike with_additional_browser_args,
+     * which would clobber wry's autoplay + msWebOOUI defaults), and we
+     * append so a dev's --remote-debugging-port on the same var survives */
+    #[cfg(windows)]
+    {
+        const GPU_ARGS: &str =
+            "--ignore-gpu-blocklist --enable-gpu-rasterization --enable-accelerated-2d-canvas";
+        let cur = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
+        if !cur.contains("--ignore-gpu-blocklist") {
+            std::env::set_var(
+                "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+                format!("{cur} {GPU_ARGS}").trim(),
+            );
+        }
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())

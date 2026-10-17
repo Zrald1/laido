@@ -9,6 +9,18 @@
 import { invoke } from "./ipc.js";
 import { stem } from "./match.js";
 import { baseMatch, buildPropMaps, type IndexLike } from "./base.js";
+import { probeGpu } from "./gpu.js";
+
+/* PixiJS is vendored, not an npm dep — lazy dynamic import so the 840KB
+ * only downloads when a note actually contains a graph card */
+type PixiApp = {
+  app: any;
+  PIXI: any;
+  edges: any;
+  dots: any[];
+  labels: any[];
+  builtFor: GNode[] | null;
+};
 
 const S = (v: unknown): string => typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : "";
 const DS = (v: string | undefined): string => { const s = v ?? ""; return /^(?:undefined|null|NaN|-?Infinity|[object [^]]*])$/.test(s) ? "" : s; };
@@ -61,8 +73,12 @@ export function wireGraph(card: HTMLElement) {
   card.dataset.graphWired = "1";
   const cv = card.querySelector<HTMLCanvasElement>(".graph-cv")!;
   if (!cv) return;
-  const ctx = cv.getContext("2d")!;
-  if (!ctx) return;
+  /* the 2d context is claimed lazily — a canvas locked to "2d" can never
+   * host Pixi's WebGL/WebGPU context, so while init is pending (or after
+   * it succeeds) paint() must not touch it */
+  let ctx: CanvasRenderingContext2D | null = null;
+  let pixiTried = false;
+  const ctx2d = () => (ctx ??= cv.getContext("2d"));
 
   let nodes: GNode[] = [];
   let edges: GEdge[] = [];
@@ -146,8 +162,10 @@ export function wireGraph(card: HTMLElement) {
   }
 
   function sim(cool: number) {
-    const w = cv.width / devicePixelRatio || 500;
-    const h = cv.height / devicePixelRatio || 380;
+    /* scene coords are CSS px in both renderers (2d scales via setTransform,
+     * Pixi via autoDensity) — clientWidth is correct under either owner */
+    const w = cv.clientWidth || 500;
+    const h = cv.clientHeight || 380;
     const cx = w / 2, cy = h / 2;
     const LINK = 90;
     for (let i = 0; i < nodes.length; i++) {
@@ -184,7 +202,116 @@ export function wireGraph(card: HTMLElement) {
     }
   }
 
+  /* ---- GPU painter: PixiJS renders the scene (WebGPU → WebGL2 auto
+   * fallback). Node movement becomes GPU transforms instead of a CPU
+   * raster repaint each frame; edges rebuild into one Graphics batch.
+   * Software-raster machines stay on the canvas2d path below — a GPU
+   * scene on SwiftShader would be SLOWER than plain DOM. ---- */
+  let px: PixiApp | null = null;
+  const initPixi = async () => {
+    try {
+      const g = await probeGpu();
+      if (g.tier === "software") return;
+      const PIXI: any = await import("./vendor/pixi.min.mjs");
+      const app = new PIXI.Application();
+      await app.init({
+        canvas: cv,
+        preference: "webgpu", // auto-falls back to WebGL2 inside Pixi
+        powerPreference: "high-performance",
+        backgroundAlpha: 0,
+        antialias: true,
+        resizeTo: cv.parentElement as HTMLElement,
+        resolution: devicePixelRatio || 1,
+        autoDensity: true,
+        autoStart: false,   // we render() on demand — same cadence as paint()
+        sharedTicker: false,
+      });
+      const edgesG = new PIXI.Graphics();
+      app.stage.addChild(edgesG);
+      px = { app, PIXI, edges: edgesG, dots: [], labels: [], builtFor: null };
+      /* card detach → the GPU context must die with it (contexts are
+       * scarce — ~16/page cap — a leaked app per deleted card would eat
+       * the budget fast) */
+      const reap = window.setInterval(() => {
+        if (card.isConnected) return;
+        window.clearInterval(reap);
+        try { px?.app.destroy(true, { children: true }); } catch { /* gone */ }
+        px = null;
+      }, 900);
+      paint();
+    } catch {
+      px = null; // init failed — canvas path keeps working
+    } finally {
+      pixiTried = true;
+      if (!px) ctx2d(); // fallback path may now claim the 2d context
+    }
+  };
+  void initPixi();
+
+  /* one Graphics circle + one Text label per node, rebuilt only when the
+   * nodes array itself is swapped (load/filter reset) — movement then
+   * costs a GPU transform per frame, not a re-raster */
+  const buildScene = () => {
+    if (!px || px.builtFor === nodes) return;
+    for (const d of px.dots) d.destroy();
+    for (const l of px.labels) l.destroy();
+    px.dots = [];
+    px.labels = [];
+    px.builtFor = nodes;
+    for (const n of nodes) {
+      const r = 3 + Math.min(6, n.deg);
+      const g = new px.PIXI.Graphics();
+      g.circle(0, 0, r).fill({ color: 0xb4aa9b, alpha: 0.75 });
+      g.position.set(n.x, n.y);
+      const t = new px.PIXI.Text({
+        text: stem(n.note),
+        style: { fontSize: 10.5, fill: 0xa09687, fontFamily: "system-ui" },
+      });
+      t.anchor.set(0.5, 1);
+      t.position.set(n.x, n.y - r - 4);
+      px.app.stage.addChild(g, t);
+      px.dots.push(g);
+      px.labels.push(t);
+    }
+  };
+
+  function paintPixi() {
+    if (!px) return;
+    buildScene();
+    const ac = accent();
+    px.edges.clear();
+    for (const e of edges) {
+      if (visible && (!visible.has(e.a) || !visible.has(e.b))) continue;
+      px.edges.moveTo(nodes[e.a].x, nodes[e.a].y).lineTo(nodes[e.b].x, nodes[e.b].y);
+    }
+    px.edges.stroke({ width: 1, color: 0x8c8278, alpha: 0.35 });
+    for (let i = 0; i < nodes.length; i++) {
+      const d = px.dots[i], l = px.labels[i];
+      if (!d) continue;
+      const show = !visible || visible.has(i);
+      const hot = i === hover || nodes[i].note === center;
+      d.visible = show;
+      d.position.set(nodes[i].x, nodes[i].y);
+      d.tint = hot ? ac : 0xffffff;
+      d.scale.set(i === hover ? 1.4 : 1);
+      if (l) {
+        l.visible = show;
+        l.position.set(nodes[i].x, nodes[i].y - (3 + Math.min(6, nodes[i].deg)) - 4);
+        l.style.fill = hot ? ac : 0xa09687;
+        l.scale.set(i === hover ? 1.1 : 1);
+      }
+    }
+    px.app.render();
+  }
+
   function paint() {
+    if (px) return paintPixi();
+    /* Pixi init still in flight — painting now would lock the canvas to
+     * 2d and make the GPU init fail for certain. Skip; init's finally
+     * repaints once the race settles. */
+    if (!pixiTried) return;
+    const ctx = ctx2d();
+    if (!ctx) return;
     const dpr = devicePixelRatio || 1;
     const w = cv.clientWidth, h = cv.clientHeight;
     if (cv.width !== w * dpr || cv.height !== h * dpr) { cv.width = w * dpr; cv.height = h * dpr; }

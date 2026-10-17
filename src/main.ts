@@ -4,6 +4,7 @@ import { initTabs } from "./tabs.js";
 import { initCalendar } from "./calendar.js";
 import { initLibrary, toggleLibrary } from "./rag.js";
 import { initFsPane } from "./fspane.js";
+import { probeGpu, reportGpu } from "./gpu.js";
 import { refreshStatus, testConnection, initAgent, initModels, syncModelSelects } from "./agent.js";
 import { initI18n, LANGS, setLang } from "./i18n.js";
 import { addActivity } from "./log.js";
@@ -124,6 +125,9 @@ async function init() {
 
   initRail();
   initFsPane();
+  /* GPU tier probe — one activity line so a software-raster machine is
+   * visible in the feed instead of silently slow */
+  void probeGpu().then(reportGpu);
   initEditor();
   initCalendar();
   initLibrary();
