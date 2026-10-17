@@ -206,7 +206,7 @@ export function initPalette() {
     { kind: "cmd", label: "new cards", sub: "flashcards deck on this note", run: () => { document.dispatchEvent(new CustomEvent("palette:cmd", { detail: "cards" })); } },
     { kind: "cmd", label: "new map", sub: "mind map on this note", run: () => { document.dispatchEvent(new CustomEvent("palette:cmd", { detail: "map" })); } },
     { kind: "cmd", label: "new graph", sub: "force-directed map of the vault's [[links]]", run: () => { document.dispatchEvent(new CustomEvent("palette:cmd", { detail: "graph" })); } },
-    { kind: "cmd", label: "new field", sub: "physics sim: wave / radio (Maxwell) / quantum double-slit", run: () => { document.dispatchEvent(new CustomEvent("palette:cmd", { detail: "field" })); } },
+
     { kind: "cmd", label: "new canvas", sub: "freeform drawing card on this note", run: () => { document.dispatchEvent(new CustomEvent("palette:cmd", { detail: "canvas" })); } },
     { kind: "cmd", label: "new base", sub: "table view over note properties (prop: filters)", run: () => { document.dispatchEvent(new CustomEvent("palette:cmd", { detail: "base" })); } },
     { kind: "cmd", label: "properties", sub: "frontmatter key: value panel on this note", run: () => { document.dispatchEvent(new CustomEvent("palette:cmd", { detail: "props" })); } },

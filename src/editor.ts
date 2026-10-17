@@ -12,7 +12,6 @@ import { buildCardsCard, wireCards } from "./cards.js";
 import { buildMapCard, wireMap } from "./map.js";
 import { buildAgendaCard, wireAgenda, speakDigest } from "./agenda.js";
 import { buildGraphCard, wireGraph } from "./graph.js";
-import { buildFieldCard, wireField } from "./field.js";
 import { buildCanvasCard, wireCanvas } from "./canvas.js";
 import { buildBaseCard, wireBase } from "./base.js";
 import { buildChartCard, wireChart } from "./chart.js";
@@ -164,7 +163,6 @@ const KIND_WIRE: Record<string, [string, (c: HTMLElement) => void]> = {
   map: ["mapWired", wireMap],
   agenda: ["agendaWired", wireAgenda],
   graph: ["graphWired", wireGraph],
-  field: ["fieldWired", wireField],
   canvas: ["canvasWired", wireCanvas],
   base: ["baseWired", wireBase],
   chart: ["chartWired", wireChart],
@@ -1472,11 +1470,6 @@ export function enhanceCard(card: HTMLElement) {
     const wrap = card.querySelector<HTMLElement>(".callout-body");
     if (wrap) wrap.contentEditable = "false";
     wireGraph(card);
-  }
-  if (card.dataset.kind === "field") {
-    const wrap = card.querySelector<HTMLElement>(".callout-body");
-    if (wrap) wrap.contentEditable = "false";
-    wireField(card);
   }
   if (card.dataset.kind === "canvas") {
     const wrap = card.querySelector<HTMLElement>(".callout-body");
@@ -3887,38 +3880,6 @@ export function spawnGraphCard(title: string, block?: HTMLElement): HTMLElement 
   return card;
 }
 
-export function spawnFieldCard(title: string, block?: HTMLElement): HTMLElement {
-  const card = buildFieldCard(title);
-  wireField(card);
-  enhanceCard(card);
-  if (block) {
-    const left = stripCommandText(block).replace(/[​﻿]/g, "").trim();
-    if (!left) block.remove();
-  }
-  const root = body();
-  root.append(card);
-  const vw = root.clientWidth;
-  const vh = root.clientHeight;
-  const cw = card.offsetWidth;
-  const ch = card.offsetHeight;
-  const x = Math.round(
-    Math.max(root.scrollLeft + 8, Math.min(root.scrollLeft + (vw - cw) / 2, root.scrollLeft + vw - cw - 8)),
-  );
-  const y = Math.round(
-    Math.max(root.scrollTop + 8, Math.min(root.scrollTop + (vh - ch) / 2, root.scrollTop + vh - ch - 8)),
-  );
-  card.classList.add("floating");
-  card.style.left = `${x}px`;
-  card.style.top = `${y}px`;
-  card.style.margin = "0";
-  writeState(card, { x, y, pinned: 0, z: genZ });
-  avoidOverlap(card);
-  scheduleFlow();
-  scheduleCardLinks();
-  dirty = true;
-  void save();
-  return card;
-}
 
 export function spawnCanvasCard(title: string, block?: HTMLElement): HTMLElement {
   const card = buildCanvasCard(title);
@@ -4593,8 +4554,6 @@ export function initEditor() {
     else if (kind === "map" || kind === "mindmap") spawnMapCard("map");
     else if (kind === "agenda" || kind === "due") spawnAgendaCard("agenda");
     else if (kind === "graph") spawnGraphCard("vault map");
-    else if (kind === "field" || kind === "wave" || kind === "physics" || kind === "sim")
-      spawnFieldCard("field");
     else if (kind === "canvas" || kind === "draw") spawnCanvasCard("canvas");
     else if (kind === "base" || kind === "view" || kind === "db") spawnBaseCard("base");
     else if (kind === "props") insertPropsPanel();
