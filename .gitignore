@@ -42,3 +42,6 @@ secrets*
 # local test harnesses & sweeps — not for the repo
 test/
 kernels/*/target/
+
+# backend lives outside the repo as a sibling — never commit it
+Backend/
