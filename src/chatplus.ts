@@ -253,6 +253,31 @@ export function wireChatTools(
     bar.addEventListener("drop", (e) => {
       e.preventDefault();
       bar.classList.remove("ct-drop");
+      /* rail file-browser drags carry the path, not a File — fs_attach
+       * reads it Rust-side (text inlines, images go as payloads, folders
+       * become listings) so any file type the OS has works here */
+      const laid = e.dataTransfer?.getData("application/x-laido-path");
+      if (laid) {
+        void (async () => {
+          try {
+            const a = await invoke<{
+              name: string; kind: string; text?: string; b64?: string; mime?: string;
+            }>("fs_attach", { path: laid });
+            const chip = document.createElement("span");
+            if (a.kind === "image" && a.b64) {
+              if (!allowImages) return err("pictures attach to widget chats, not this box");
+              addAtt({
+                kind: "image", name: a.name, b64: a.b64,
+                thumb: `data:${a.mime ?? "image/png"};base64,${a.b64}`, chip,
+              });
+            } else {
+              addAtt({ kind: "text", name: a.name, text: a.text ?? "", chip });
+            }
+          } catch (x) {
+            err(`attach failed: ${String(x)}`);
+          }
+        })();
+      }
       for (const f of Array.from(e.dataTransfer?.files ?? [])) void addFile(f);
     });
   }

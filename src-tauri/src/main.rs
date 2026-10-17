@@ -4,6 +4,7 @@ mod agent;
 mod dlhttp;
 mod download;
 mod extensions;
+mod fsnav;
 mod llm;
 mod looprun;
 mod pageview;
@@ -506,6 +507,10 @@ fn main() {
             vault::asset_data_url,
             vault::vault_update_callout,
             vault::import_note,
+            fsnav::fs_roots,
+            fsnav::fs_list,
+            fsnav::fs_attach,
+            fsnav::fs_open,
             vault::vault_read,
             vault::vault_write,
             vault::vault_create,

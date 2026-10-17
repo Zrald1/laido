@@ -3,6 +3,7 @@ import { initEditor } from "./editor.js";
 import { initTabs } from "./tabs.js";
 import { initCalendar } from "./calendar.js";
 import { initLibrary, toggleLibrary } from "./rag.js";
+import { initFsPane } from "./fspane.js";
 import { refreshStatus, testConnection, initAgent, initModels, syncModelSelects } from "./agent.js";
 import { initI18n, LANGS, setLang } from "./i18n.js";
 import { addActivity } from "./log.js";
@@ -17,7 +18,7 @@ function initRail() {
   const apply = (visible: boolean) => {
     document.body.classList.toggle("no-rail", !visible);
     btn.classList.toggle("on", visible);
-    btn.title = `${visible ? "Hide" : "Show"} agent panel (Ctrl+J)`;
+    btn.title = `${visible ? "Hide" : "Show"} file panel (Ctrl+J)`;
   };
   apply(localStorage.getItem("laido.rail") !== "0");
   btn.addEventListener("click", () => {
@@ -29,10 +30,19 @@ function initRail() {
   const edge = document.createElement("button");
   edge.className = "rail-tab";
   edge.tabIndex = -1;
-  edge.textContent = "agent";
-  edge.title = "Show agent panel (Ctrl+J)";
+  edge.textContent = "files";
+  edge.title = "Show file panel (Ctrl+J)";
   edge.addEventListener("click", () => btn.click());
   document.body.append(edge);
+  /* activity dock — the rail's old activity block lives at the bottom of
+   * the editor now; the tab flips it open/closed and it remembers */
+  const dock = $("#act-dock");
+  $("#act-dock-tab").addEventListener("click", () => {
+    const open = !dock.classList.contains("open");
+    dock.classList.toggle("open", open);
+    localStorage.setItem("laido.actdock", open ? "1" : "0");
+  });
+  dock.classList.toggle("open", localStorage.getItem("laido.actdock") !== "0");
 }
 
 async function saveSettings() {
@@ -113,6 +123,7 @@ async function init() {
   });
 
   initRail();
+  initFsPane();
   initEditor();
   initCalendar();
   initLibrary();

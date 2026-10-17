@@ -3020,3 +3020,68 @@ td.base-sumlab{color:var(--dim,#94897a);font-size:10.5px;border-top:1px solid va
 @keyframes sheetFlash { 0%,100% { box-shadow:0 0 0 0 rgba(122,92,46,0); } 30% { box-shadow:0 0 0 3px rgba(122,92,46,.55); } }
 .sheet-card.sheet-flash { animation:sheetFlash .9s ease; }
 .sheet-card { position:relative; }
+
+/* ---------- file pane (right rail) ---------- */
+#fspane h3 { margin: 0 0 10px; font-size: 11px; font-weight: 600; letter-spacing: .8px; text-transform: uppercase; color: var(--muted); }
+#fspane-roots { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; }
+.fsp-chip {
+  font-size: 11px; padding: 3px 9px; border-radius: 20px; color: var(--muted);
+  border: 1px solid var(--line); background: transparent; transition: all .12s ease;
+}
+.fsp-chip:hover { color: var(--accent); border-color: var(--accent); }
+.fsp-chip.on { color: #fff; background: var(--accent); border-color: var(--accent); }
+#fspane-nav { display: flex; align-items: center; gap: 5px; margin-bottom: 6px; }
+#fspane-crumb {
+  flex: 1; font-size: 10.5px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; direction: rtl; text-align: left;
+}
+#fspane-filter {
+  width: 100%; padding: 5px 8px; margin-bottom: 8px; font-size: 12px;
+  background: var(--bg-3); color: var(--text); border: 1px solid var(--line);
+  border-radius: 7px; outline: none;
+}
+#fspane-filter:focus { border-color: var(--accent); }
+#fspane-list { min-height: 80px; }
+.fsp-row {
+  display: flex; align-items: center; gap: 7px; padding: 4px 6px;
+  border-radius: 6px; cursor: grab; user-select: none;
+}
+.fsp-row:hover { background: var(--bg-3); }
+.fsp-row.dir { font-weight: 500; }
+.fsp-ico { flex: none; font-size: 12px; width: 17px; text-align: center; }
+.fsp-name {
+  flex: 1; font-size: 12px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fsp-meta { flex: none; font-size: 10px; color: var(--muted); }
+.fsp-empty { padding: 14px 6px; font-size: 11.5px; text-align: center; }
+.fsp-hint { margin-top: 12px; font-size: 10.5px; line-height: 1.5; }
+
+/* ---------- activity dock (bottom of editor) ---------- */
+#act-dock {
+  flex: none; border-top: 1px solid var(--line); background: var(--bg-2);
+  max-height: 34px; overflow: hidden; transition: max-height .22s ease;
+  display: flex; flex-direction: column;
+}
+#act-dock.open { max-height: 190px; }
+#act-dock-tab {
+  flex: none; align-self: flex-start; padding: 7px 16px 5px;
+  font: 600 10px/1.2 system-ui, "Segoe UI", sans-serif; letter-spacing: 1.4px;
+  text-transform: uppercase; color: var(--muted);
+}
+#act-dock-tab:hover { color: var(--accent); }
+#act-dock-body { flex: 1; min-height: 0; overflow-y: auto; padding: 0 16px 10px; }
+#act-dock:not(.open) #act-dock-body #activity .act-line { display: none; }
+#act-dock:not(.open) #act-dock-body #activity .act-line:first-child { display: block; }
+
+/* ---------- settings groups ---------- */
+.set-group { border: 1px solid var(--line); border-radius: 10px; margin-bottom: 14px; }
+.set-group > summary {
+  cursor: pointer; padding: 9px 12px; font-size: 11px; font-weight: 600;
+  letter-spacing: .8px; text-transform: uppercase; color: var(--muted);
+}
+.set-group-body { padding: 4px 12px 12px; }
+.set-group-body .rail-block { margin-bottom: 14px; }
+.set-group-body .rail-block:last-child { margin-bottom: 4px; }
+.rail-tools { display: flex; gap: 6px; margin-bottom: 8px; }
+.rail-tools input { flex: 1; padding: 5px 8px; background: var(--bg-3); color: var(--text); border: 1px solid var(--line); border-radius: 7px; font-size: 12px; outline: none; }

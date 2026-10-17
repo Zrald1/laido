@@ -95,37 +95,24 @@
       <div id="note-body" contenteditable="true" spellcheck="false"></div>
       <div id="linkstrip" class="empty" title="notes that link here / mention this note"></div>
       <div id="outline-rail" class="hidden" title="note outline"></div>
+      <div id="act-dock" class="open">
+        <button id="act-dock-tab" title="Activity — click to show/hide">activity</button>
+        <div id="act-dock-body"><div id="activity" class="muted">quiet&hellip;</div></div>
+      </div>
     </section>
 
     <aside id="rail">
-      <div class="rail-block">
-        <h3 data-i18n="rail.agent">Agent</h3>
-        <div id="api-status" class="status"><span class="dot warn"></span><span id="api-status-text">checking…</span></div>
-        <select id="model-quick" class="model-select" title="Agent model (main)"></select>
-      </div>
-      <div class="rail-block">
-        <h3>Wrap</h3>
-        <select id="model-rewrite" class="model-select" title="Rewriter model — interprets your question before searching files"></select>
-      </div>
-      <div class="rail-block">
-        <h3>OCR</h3>
-        <select id="model-ocr" class="model-select" title="OCR model — vision models only; reads scanned PDFs added to the Library"></select>
-      </div>
-      <div class="rail-block">
-        <h3 data-i18n="rail.schedule">Schedule</h3>
-        <div id="schedules" class="muted">none — write @schedule in a note</div>
-      </div>
-      <div class="rail-block">
-        <h3 data-i18n="rail.skills">Skills</h3>
-        <div class="rail-tools">
-          <input id="skill-search" type="search" autocomplete="off" placeholder="Search skills…" />
-          <button id="skill-new" class="ghost mini" title="New skill">+</button>
+      <div id="fspane">
+        <h3 data-i18n="rail.files">Files</h3>
+        <div id="fspane-roots"></div>
+        <div id="fspane-nav">
+          <button id="fspane-up" class="ghost mini" title="Up a folder">↑</button>
+          <span id="fspane-crumb" class="muted"></span>
+          <button id="fspane-reload" class="ghost mini" title="Refresh">⟳</button>
         </div>
-        <div id="skills" class="muted">none yet</div>
-      </div>
-      <div class="rail-block">
-        <h3 data-i18n="rail.activity">Activity</h3>
-        <div id="activity" class="muted">quiet&hellip;</div>
+        <input id="fspane-filter" type="search" autocomplete="off" placeholder="Filter…" />
+        <div id="fspane-list"></div>
+        <p class="fsp-hint muted">drag a file or folder into any AI chat to ask about it · double-click opens</p>
       </div>
     </aside>
   </main>
@@ -246,6 +233,36 @@
   <div id="settings-modal" class="modal hidden">
     <div class="modal-card">
       <h2>Settings</h2>
+      <details class="set-group" open>
+        <summary>Assistant panel</summary>
+        <div class="set-group-body">
+          <div class="rail-block">
+            <h3 data-i18n="rail.agent">Agent</h3>
+            <div id="api-status" class="status"><span class="dot warn"></span><span id="api-status-text">checking…</span></div>
+            <select id="model-quick" class="model-select" title="Agent model (main)"></select>
+          </div>
+          <div class="rail-block">
+            <h3>Wrap</h3>
+            <select id="model-rewrite" class="model-select" title="Rewriter model — interprets your question before searching files"></select>
+          </div>
+          <div class="rail-block">
+            <h3>OCR</h3>
+            <select id="model-ocr" class="model-select" title="OCR model — vision models only; reads scanned PDFs added to the Library"></select>
+          </div>
+          <div class="rail-block">
+            <h3 data-i18n="rail.schedule">Schedule</h3>
+            <div id="schedules" class="muted">none — write @schedule in a note</div>
+          </div>
+          <div class="rail-block">
+            <h3 data-i18n="rail.skills">Skills</h3>
+            <div class="rail-tools">
+              <input id="skill-search" type="search" autocomplete="off" placeholder="Search skills…" />
+              <button id="skill-new" class="ghost mini" title="New skill">+</button>
+            </div>
+            <div id="skills" class="muted">none yet</div>
+          </div>
+        </div>
+      </details>
       <label for="key-nebius">Nebius Token Factory API key</label>
       <input id="key-nebius" type="password" placeholder="from tokenfactory.nebius.com" autocomplete="off" />
       <label for="key-tavily">Tavily API key <span class="muted">(for @research)</span></label>
