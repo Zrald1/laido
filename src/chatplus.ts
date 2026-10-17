@@ -147,7 +147,9 @@ export function wireChatTools(
     input.style.height = "auto";
     const lh = parseFloat(getComputedStyle(input).lineHeight) || 18;
     const max = Math.round(lh * 6 + 8);
-    input.style.height = `${Math.min(input.scrollHeight, max)}px`;
+    /* hidden parents (closed chat pane) report scrollHeight ≈ 0 — without
+     * the floor the field collapses to a few px and stays clipped dead */
+    input.style.height = `${Math.min(Math.max(input.scrollHeight, lh + 6), max)}px`;
     input.style.overflowY = input.scrollHeight > max ? "auto" : "hidden";
   };
   if (input instanceof HTMLTextAreaElement) {

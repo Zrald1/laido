@@ -826,7 +826,11 @@ export function wireBrowser(card: HTMLElement) {
         delete w.__pvFs;
     }
     if (fsOn) setFs(false); // the old engine hides — it can't stay fullscreen
+    /* lastBox/lastVis remember what was posted for the OLD engine — this
+     * tab's engine was hidden as a sibling, so the vis cache must reset
+     * or pv_visible(true) never reaches it and the page stays blank */
     lastBox = "";
+    lastVis = "";
     pvSync();
     if (t.bv) return `tab ${i + 1}`;
     if (t.url) return nav(t.url, false);
@@ -1201,6 +1205,11 @@ export function wireBrowser(card: HTMLElement) {
       cur().bv = genBv();
       bvId = cur().bv;
       card.dataset.bv = bvId;
+      /* fresh engine — clear the caches that tracked the previous bvId
+       * or the first pv_visible/pv_bounds can be skipped as "unchanged"
+       * and the new surface stays hidden at the default position */
+      lastBox = "";
+      lastVis = "";
       claimEng(bvId);
     }
     // the real engine opens immediately — XFO/walls can't touch it; the
@@ -1888,6 +1897,14 @@ export function wireBrowser(card: HTMLElement) {
     bar.querySelector('[data-a="chat"]')?.classList.toggle("on", on);
     lastBox = "";
     pvSync();
+    /* the input row sits at the bottom of a pane as tall as the view —
+     * on a card that reaches past the note's scroll window the field can
+     * end up clipped dead at the edge (clicks hit nothing). Pull it into
+     * the visible band when the panel opens */
+    if (on)
+      requestAnimationFrame(() =>
+        chatIn?.scrollIntoView({ block: "nearest", behavior: "smooth" }),
+      );
   };
   card.querySelector<HTMLElement>(".bc-x")?.addEventListener("click", () => setChatOpen(false));
   if (card.dataset.chatopen === "0") setChatOpen(false);
