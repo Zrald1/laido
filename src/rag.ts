@@ -1,5 +1,6 @@
 import { $, invoke } from "./ipc.js";
 import { addActivity } from "./log.js";
+import { wireChatTools } from "./chatplus.js";
 import { currentNote } from "./editor.js";
 
 interface RagInfo {
@@ -56,6 +57,12 @@ export async function refreshLibrary() {
       input.placeholder = "Ask this file…";
       input.spellcheck = false;
       ask.append(input);
+      /* 📎 + 🎙 — text files inline into the query; pictures go to the
+       * widget chats (rag_ask is a text-retrieval lane) */
+      const tools = wireChatTools(input, {
+        images: false,
+        onErr: (m) => addActivity(`✕ ${m}`),
+      });
       row.addEventListener("click", (e) => {
         const t = e.target as HTMLElement;
         if (t.closest(".lib-del") || t.closest(".lib-ask")) return;
@@ -71,11 +78,12 @@ export async function refreshLibrary() {
           return;
         }
         if (e.key !== "Enter") return;
-        const q = input.value.trim();
-        if (!q) return;
+        const send = tools.collect(input.value.trim());
+        if (!send.prompt.trim()) return;
+        tools.reset();
         input.value = "";
         ask.classList.add("hidden");
-        void askLibrary(d.slug, d.name, q);
+        void askLibrary(d.slug, d.name, send.prompt);
       });
       row.append(name, meta, del, ask);
       el.append(row);

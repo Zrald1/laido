@@ -15,6 +15,7 @@
  *  value; focusing one reveals the formula (raw rides in data-raw). */
 
 import { invoke, refocusField } from "./ipc.js";
+import { wireChatTools, type ChatImage } from "./chatplus.js";
 import { tryCardUndo } from "./cardundo.js";
 
 const S = (v: unknown): string => typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : "";
@@ -4992,6 +4993,11 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
     `</div>`;
   const chatIn = chat.querySelector<HTMLInputElement>(".sheet-chat-in")!;
   const chatLog = chat.querySelector<HTMLElement>(".sheet-chat-log")!;
+  /* 📎 + 🎙 shared chat tools — screenshots of a table become vision asks,
+   * a spoken "sum column B" lands in the field; errors go to the dock */
+  const chatTools = wireChatTools(chatIn, {
+    onErr: (m) => chatAdd("err", m),
+  });
   const chatHist: { role: string; content: string }[] = [];
   /* the thread persists on the card itself — a note save re-renders the
    * callout DOM, and without this the whole conversation would evaporate.
@@ -5074,7 +5080,7 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
       : e.spawnGraphCard(title || "vault map");
     return `spawned ${kind} card — "${c.dataset.topic ?? c.dataset.title ?? title}"`;
   };
-  const askSheet = async (q: string) => {
+  const askSheet = async (q: string, images: ChatImage[] = []) => {
     chatIn.disabled = true;
     const pend = chatAdd("wait", "…");
     const title = card.dataset.topic ?? "sheet";
@@ -5095,6 +5101,7 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
         others,
         model: null,
         persona: null,
+        images,
       });
       chatHist.push({ role: "user", content: q });
       if (r.text.trim()) chatHist.push({ role: "assistant", content: r.text });
@@ -5181,11 +5188,14 @@ export function wireSheet(card: HTMLElement, seed?: { rows: number; cols: number
   };
   chatIn.addEventListener("keydown", (e) => {
     e.stopPropagation();
-    if (e.key === "Enter" && chatIn.value.trim()) {
-      const q = chatIn.value.trim();
+    if (e.key === "Enter" && (chatIn.value.trim() || chatTools.hasPending())) {
+      const typed = chatIn.value.trim();
+      const send = chatTools.collect(typed);
+      const names = chatTools.names();
+      chatTools.reset();
       chatIn.value = "";
-      chatAdd("user", q);
-      void askSheet(q);
+      chatAdd("user", typed || `📎 ${names.join(", ")}`);
+      void askSheet(send.prompt, send.images);
     }
   });
   chatIn.addEventListener("mousedown", (e) => e.stopPropagation());

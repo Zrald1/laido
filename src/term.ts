@@ -7,6 +7,7 @@ import { todoApi } from "./todo.js";
 import { spawnTodoCard, spawnBrowserCard } from "./editor.js";
 import { browserApi } from "./browser.js";
 import { clipToDaily } from "./links.js";
+import { wireChatTools, type ChatImage } from "./chatplus.js";
 import { cardsApi } from "./cards.js";
 import { chartApi, CHART_TYPES } from "./chart.js";
 import { spawnChartCard } from "./editor.js";
@@ -2416,7 +2417,7 @@ export function wireTerminal(card: HTMLElement) {
   };
 
 
-  const aiTurn = async (text: string, auto = false): Promise<string> => {
+  const aiTurn = async (text: string, auto = false, images: ChatImage[] = []): Promise<string> => {
     if (busy && !auto) return "";
     busy = true;
     steps++;
@@ -2430,6 +2431,7 @@ export function wireTerminal(card: HTMLElement) {
         others: othersDigest(),
         model: card.dataset.model || null,
         persona: card.dataset.persona || null,
+        images,
       });
       pend.remove();
       for (const l of r.text.split("\n").filter((l) => l.trim() !== "")) line("ai", l);
@@ -2910,73 +2912,10 @@ export function wireTerminal(card: HTMLElement) {
     head.append(sel);
   }
 
-  // 🎙 voice input — record-then-transcribe via AssemblyAI (voice_start /
-  // voice_stop, the same commands the sheet mic uses). The transcript lands
-  // in the input for review; Enter sends it. One recording at a time app-
-  // wide — voice_start errors cleanly if the sheet mic is already active.
-  const mic = card.querySelector<HTMLButtonElement>(".term-mic");
-  mic?.classList.remove("rec"); // a clone may carry the parent's visual state
-  let recording = false;
-  let meterTimer = 0;
-  // the live level strip under the input — five bars riding the real mic
-  // RMS (voice_level) while recording, so the user sees it's listening
-  const vu = document.createElement("div");
-  vu.className = "term-vu hidden";
-  for (let i = 0; i < 5; i++) vu.append(document.createElement("i"));
-  card.querySelector(".term-input-row")?.after(vu);
-  const bars = Array.from(vu.querySelectorAll<HTMLElement>("i"));
-  const startMeter = () => {
-    vu.classList.remove("hidden");
-    meterTimer = window.setInterval(async () => {
-      let v = 0;
-      try {
-        v = await invoke<number>("voice_level");
-      } catch {
-        /* mic gone — bars fall flat */
-      }
-      const amp = Math.min(1, v * 7);
-      const now = performance.now() / 130;
-      bars.forEach((b, i) => {
-        b.style.height = `${3 + amp * (7 + 4 * Math.sin(now + i * 1.35))}px`;
-      });
-    }, 120);
-  };
-  const stopMeter = () => {
-    window.clearInterval(meterTimer);
-    vu.classList.add("hidden");
-  };
-  mic?.addEventListener("click", async (e) => {
-    e.stopPropagation();
-    if (!recording) {
-      try {
-        await invoke("voice_start");
-        recording = true;
-        mic.classList.add("rec");
-        mic.title = "Recording — click to stop and transcribe";
-        startMeter();
-      } catch (err) {
-        line("err", `✕ mic: ${String(err)}`);
-      }
-      return;
-    }
-    recording = false;
-    stopMeter();
-    mic.classList.remove("rec");
-    mic.title = "Voice — click to record, click again to transcribe";
-    const pend = line("pending", "transcribing…");
-    try {
-      const text = (await invoke<string>("voice_stop")).trim();
-      pend.remove();
-      if (text) {
-        input.value = (input.value ? `${input.value} ` : "") + text;
-        input.focus();
-      } else {
-        line("err", "nothing heard — try again closer to the mic");
-      }
-    } catch (err) {
-      pend.remove();
-      line("err", `✕ ${String(err)}`);
-    }
+  // 📎 + 🎙 — shared chat tools (attach/paste/drop images+files, voice
+  // record→transcribe). Errors land as log lines; chips show under the bar.
+  const chatTools = wireChatTools(input, {
+    onErr: (m) => line("err", m),
   });
 
   sessions.set(card, { card, line, aiTurn });
@@ -2984,10 +2923,10 @@ export function wireTerminal(card: HTMLElement) {
     e.stopPropagation();
     if (e.key !== "Enter" || e.isComposing) return;
     const text = input.value.trim();
-    if (!text) return;
+    if (!text && !chatTools.hasPending()) return;
     input.value = "";
     // the user's own line always shows — every path, command or chat
-    if (!text.startsWith("!")) line("ask", text);
+    if (!text.startsWith("!")) line("ask", text || `📎 ${chatTools.names().join(", ")}`);
     if (text.startsWith("!")) void runShell(text.slice(1).trim());
     else if (/^skill:/i.test(text)) void saveSkill(text.replace(/^skill:\s*/i, ""));
     else if (/^spawn\b/i.test(text)) {
@@ -3014,6 +2953,10 @@ export function wireTerminal(card: HTMLElement) {
         deliver(card, m[1], m[2]);
       } else line("err", "use: send <chat id> <message>");
     } else if (LAIDO_RE.test(text)) void runLaido(text);
-    else void aiTurn(text);
+    else {
+      const send = chatTools.collect(text);
+      chatTools.reset();
+      void aiTurn(send.prompt, false, send.images);
+    }
   });
 }

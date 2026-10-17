@@ -3485,7 +3485,7 @@ export function spawnTerminalCard(
   card.innerHTML =
     `<div class="callout-head"><span class="callout-title">${card.dataset.topic} ${chatId}${persona ? ` · ${persona}` : ""}</span></div>` +
     `<div class="term-log"></div>` +
-    `<div class="term-input-row"><span class="term-prompt">›</span><input class="term-input" placeholder="ask anything — or ! command" spellcheck="false" autocomplete="off"/><button class="term-mic" title="Voice — click to record, click again to stop and transcribe">🎙</button></div>`;
+    `<div class="term-input-row"><span class="term-prompt">›</span><input class="term-input" placeholder="ask anything — or ! command" spellcheck="false" autocomplete="off"/></div>`;
   enhanceCard(card);
   const log = card.querySelector<HTMLElement>(".term-log");
   if (log) log.contentEditable = "false";

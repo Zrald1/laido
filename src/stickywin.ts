@@ -148,7 +148,7 @@ export async function initStickyWindow(spec: string) {
     widget.innerHTML =
       `<div class="callout-head"><span class="callout-title">${widget.dataset.topic}</span></div>` +
       `<div class="term-log"></div>` +
-      `<div class="term-input-row"><span class="term-prompt">›</span><input class="term-input" placeholder="ask anything — or ! command" spellcheck="false" autocomplete="off"/><button class="term-mic" title="Voice — click to record, click again to stop and transcribe">🎙</button></div>`;
+      `<div class="term-input-row"><span class="term-prompt">›</span><input class="term-input" placeholder="ask anything — or ! command" spellcheck="false" autocomplete="off"/></div>`;
     // a sibling of the sticky card — its [!terminal] block then survives the
     // save/reload round-trip as its own card
     el.append(widget);

@@ -266,7 +266,7 @@ function termCallout(block: string[]): string {
     ` data-chat-id="${attr(chatId)}" data-model="${attr(model)}" data-persona="${attr(persona ?? "")}" data-md="${attr(raw)}">` +
     `<div class="callout-head"><span class="callout-title">${esc(label)}</span></div>` +
     `<div class="term-log">${rows.join("")}</div>` +
-    `<div class="term-input-row"><span class="term-prompt">›</span><input class="term-input" placeholder="ask anything — or ! command" spellcheck="false" autocomplete="off"/><button class="term-mic" title="Voice — click to record, click again to stop and transcribe">🎙</button></div>` +
+    `<div class="term-input-row"><span class="term-prompt">›</span><input class="term-input" placeholder="ask anything — or ! command" spellcheck="false" autocomplete="off"/></div>` +
     `</div>`
   );
 }

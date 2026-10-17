@@ -475,24 +475,41 @@ body.sticky-mode .term-card { width: auto; }
   flex: 1; min-width: 0; border: 0; outline: none; background: transparent;
   font-family: var(--note-font); font-size: 13.5px; color: var(--text);
 }
-/* 🎙 per-widget voice input — record-then-transcribe via AssemblyAI */
-.term-mic {
-  flex: none; border: 0; background: transparent; cursor: pointer;
-  font-size: 15px; padding: 0 3px; opacity: .7; line-height: 1;
+/* chat+ shared tools — 📎 attach + 🎙 voice on every AI chat input */
+.ct-tools { flex: none; display: inline-flex; align-items: center; gap: 1px; }
+.ct-btn {
+  border: 0; background: transparent; cursor: pointer;
+  font-size: 14px; padding: 0 3px; opacity: .65; line-height: 1;
 }
-.term-mic:hover { opacity: 1; }
-.term-mic.rec { opacity: 1; color: var(--warn); animation: term-mic-pulse 1.1s ease-in-out infinite; }
+.ct-btn:hover { opacity: 1; }
+.ct-btn:disabled { opacity: .45; cursor: default; }
+.ct-mic.rec { opacity: 1; color: var(--warn); animation: term-mic-pulse 1.1s ease-in-out infinite; }
 @keyframes term-mic-pulse { 50% { opacity: .4; transform: scale(1.15); } }
-/* live mic level strip — bars ride the real RMS while recording */
-.term-vu {
-  display: flex; align-items: flex-end; gap: 2px;
-  height: 14px; padding: 3px 10px 5px;
+/* attachment chips + VU live in a strip under the input row */
+.ct-strip {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
+  padding: 4px 2px 2px;
 }
-.term-vu i {
+.ct-strip.hidden { display: none; }
+.ct-att {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 150px;
+  padding: 1px 5px 1px 2px; border: 1px solid var(--line); border-radius: 9px;
+  background: var(--bg-2); font-size: 10.5px; color: var(--text-dim);
+}
+.ct-att img { width: 16px; height: 16px; border-radius: 5px; object-fit: cover; }
+.ct-att i { font-style: normal; font-size: 11px; color: var(--accent); }
+.ct-att-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ct-att b { cursor: pointer; font-weight: 700; color: var(--text-dim); padding: 0 1px; }
+.ct-att b:hover { color: var(--warn); }
+/* drag-over state on the input row */
+.ct-drop { outline: 1.5px dashed var(--accent); outline-offset: 2px; border-radius: 6px; }
+/* live mic level — bars ride the real RMS while recording */
+.ct-vu { display: none; align-items: flex-end; gap: 2px; height: 14px; padding: 0 4px; }
+.ct-vu.on { display: flex; }
+.ct-vu i {
   width: 3px; height: 3px; border-radius: 2px; background: var(--warn);
   transition: height .1s linear;
 }
-.term-vu.hidden { display: none; }
 /* per-chat model selector — top center of the widget head */
 .term-model-select {
   position: absolute; left: 50%; top: 6px; transform: translateX(-50%);

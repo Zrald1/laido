@@ -327,9 +327,36 @@ pub async fn term_ai(
     others: Option<String>,
     model: Option<String>,
     persona: Option<String>,
+    images: Option<Vec<serde_json::Value>>,
 ) -> Result<TermAi, String> {
     let s = crate::state::load_settings();
-    let chosen = model.filter(|m| !m.trim().is_empty()).unwrap_or_else(|| s.model_main.clone());
+    // attached pictures ride the last user message as multimodal content —
+    // the configured vision model (Settings → OCR) reads them, else the
+    // chat model itself when it's already vision-capable
+    let imgs: Vec<serde_json::Value> = images
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|v| v["b64"].as_str().map(|b| !b.is_empty()).unwrap_or(false))
+        .take(4)
+        .map(|v| {
+            json!({
+                "type": "image_url",
+                "image_url": { "url": format!(
+                    "data:{};base64,{}",
+                    v["mime"].as_str().unwrap_or("image/png"),
+                    v["b64"].as_str().unwrap_or("")
+                ) }
+            })
+        })
+        .collect();
+    let chosen = model
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| s.model_main.clone());
+    let chosen = if !imgs.is_empty() && !s.model_ocr.trim().is_empty() {
+        s.model_ocr.clone()
+    } else {
+        chosen
+    };
     let mut sys = TERM_SYSTEM.to_string();
     // a persona = a vault note `persona-<name>` — its body joins the
     // system prompt so the chat adopts the role (Cursor-rules-style,
@@ -398,7 +425,13 @@ pub async fn term_ai(
             "content": content,
         }));
     }
-    messages.push(json!({ "role": "user", "content": prompt }));
+    if imgs.is_empty() {
+        messages.push(json!({ "role": "user", "content": prompt }));
+    } else {
+        let mut parts = vec![json!({ "type": "text", "text": prompt })];
+        parts.extend(imgs);
+        messages.push(json!({ "role": "user", "content": parts }));
+    }
     // 4096: a reply is text plus tool fences — 2048 truncated often enough
     // that a half-written ```sheet fence arrived as raw text (looking like
     // the AI described the widget instead of creating it)

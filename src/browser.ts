@@ -11,6 +11,7 @@
  * digest, and ` ```browser ` fences drive it via browserApi. */
 
 import { invoke, refocusField } from "./ipc.js";
+import { wireChatTools, type ChatImage } from "./chatplus.js";
 import { addActivity } from "./log.js";
 
 const S = (v: unknown): string => typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : "";
@@ -1814,6 +1815,11 @@ export function wireBrowser(card: HTMLElement) {
   card.querySelector<HTMLElement>(".bc-x")?.addEventListener("click", () => setChatOpen(false));
   if (card.dataset.chatopen === "0") setChatOpen(false);
   else setChatOpen(true);
+  /* 📎 + 🎙 shared chat tools — a pasted screenshot rides the ask as a
+   * vision message; voice transcribes into the field. Errors → the log. */
+  const chatTools = chatIn
+    ? wireChatTools(chatIn, { onErr: (m) => chatAdd("err", m) })
+    : { collect: (p: string) => ({ prompt: p, images: [] as ChatImage[] }), hasPending: () => false, names: () => [] as string[], reset: () => {} };
 
   /* a compact live digest of the page as the user sees it — read through
    * the real DOM so post-js content (ai overviews, rendered tables) is
@@ -1843,7 +1849,7 @@ export function wireBrowser(card: HTMLElement) {
       return t ? `page text (fetch lane): ${t}` : "";
     }
   };
-  const askBrowser = async (q: string) => {
+  const askBrowser = async (q: string, images: ChatImage[] = []) => {
     if (!chatIn) return;
     asking = true;
     idlePlaceholder ??= chatIn.placeholder;
@@ -1910,7 +1916,7 @@ export function wireBrowser(card: HTMLElement) {
       };
       const r = await invoke<BrowserAi>("term_ai", {
         prompt: q, history: chatHist.slice(-8), others,
-        model: null, persona: null,
+        model: null, persona: null, images,
       });
       chatHist.push({ role: "user", content: q });
       if (r.text.trim()) chatHist.push({ role: "assistant", content: r.text });
@@ -1968,10 +1974,13 @@ export function wireBrowser(card: HTMLElement) {
       e.preventDefault();
       if (asking) return; // one in-flight ask — the field stays editable
       const q = chatIn.value.trim();
-      if (!q) return;
+      if (!q && !chatTools.hasPending()) return;
+      const send = chatTools.collect(q);
+      const names = chatTools.names();
+      chatTools.reset();
       chatIn.value = "";
-      chatAdd("user", q);
-      void askBrowser(q);
+      chatAdd("user", q || `📎 ${names.join(", ")}`);
+      void askBrowser(send.prompt, send.images);
     }
   });
   chatIn?.addEventListener("pointerdown", (e) => e.stopPropagation());
