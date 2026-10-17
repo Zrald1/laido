@@ -205,7 +205,23 @@ pub async fn pv_bounds(id: String, x: i32, y: i32, w: u32, h: u32) -> Result<(),
 pub async fn pv_visible(id: String, on: bool) -> Result<(), String> {
     let wv = get(&id)?;
     if on {
-        wv.show().map_err(|e| e.to_string())
+        wv.show().map_err(|e| e.to_string())?;
+        /* WebView2Feedback#5673 — a view shown after being hidden can hold
+         * blank/stale pixels until an unrelated repaint lands. Re-putting
+         * its bounds (1px shimmy + restore in the same main-thread call)
+         * forces WM_SIZE and the compositor presents immediately. */
+        com_call(&id, |pw| unsafe {
+            let mut r = windows::Win32::Foundation::RECT::default();
+            pw.controller()
+                .Bounds(&mut r)
+                .map_err(|e| e.to_string())?;
+            let mut shim = r;
+            shim.bottom -= 1;
+            pw.controller().SetBounds(shim).ok();
+            pw.controller().SetBounds(r).ok();
+            Ok(())
+        })?;
+        Ok(())
     } else {
         wv.hide().map_err(|e| e.to_string())
     }
@@ -260,15 +276,28 @@ fn com_call<T: Send + 'static>(
 /// frontend only calls this on quiet tabs.
 #[tauri::command]
 pub async fn pv_suspend(id: String) -> Result<bool, String> {
-    com_call(&id, |pw| unsafe {
+    let armed = com_call(&id, |pw| unsafe {
         use webview2_com::Microsoft::Web::WebView2::Win32::*;
         use windows::core::Interface;
+        /* NEVER touch a visible engine — a stale suspend racing a tab
+         * re-activation would hide+freeze the live page (the blink). The
+         * frontend posts pv_visible(false) before calling us, so a legit
+         * request finds the controller already hidden; a raced one finds
+         * it visible and is refused. */
+        let mut vis = windows::core::BOOL::default();
+        pw.controller().IsVisible(&mut vis).map_err(|e| e.to_string())?;
+        if vis.as_bool() {
+            return Ok(false);
+        }
         pw.controller().SetIsVisible(false).ok();
         let core = pw.controller().CoreWebView2().map_err(|e| e.to_string())?;
         let wv3 = core.cast::<ICoreWebView2_3>().map_err(|e| e.to_string())?;
         wv3.TrySuspend(None).map_err(|e| e.to_string())?;
-        Ok(())
+        Ok(true)
     })?;
+    if !armed {
+        return Ok(false);
+    }
     // settle loop — freeze typically lands within a few hundred ms
     for _ in 0..8 {
         tokio::time::sleep(std::time::Duration::from_millis(120)).await;

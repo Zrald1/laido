@@ -286,14 +286,24 @@ const suspendedPv = new Set<string>();
  * The cached audioPv flag lags up to a poll-tick — a video that started
  * a second ago reads quiet and would get frozen mid-play — so we take a
  * fresh media sample at hide time before committing the suspend. */
-const sleepEngine = (id: string) => {
+const sleepEngine = (id: string, stillHidden: () => boolean) => {
   if (suspendedPv.has(id)) return; // already frozen — an eval would just stall
   const commit = (playing: boolean) => {
+    /* the media sample took tens of ms — a tab switch in that window made
+     * this engine ACTIVE again. Suspending it now hides+freezes the live
+     * page (the blink). Re-check before committing; the Rust side refuses
+     * visible engines too, so a stale call is a no-op either way */
+    if (!stillHidden()) return;
     if (playing) {
       void invoke("pv_memlevel", { id, low: true }).catch(() => {});
       return;
     }
-    void invoke<boolean>("pv_suspend", { id })
+    /* pv_visible travels wry's queue while pv_suspend posts through
+     * with_webview — different channels, so a fire-and-forget hide does
+     * NOT reliably land first. TrySuspend (and our visible-engine guard)
+     * requires the controller already hidden, so chain it explicitly. */
+    void invoke("pv_visible", { id, on: false })
+      .then(() => invoke<boolean>("pv_suspend", { id }))
       .then((ok) => { if (ok) suspendedPv.add(id); })
       .catch(() => {});
   };
@@ -405,7 +415,11 @@ const startAudioPoll = () => {
       } catch { /* tab state optional — dataset.bv still covers single-tab cards */ }
     }
     for (const id of ids) {
-      if (claimed.has(id)) { unclaimedTicks.delete(id); continue; }
+      /* dataset.tabs serializes a beat after claimEng — an engine mid-
+       * wire-up looks unclaimed, gets hidden, pvSync re-shows it: the
+       * 140ms hide/show fight the user sees as blinking. engineNote is
+       * written the moment the card claims it, so it covers the gap */
+      if (claimed.has(id) || engineNote.has(id)) { unclaimedTicks.delete(id); continue; }
       const n = (unclaimedTicks.get(id) ?? 0) + 1;
       unclaimedTicks.set(id, n);
       if (n >= 2) void invoke("pv_visible", { id, on: false }).catch(() => {});
@@ -645,13 +659,27 @@ export function wireBrowser(card: HTMLElement) {
   /* pushState/SPA navigations never fire pv:nav — stamp the engine's
    * REAL location into the tab that OWNS that engine (a background tab's
    * autoplay nav belongs to it, not the active tab). Mirrors pv:nav. */
+  /* engines that answered about:blank while their tab holds a real url —
+   * stranded by an interrupted open/park race. activateTab re-navs them
+   * instead of trusting the bv, and a real page load clears the mark */
+  const blankEng = new Set<string>();
   const liveTrack = (id: string, u: string, title: string) => {
     const ti = tabs.findIndex((t) => t.bv === id);
     if (ti < 0) return;
     const t = tabs[ti];
     const act = ti === active;
     if (act && (!liveOn || Date.now() - switchAt < 900)) return;
-    if (u && u !== "about:blank" && u !== t.url) {
+    if (u === "about:blank") {
+      if (t.url) {
+        blankEng.add(id);
+        /* the LIVE engine stranded on blank is the visible white flash —
+         * send it home now; background ones re-nav on activation */
+        if (act) void nav(t.url, false).then(say).catch(() => {});
+      }
+      return;
+    }
+    blankEng.delete(id);
+    if (u && u !== t.url) {
       t.url = u;
       if (t.hist[t.hi] !== u) {
         t.hist.splice(t.hi + 1);
@@ -688,7 +716,7 @@ export function wireBrowser(card: HTMLElement) {
     for (const t of tabs)
       if (t.bv && t !== cur()) {
         void invoke("pv_visible", { id: t.bv, on: false }).catch(() => {});
-        sleepEngine(t.bv);
+        sleepEngine(t.bv, () => t !== cur());
       }
   };
   /* engine budget: an idle webview costs ~80MB — beyond the cap, close
@@ -877,7 +905,7 @@ export function wireBrowser(card: HTMLElement) {
     lastBox = "";
     lastVis = "";
     pvSync();
-    if (t.bv) return `tab ${i + 1}`;
+    if (t.bv && !blankEng.has(t.bv)) return `tab ${i + 1}`;
     if (t.url) return nav(t.url, false);
     say("new tab");
     refocusField(urlIn);
@@ -1018,7 +1046,12 @@ export function wireBrowser(card: HTMLElement) {
      * IPC the HWND has to chew through while it's trying to keep up */
     const boxKey = `${Math.round(ix)},${Math.round(iy)},${Math.round(iw)},${Math.round(ih)},${d}`;
     const visKey = `${vis}`;
-    if (boxKey === lastBox && visKey === lastVis) return;
+    /* self-heal: a stray hide (raced suspend, sweep, park) leaves truth
+     * false while lastVis says true — the dedup would then NEVER repost
+     * and the page stays dead. If the live engine is marked suspended it
+     * is by definition not showing, so force the branch. */
+    const needVis = visKey !== lastVis || (vis && suspendedPv.has(bvId));
+    if (boxKey === lastBox && !needVis) return;
     if (boxKey !== lastBox) {
       lastBox = boxKey;
       void invoke("pv_bounds", {
@@ -1027,7 +1060,7 @@ export function wireBrowser(card: HTMLElement) {
         w: Math.round(Math.max(1, iw) * d), h: Math.round(Math.max(1, ih) * d),
       }).catch(() => {});
     }
-    if (visKey !== lastVis) {
+    if (needVis) {
       lastVis = visKey;
       /* false→true means a suspended engine is about to paint — clear the
        * sleep mark and lift any Low memory target before it shows */
@@ -1084,7 +1117,7 @@ export function wireBrowser(card: HTMLElement) {
             void invoke("pv_visible", { id: t.bv, on: false }).catch(() => {});
             /* a parked engine is the long-lived kind — sleep the quiet
              * ones outright, press audible ones to Low */
-            sleepEngine(t.bv);
+            sleepEngine(t.bv, () => !card.isConnected);
           } else {
             void invoke("pv_close", { id: t.bv }).catch(() => {});
             engineNote.delete(t.bv);
@@ -1263,6 +1296,9 @@ export function wireBrowser(card: HTMLElement) {
       lastVis = "";
       claimEng(bvId);
     }
+    /* committed a nav for this engine — clear any stranded-blank mark so
+     * the 2s tick doesn't fire a second nav while the page is loading */
+    if (cur().bv) blankEng.delete(cur().bv);
     // the real engine opens immediately — XFO/walls can't touch it; the
     // fetch lane runs in parallel for the AI's text + the reader view
     if (liveOn) {
