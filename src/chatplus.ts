@@ -73,8 +73,6 @@ function shrinkImage(dataUrl: string, name: string): Promise<Att> {
 export function wireChatTools(
   input: HTMLInputElement | HTMLTextAreaElement,
   opts: {
-    /** where the 📎/🎙 buttons land — default: right after the input */
-    buttonHost?: HTMLElement | null;
     /** errors surface here (chat log line or status toast) */
     onErr?: (msg: string) => void;
     /** recording state change for the host (e.g. disable send) */
@@ -90,29 +88,66 @@ export function wireChatTools(
   const atts: Att[] = [];
 
   const bar = input.parentElement as HTMLElement;
-  const buttons = document.createElement("span");
-  buttons.className = "ct-tools";
-  const attachBtn = document.createElement("button");
-  attachBtn.type = "button";
-  attachBtn.className = "ct-btn ct-attach";
-  attachBtn.title = "attach a file — screenshot, photo, text (or paste/drop)";
-  attachBtn.textContent = "📎";
-  const micBtn = document.createElement("button");
-  micBtn.type = "button";
-  micBtn.className = "ct-btn ct-mic";
-  micBtn.title = "voice — click to record, click again to transcribe";
-  micBtn.textContent = "🎙";
-  buttons.append(attachBtn, micBtn);
-  const btnHost = opts.buttonHost ?? bar;
-  if (btnHost) btnHost.insertBefore(buttons, input.nextSibling);
-  else input.after(buttons);
+  /* [📎] [input …] [🎙] [➤] — the canonical composer layout: attach left,
+   * mic + accent send right, inline SVG glyphs, send lights up when
+   * there's something to send */
+  const ICONS = {
+    attach:
+      `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21.4 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>`,
+    mic:
+      `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1"/><line x1="12" y1="18" x2="12" y2="22"/></svg>`,
+    stop:
+      `<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>`,
+    spin:
+      `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.2-8.56"/></svg>`,
+    send:
+      `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>`,
+  };
+  const mkBtn = (cls: string, icon: string, title: string) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = `ct-btn ${cls}`;
+    b.innerHTML = icon;
+    b.title = title;
+    return b;
+  };
+  const attachBtn = mkBtn("ct-attach", ICONS.attach, "attach a file — image or text (or paste/drop)");
+  const micBtn = mkBtn("ct-mic", ICONS.mic, "record voice — click again to stop and transcribe");
+  const sendBtn = mkBtn("ct-send", ICONS.send, "send");
+  const left = document.createElement("span");
+  left.className = "ct-tools ct-left";
+  left.append(attachBtn);
+  const right = document.createElement("span");
+  right.className = "ct-tools ct-right";
+  right.append(micBtn, sendBtn);
+  if (bar) {
+    bar.insertBefore(left, input);
+    bar.insertBefore(right, input.nextSibling);
+  } else {
+    input.before(left);
+    input.after(right);
+  }
+  /* send fires the input's own Enter handler — every surface keeps its
+   * existing dispatch (commands, collect, fences) */
+  sendBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  });
+  const syncSend = () => {
+    sendBtn.disabled = !input.value.trim() && !atts.length;
+  };
+  input.addEventListener("input", syncSend);
 
   /* chips + VU meter live in a strip under the input row */
   const strip = document.createElement("div");
   strip.className = "ct-strip hidden";
   if (bar) bar.after(strip);
   else input.after(strip);
-  const sync = () => strip.classList.toggle("hidden", !atts.length && !recording);
+  const sync = () => {
+    strip.classList.toggle("hidden", !atts.length && !recording);
+    syncSend();
+  };
+  syncSend();
 
   const remove = (a: Att) => {
     const i = atts.indexOf(a);
@@ -159,12 +194,13 @@ export function wireChatTools(
 
   const picker = document.createElement("input");
   picker.type = "file";
+  picker.className = "ct-picker";
   picker.multiple = true;
   picker.accept = allowImages
     ? "image/*,.txt,.md,.markdown,.csv,.tsv,.json,.jsonl,.log,.laido,.xml,.yaml,.yml,.html,.css,.js,.ts,.tsx,.py,.rs,.toml,.ini,.cfg,.sql,.sh,.bat,.ps1,.svg"
     : ".txt,.md,.markdown,.csv,.tsv,.json,.jsonl,.log,.laido,.xml,.yaml,.yml,.html,.css,.js,.ts,.tsx,.py,.rs,.toml,.ini,.cfg,.sql,.sh,.bat,.ps1,.svg";
   picker.hidden = true;
-  buttons.append(picker);
+  left.append(picker);
   attachBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     picker.click();
@@ -240,6 +276,7 @@ export function wireChatTools(
         recording = true;
         opts.onRec?.(true);
         micBtn.classList.add("rec");
+        micBtn.innerHTML = ICONS.stop; // a red square says "click to stop"
         micBtn.title = "recording — click to stop and transcribe";
         startMeter();
         sync();
@@ -252,7 +289,8 @@ export function wireChatTools(
     opts.onRec?.(false);
     stopMeter();
     micBtn.classList.remove("rec");
-    micBtn.textContent = "⏳"; // voice_stop uploads + polls — show the wait
+    micBtn.classList.add("spin"); // voice_stop uploads + polls — spinner
+    micBtn.innerHTML = ICONS.spin;
     micBtn.disabled = true;
     micBtn.title = "transcribing…";
     try {
@@ -263,8 +301,9 @@ export function wireChatTools(
       err(`✕ ${String(e2)}`);
     }
     micBtn.disabled = false;
-    micBtn.textContent = "🎙";
-    micBtn.title = "voice — click to record, click again to transcribe";
+    micBtn.classList.remove("spin");
+    micBtn.innerHTML = ICONS.mic;
+    micBtn.title = "record voice — click again to stop and transcribe";
     sync();
   });
 

@@ -475,15 +475,26 @@ body.sticky-mode .term-card { width: auto; }
   flex: 1; min-width: 0; border: 0; outline: none; background: transparent;
   font-family: var(--note-font); font-size: 13.5px; color: var(--text);
 }
-/* chat+ shared tools — 📎 attach + 🎙 voice on every AI chat input */
-.ct-tools { flex: none; display: inline-flex; align-items: center; gap: 1px; }
+/* chat+ shared tools — [📎] field [🎙] [➤] composer on every AI chat */
+.ct-tools { flex: none; display: inline-flex; align-items: center; gap: 3px; }
 .ct-btn {
-  border: 0; background: transparent; cursor: pointer;
-  font-size: 14px; padding: 0 3px; opacity: .65; line-height: 1;
+  width: 24px; height: 24px; border: 0; border-radius: 7px; padding: 0;
+  background: transparent; color: var(--text-dim); cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: background .12s, color .12s, opacity .12s;
 }
-.ct-btn:hover { opacity: 1; }
-.ct-btn:disabled { opacity: .45; cursor: default; }
-.ct-mic.rec { opacity: 1; color: var(--warn); animation: term-mic-pulse 1.1s ease-in-out infinite; }
+.ct-btn svg { width: 14.5px; height: 14.5px; display: block; }
+.ct-btn:hover { background: var(--bg-2); color: var(--text); }
+.ct-btn:disabled { opacity: .38; cursor: default; background: transparent; }
+/* accent send — lights up when the field or a chip has content */
+.ct-send { background: var(--accent); color: var(--accent-ink, #fff); }
+.ct-send:hover { background: var(--accent); color: var(--accent-ink, #fff); filter: brightness(1.12); }
+.ct-send:disabled { background: var(--bg-2); color: var(--text-dim); }
+/* recording — the red stop square pulses; transcribe spins */
+.ct-mic.rec { color: var(--warn); animation: term-mic-pulse 1.1s ease-in-out infinite; }
+.ct-mic.rec:hover { background: transparent; }
+.ct-mic.spin svg { animation: ct-rotate .8s linear infinite; }
+@keyframes ct-rotate { to { transform: rotate(360deg); } }
 @keyframes term-mic-pulse { 50% { opacity: .4; transform: scale(1.15); } }
 /* attachment chips + VU live in a strip under the input row */
 .ct-strip {
