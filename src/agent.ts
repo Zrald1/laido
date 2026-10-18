@@ -76,14 +76,91 @@ export function keyBasePatch(key: string, currentBase: string): string | undefin
   return undefined;
 }
 
-/** BYOK endpoints — name → OpenAI-compatible base URL */
+/** the base_url every save path must persist — key routing first, then the
+ *  provider dropdown (custom input or preset), finally the stored value */
+export function providerBasePatch(key: string): string | undefined {
+  if (managed) return LAIDO_GW;
+  const sel = $<HTMLSelectElement>("#provider-select")?.value ?? "";
+  return (
+    keyBasePatch(key, settings?.base_url ?? "") ??
+    (sel === "custom"
+      ? $<HTMLInputElement>("#base-url").value.trim() || settings?.base_url
+      : PROVIDERS[sel] ?? settings?.base_url)
+  );
+}
+
+/** BYOK endpoints — name → OpenAI-compatible base URL (verified) */
 export const PROVIDERS: Record<string, string> = {
   laido: LAIDO_GW,
-  nebius: "https://api.tokenfactory.nebius.com/v1",
-  cerebras: "https://api.cerebras.ai/v1",
-  bitdeer: "https://api.bitdeer.ai/v1",
+  // first-party vendors
   openai: "https://api.openai.com/v1",
+  anthropic: "https://api.anthropic.com/v1",
+  gemini: "https://generativelanguage.googleapis.com/v1beta/openai",
+  xai: "https://api.x.ai/v1",
+  deepseek: "https://api.deepseek.com/v1",
+  mistral: "https://api.mistral.ai/v1",
+  moonshot: "https://api.moonshot.ai/v1",
+  zhipu: "https://api.z.ai/api/paas/v4",
+  minimax: "https://api.minimax.io/v1",
+  dashscope: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  cohere: "https://api.cohere.com/compatibility/v1",
+  perplexity: "https://api.perplexity.ai",
+  // inference clouds
+  nebius: "https://api.tokenfactory.nebius.com/v1",
+  bitdeer: "https://api-inference.bitdeer.ai/v1",
+  cerebras: "https://api.cerebras.ai/v1",
+  groq: "https://api.groq.com/openai/v1",
+  fireworks: "https://api.fireworks.ai/inference/v1",
+  together: "https://api.together.xyz/v1",
+  deepinfra: "https://api.deepinfra.com/v1/openai",
+  sambanova: "https://api.sambanova.ai/v1",
+  hyperbolic: "https://api.hyperbolic.xyz/v1",
+  chutes: "https://llm.chutes.ai/v1",
+  featherless: "https://api.featherless.ai/v1",
+  novita: "https://api.novita.ai/v3/openai",
+  // aggregators / routers
+  openrouter: "https://openrouter.ai/api/v1",
+  huggingface: "https://router.huggingface.co/v1",
+  nvidia: "https://integrate.api.nvidia.com/v1",
+  venice: "https://api.venice.ai/api/v1",
+  githubmodels: "https://models.github.ai/inference",
+  // local runtimes
+  ollama: "http://localhost:11434/v1",
+  lmstudio: "http://localhost:1234/v1",
 };
+
+/** display names for the provider dropdown */
+const PROVIDER_LABELS: Record<string, string> = {
+  laido: "Laido cloud (lk- key / Google sign-in)",
+  openai: "OpenAI", anthropic: "Anthropic Claude", gemini: "Google Gemini",
+  xai: "xAI (Grok)", deepseek: "DeepSeek", mistral: "Mistral",
+  moonshot: "Moonshot (Kimi)", zhipu: "Z.ai GLM", minimax: "MiniMax",
+  dashscope: "Qwen / DashScope", cohere: "Cohere", perplexity: "Perplexity",
+  nebius: "Nebius Token Factory", bitdeer: "Bitdeer AI", cerebras: "Cerebras",
+  groq: "Groq", fireworks: "Fireworks AI", together: "Together AI",
+  deepinfra: "DeepInfra", sambanova: "SambaNova",
+  hyperbolic: "Hyperbolic", chutes: "Chutes", featherless: "Featherless",
+  novita: "Novita AI", openrouter: "OpenRouter",
+  huggingface: "Hugging Face router", nvidia: "NVIDIA NIM",
+  venice: "Venice AI", githubmodels: "GitHub Models",
+  ollama: "Ollama (local)", lmstudio: "LM Studio (local)",
+};
+
+/** fill the provider dropdown once — labels + "custom" sentinel */
+function populateProviders() {
+  const sel = $<HTMLSelectElement>("#provider-select");
+  if (!sel || sel.options.length) return;
+  for (const [id] of Object.entries(PROVIDERS)) {
+    const o = document.createElement("option");
+    o.value = id;
+    o.textContent = PROVIDER_LABELS[id] ?? id;
+    sel.appendChild(o);
+  }
+  const o = document.createElement("option");
+  o.value = "custom";
+  o.textContent = "Custom base URL…";
+  sel.appendChild(o);
+}
 
 /** which provider preset the current key/base pair maps to */
 function detectProvider(key: string, base: string): string {
@@ -121,14 +198,21 @@ export function modelPatch(): Record<string, string> {
   };
 }
 
+/** the provider the user explicitly picked — survives re-derivation in
+ *  applyProviderUI so "custom" doesn't snap back to a detected preset
+ *  before they've typed their URL */
+let providerChoice = "";
+
 /** reflect provider + managed state into the settings UI */
 function applyProviderUI() {
   const prov = $<HTMLSelectElement>("#provider-select");
   const baseIn = $<HTMLInputElement>("#base-url");
   const locked = $("#model-locked");
   if (!prov) return;
-  const key = $<HTMLInputElement>("#key-nebius")?.value.trim() ?? "";
-  const p = detectProvider(key, settings?.base_url ?? "");
+  populateProviders();
+  const key = $<HTMLInputElement>("#key-nebius").value.trim();
+  const p = providerChoice || detectProvider(key, settings?.base_url ?? "");
+  providerChoice = p;
   prov.value = p;
   managed = p === "laido";
   if (baseIn) {
@@ -358,11 +442,20 @@ export async function initModels() {
   });
 
   // provider switch — repoint the base URL and reload that catalog
+  populateProviders();
   $<HTMLSelectElement>("#provider-select")?.addEventListener("change", async (e) => {
     const p = (e.target as HTMLSelectElement).value;
+    providerChoice = p;
     const patch: Record<string, string> = {};
     if (p === "custom") {
-      patch.base_url = $<HTMLInputElement>("#base-url").value.trim() || settings?.base_url || "";
+      const typed = $<HTMLInputElement>("#base-url").value.trim();
+      if (typed) patch.base_url = typed;
+      // leave base_url alone until they type — applyProviderUI reveals the field
+      if (!typed) {
+        applyProviderUI();
+        $<HTMLInputElement>("#base-url")?.focus();
+        return;
+      }
     } else {
       patch.base_url = PROVIDERS[p] ?? PROVIDERS.nebius;
     }
@@ -407,13 +500,7 @@ export async function testConnection() {
   await invoke("settings_set", {
     patch: {
       nebius_api_key: gwKey,
-      base_url: managed
-        ? LAIDO_GW
-        : keyBasePatch(gwKey, settings?.base_url ?? "") ??
-          (($("#provider-select") as HTMLSelectElement | null)?.value === "custom"
-            ? $<HTMLInputElement>("#base-url").value.trim()
-            : PROVIDERS[($("#provider-select") as HTMLSelectElement | null)?.value ?? ""] ??
-              settings?.base_url),
+      base_url: providerBasePatch(gwKey),
       tavily_api_key: $<HTMLInputElement>("#key-tavily").value.trim(),
       ...modelPatch(),
     },

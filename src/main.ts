@@ -4,7 +4,7 @@ import { initTabs } from "./tabs.js";
 import { initCalendar } from "./calendar.js";
 import { initLibrary, toggleLibrary } from "./rag.js";
 import { initFsPane } from "./fspane.js";
-import { refreshStatus, testConnection, initAgent, initModels, syncModelSelects, initAccount, keyBasePatch, modelPatch } from "./agent.js";
+import { refreshStatus, testConnection, initAgent, initModels, syncModelSelects, initAccount, providerBasePatch, modelPatch } from "./agent.js";
 import { initI18n, LANGS, setLang } from "./i18n.js";
 import { addActivity } from "./log.js";
 
@@ -47,11 +47,10 @@ function initRail() {
 
 async function saveSettings() {
   const gwKey = $<HTMLInputElement>("#key-nebius").value.trim();
-  const cur = await invoke<{ base_url: string }>("settings_get");
   await invoke("settings_set", {
     patch: {
       nebius_api_key: gwKey,
-      base_url: keyBasePatch(gwKey, cur.base_url),
+      base_url: providerBasePatch(gwKey),
       tavily_api_key: $<HTMLInputElement>("#key-tavily").value.trim(),
       assemblyai_api_key: $<HTMLInputElement>("#key-assemblyai").value.trim(),
       ...modelPatch(),
