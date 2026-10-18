@@ -5,6 +5,8 @@
 <h1 align="center">Laido</h1>
 <p align="center"><strong>The way of AI — a notepad that acts on what you write.</strong></p>
 
+<p align="center"><a href="https://laido.zraldwebdevelopmentservices.shop">laido.zraldwebdevelopmentservices.shop</a> — sign in, manage keys &amp; plans</p>
+
 <p align="center">
   <a href="https://github.com/Zrald1/laido/releases"><img src="https://img.shields.io/github/v/release/Zrald1/laido?label=download" alt="Download"></a>
   <a href="https://github.com/Zrald1/laido/actions/workflows/release.yml"><img src="https://github.com/Zrald1/laido/actions/workflows/release.yml/badge.svg" alt="Build"></a>

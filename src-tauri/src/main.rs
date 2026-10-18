@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod account;
 mod agent;
 mod dlhttp;
 mod download;
@@ -573,6 +574,9 @@ fn main() {
             llm::sheet_tool_gen,
             tools::tavily_ping,
             tools::open_url,
+            account::laido_auth_begin,
+            account::laido_auth_poll,
+            account::laido_auth_finish,
             agent::agent_run,
             agent::note_summary,
             term::term_run,

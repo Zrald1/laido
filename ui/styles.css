@@ -572,6 +572,13 @@ body.sticky-mode #note-body::after { content: none; }
 #note-body p { margin: 0; }
 #note-body ul, #note-body ol { margin: 0 0 26px; padding-left: 24px; }
 #note-body li { line-height: 26px; margin: 0; }
+/* per-block layout isolation — an edit inside one block re-lays out only
+ * that block's subtree, not the note. The block's own height still flows
+ * (contain:size deliberately excluded). Skips .callout — cards already
+ * carry content-visibility and floats measure against the page. */
+#note-body > *:not(.callout):not(.drag-gap) {
+  contain: layout;
+}
 #note-body code {
   background: var(--bg-3);
   padding: 1px 5px;
@@ -3084,6 +3091,9 @@ td.base-sumlab{color:var(--dim,#94897a);font-size:10.5px;border-top:1px solid va
 #act-dock:not(.open) #act-dock-body #activity .act-line:first-child { display: block; }
 
 /* ---------- settings groups ---------- */
+.set-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.set-head h2 { margin: 0; }
+.set-head .mini { padding: 5px 14px; font-size: 12px; }
 .set-group { border: 1px solid var(--line); border-radius: 10px; margin-bottom: 14px; }
 .set-group > summary {
   cursor: pointer; padding: 9px 12px; font-size: 11px; font-weight: 600;

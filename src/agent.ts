@@ -17,6 +17,8 @@ export interface Settings {
   model_deep: string;
   model_rewrite: string;
   model_ocr: string;
+  laido_session: string;
+  laido_email: string;
 }
 
 interface PingResult {
@@ -62,6 +64,90 @@ interface SchedRow {
   paused: boolean;
 }
 
+/** site → gateway base for lk- keys */
+const LAIDO_SITE = "https://laido.zraldwebdevelopmentservices.shop";
+const LAIDO_GW = `${LAIDO_SITE}/v1`;
+
+/** keys minted on the site only work on the Laido gateway; direct provider
+ *  keys need the provider URL — route base_url accordingly on save. */
+export function keyBasePatch(key: string, currentBase: string): string | undefined {
+  if (key.startsWith("lk-")) return LAIDO_GW;
+  if (currentBase === LAIDO_GW) return PROVIDERS.nebius;
+  return undefined;
+}
+
+/** BYOK endpoints — name → OpenAI-compatible base URL */
+export const PROVIDERS: Record<string, string> = {
+  laido: LAIDO_GW,
+  nebius: "https://api.tokenfactory.nebius.com/v1",
+  cerebras: "https://api.cerebras.ai/v1",
+  bitdeer: "https://api.bitdeer.ai/v1",
+  openai: "https://api.openai.com/v1",
+};
+
+/** which provider preset the current key/base pair maps to */
+function detectProvider(key: string, base: string): string {
+  if (key.startsWith("lk-") || base === LAIDO_GW) return "laido";
+  for (const [name, url] of Object.entries(PROVIDERS)) {
+    if (name !== "laido" && url === base) return name;
+  }
+  return "custom";
+}
+
+/** managed mode: lk- key → the server owns model choice; the app sends
+ *  sentinel values and the gateway substitutes the admin-configured models */
+let managed = false;
+
+export function modelPatch(): Record<string, string> {
+  if (managed) {
+    return {
+      model_fast: "auto",
+      model_main: "auto",
+      model_deep: "auto",
+      model_rewrite: "auto",
+      model_ocr: "ocr",
+    };
+  }
+  const pick = (id: string, cur: string) => {
+    const v = $<HTMLSelectElement>(id)?.value;
+    return v || cur;
+  };
+  return {
+    model_fast: pick("#model-fast", settings?.model_fast ?? ""),
+    model_main: pick("#model-main", settings?.model_main ?? ""),
+    model_deep: pick("#model-deep", settings?.model_deep ?? ""),
+    model_rewrite: pick("#model-rewrite-set", settings?.model_rewrite ?? ""),
+    model_ocr: pick("#model-ocr-set", settings?.model_ocr ?? ""),
+  };
+}
+
+/** reflect provider + managed state into the settings UI */
+function applyProviderUI() {
+  const prov = $<HTMLSelectElement>("#provider-select");
+  const baseIn = $<HTMLInputElement>("#base-url");
+  const locked = $("#model-locked");
+  if (!prov) return;
+  const key = $<HTMLInputElement>("#key-nebius")?.value.trim() ?? "";
+  const p = detectProvider(key, settings?.base_url ?? "");
+  prov.value = p;
+  managed = p === "laido";
+  if (baseIn) {
+    baseIn.classList.toggle("hidden", p !== "custom");
+    if (p === "custom") baseIn.value = settings?.base_url ?? "";
+  }
+  locked?.classList.toggle("hidden", !managed);
+  // every model select — settings panel + quick picks — locks under the plan
+  for (const id of [
+    "#model-fast", "#model-main", "#model-deep", "#model-rewrite-set",
+    "#model-ocr-set", "#model-quick", "#model-rewrite", "#model-ocr",
+  ]) {
+    const el = $<HTMLSelectElement>(id);
+    if (el) el.disabled = managed;
+  }
+  const refresh = $<HTMLButtonElement>("#models-refresh");
+  if (refresh) refresh.disabled = managed;
+}
+
 const FALLBACK_MODELS = [
   "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B",
   "nvidia/Nemotron-3_5-Lightning",
@@ -85,7 +171,93 @@ export async function refreshStatus() {
     text.textContent = "ready";
   } else {
     dot.className = "dot warn";
-    text.textContent = "add your Nebius key";
+    text.textContent = "sign in or add a key";
+  }
+  renderAccount();
+  applyProviderUI();
+}
+
+/* ---- Laido account: sign in with Google via the site, key auto-installed ---- */
+
+let laidoSigning = false;
+
+function acctHint(s: string) {
+  const el = $("#laido-hint");
+  if (el) el.textContent = s;
+}
+
+export function renderAccount() {
+  const who = $("#laido-acct");
+  const sout = $("#laido-signout");
+  const hdr = $<HTMLButtonElement>("#hdr-acct");
+  if (settings?.laido_email) {
+    if (who) { who.textContent = `${settings.laido_email}`; who.className = ""; }
+    sout?.classList.remove("hidden");
+    if (hdr) hdr.textContent = "Account · plans";
+  } else {
+    if (who) { who.textContent = "not signed in"; who.className = "muted"; }
+    sout?.classList.add("hidden");
+    if (hdr) hdr.textContent = "Sign in";
+  }
+}
+
+export function initAccount() {
+  $("#laido-signin")?.addEventListener("click", () => void laidoSignIn());
+  // header button — signed in → the site dashboard (buy credits / manage
+  // plan); signed out → the same Google sign-in flow
+  $("#hdr-acct")?.addEventListener("click", async () => {
+    if (settings?.laido_email) {
+      await invoke("open_url", { url: `${LAIDO_SITE}/#dash` });
+    } else {
+      void laidoSignIn();
+    }
+  });
+  $("#laido-signout")?.addEventListener("click", async () => {
+    await invoke("settings_set", { patch: { laido_session: "", laido_email: "" } });
+    await refreshStatus();
+    acctHint("signed out — the installed API key still works until you delete it on the site");
+  });
+}
+
+async function laidoSignIn() {
+  if (laidoSigning) return;
+  laidoSigning = true;
+  const btn = $<HTMLButtonElement>("#laido-signin");
+  btn.disabled = true;
+  try {
+    acctHint("opening your browser…");
+    const begin = await invoke<{ sid: string; url: string }>("laido_auth_begin");
+    await invoke("open_url", { url: begin.url });
+    acctHint("finish signing in in your browser — this window is waiting…");
+    const deadline = Date.now() + 10 * 60 * 1000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 2000));
+      let res: { status: string; token?: string };
+      try {
+        res = await invoke<{ status: string; token?: string }>("laido_auth_poll", { sid: begin.sid });
+      } catch {
+        continue; // transient network blip — keep polling
+      }
+      if (res.status === "expired") {
+        acctHint("link expired — try again");
+        return;
+      }
+      if (res.status === "ok" && res.token) {
+        const fin = await invoke<{ email: string; plan: string }>("laido_auth_finish", { token: res.token });
+        await refreshStatus();
+        await loadModels();
+        syncModelSelects();
+        acctHint(`signed in as ${fin.email} · ${fin.plan} — API key installed`);
+        addActivity(`✓ signed in: ${fin.email} (${fin.plan}) — gateway key installed`);
+        return;
+      }
+    }
+    acctHint("timed out — try again");
+  } catch (e) {
+    acctHint(`sign-in failed: ${String(e)}`);
+  } finally {
+    btn.disabled = false;
+    laidoSigning = false;
   }
 }
 
@@ -122,6 +294,25 @@ function fillSelect(sel: HTMLSelectElement, current: string, visionOnly = false)
 
 export function syncModelSelects() {
   if (!settings) return;
+  if (managed) {
+    // server-managed — show what the gateway will route to, not a picker
+    const lock = (id: string, label: string) => {
+      const sel = $<HTMLSelectElement>(id);
+      if (!sel) return;
+      sel.innerHTML = "";
+      const o = document.createElement("option");
+      o.value = o.textContent = label;
+      sel.append(o);
+      sel.value = label;
+      sel.disabled = true;
+    };
+    const auto = "auto — managed by plan";
+    lock("#model-quick", auto); lock("#model-rewrite", auto);
+    lock("#model-fast", auto); lock("#model-main", auto);
+    lock("#model-deep", auto); lock("#model-rewrite-set", auto);
+    lock("#model-ocr", auto); lock("#model-ocr-set", auto);
+    return;
+  }
   fillSelect($<HTMLSelectElement>("#model-quick"), settings.model_main);
   fillSelect($<HTMLSelectElement>("#model-rewrite"), settings.model_rewrite);
   fillSelect($<HTMLSelectElement>("#model-fast"), settings.model_fast);
@@ -165,6 +356,43 @@ export async function initModels() {
     syncModelSelects();
     addActivity(`✓ model catalog: ${models.length} models`);
   });
+
+  // provider switch — repoint the base URL and reload that catalog
+  $<HTMLSelectElement>("#provider-select")?.addEventListener("change", async (e) => {
+    const p = (e.target as HTMLSelectElement).value;
+    const patch: Record<string, string> = {};
+    if (p === "custom") {
+      patch.base_url = $<HTMLInputElement>("#base-url").value.trim() || settings?.base_url || "";
+    } else {
+      patch.base_url = PROVIDERS[p] ?? PROVIDERS.nebius;
+    }
+    await invoke("settings_set", { patch });
+    settings = await invoke<Settings>("settings_get");
+    applyProviderUI();
+    await loadModels();
+    syncModelSelects();
+  });
+  $<HTMLInputElement>("#base-url")?.addEventListener("change", async (e) => {
+    const v = (e.target as HTMLInputElement).value.trim();
+    if (!v) return;
+    await invoke("settings_set", { patch: { base_url: v } });
+    settings = await invoke<Settings>("settings_get");
+    await loadModels();
+    syncModelSelects();
+  });
+  // key field — an lk- key snaps the provider to Laido cloud
+  $<HTMLInputElement>("#key-nebius")?.addEventListener("input", () => {
+    const prov = $<HTMLSelectElement>("#provider-select");
+    const k = $<HTMLInputElement>("#key-nebius").value.trim();
+    if (k.startsWith("lk-") && prov.value !== "laido") {
+      prov.value = "laido";
+      prov.dispatchEvent(new Event("change"));
+    } else if (!k.startsWith("lk-") && prov.value === "laido" && !settings?.laido_email) {
+      prov.value = "nebius";
+      prov.dispatchEvent(new Event("change"));
+    }
+    applyProviderUI();
+  });
 }
 
 export async function testConnection() {
@@ -175,15 +403,19 @@ export async function testConnection() {
   };
 
   set("saving…");
+  const gwKey = $<HTMLInputElement>("#key-nebius").value.trim();
   await invoke("settings_set", {
     patch: {
-      nebius_api_key: $<HTMLInputElement>("#key-nebius").value.trim(),
+      nebius_api_key: gwKey,
+      base_url: managed
+        ? LAIDO_GW
+        : keyBasePatch(gwKey, settings?.base_url ?? "") ??
+          (($("#provider-select") as HTMLSelectElement | null)?.value === "custom"
+            ? $<HTMLInputElement>("#base-url").value.trim()
+            : PROVIDERS[($("#provider-select") as HTMLSelectElement | null)?.value ?? ""] ??
+              settings?.base_url),
       tavily_api_key: $<HTMLInputElement>("#key-tavily").value.trim(),
-      model_fast: $<HTMLSelectElement>("#model-fast").value,
-      model_main: $<HTMLSelectElement>("#model-main").value,
-      model_deep: $<HTMLSelectElement>("#model-deep").value,
-      model_rewrite: $<HTMLSelectElement>("#model-rewrite-set").value,
-      model_ocr: $<HTMLSelectElement>("#model-ocr-set").value,
+      ...modelPatch(),
     },
   });
   await refreshStatus();

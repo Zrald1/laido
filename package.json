@@ -1,8 +1,9 @@
 {
   "name": "laido",
   "private": true,
-  "version": "0.0.3",
+  "version": "0.0.4",
   "type": "module",
+  "homepage": "https://laido.zraldwebdevelopmentservices.shop",
   "scripts": {
     "ui": "tsc",
     "tauri": "tauri",

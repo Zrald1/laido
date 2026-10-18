@@ -35,9 +35,19 @@ desktop.ini
 .env.*
 *.key
 *.pem
+*.pfx
+*.crt
+id_rsa*
 settings.json
 .laido/
 secrets*
+client_secret*.json
+*credentials*.json
+*credential*.json
+*.sqlite*
+*.db
+*.db-wal
+*.db-shm
 
 # local test harnesses & sweeps — not for the repo
 test/
@@ -45,3 +55,5 @@ kernels/*/target/
 
 # backend lives outside the repo as a sibling — never commit it
 Backend/
+_cdp-*.mjs
+_*

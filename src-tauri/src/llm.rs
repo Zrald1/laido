@@ -335,8 +335,15 @@ pub async fn embed(texts: &[String], dims: u32) -> Result<Vec<Vec<f32>>, String>
         return Err("no Nebius API key — open Settings and add one".into());
     }
     let url = format!("{}/embeddings", s.base_url.trim_end_matches('/'));
+    // managed gateway picks the embed model server-side; direct BYOK needs a
+    // concrete model id
+    let model = if s.base_url.starts_with("https://laido.") {
+        "auto"
+    } else {
+        "Qwen/Qwen3-Embedding-8B"
+    };
     let body = serde_json::json!({
-        "model": "Qwen/Qwen3-Embedding-8B",
+        "model": model,
         "input": texts,
         "encoding_format": "float",
         "dimensions": dims,

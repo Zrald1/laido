@@ -232,8 +232,11 @@
 
   <div id="settings-modal" class="modal hidden">
     <div class="modal-card">
-      <h2>Settings</h2>
-      <details class="set-group" open>
+      <div class="set-head">
+        <h2>Settings</h2>
+        <button id="hdr-acct" class="primary mini">Sign in</button>
+      </div>
+      <details class="set-group">
         <summary>Assistant panel</summary>
         <div class="set-group-body">
           <div class="rail-block">
@@ -263,14 +266,48 @@
           </div>
         </div>
       </details>
-      <label for="key-nebius">Nebius Token Factory API key</label>
-      <input id="key-nebius" type="password" placeholder="from tokenfactory.nebius.com" autocomplete="off" />
+      <details class="set-group">
+        <summary>Laido account</summary>
+        <div class="set-group-body">
+          <div class="rail-block">
+            <h3>Gateway sign-in</h3>
+            <div id="laido-acct" class="muted">not signed in</div>
+            <button id="laido-signin" class="ghost">Sign in with Google</button>
+            <button id="laido-signout" class="ghost mini hidden">Sign out</button>
+            <div id="laido-hint" class="muted">Signs in on laido.zraldwebdevelopmentservices.shop in your browser, then installs your API key here automatically.</div>
+          </div>
+        </div>
+      </details>
+      <details class="set-group">
+        <summary>Keys &amp; provider</summary>
+        <div class="set-group-body">
+      <label for="key-nebius">Gateway / provider API key <span class="muted">(lk- key from your dashboard, or a provider key)</span></label>
+      <input id="key-nebius" type="password" placeholder="lk-… or your provider key" autocomplete="off" />
+      <label for="provider-select">Provider <span class="muted">— where this key works</span></label>
+      <select id="provider-select" class="model-select">
+        <option value="laido">Laido cloud (lk- key / Google sign-in)</option>
+        <option value="nebius">Nebius Token Factory</option>
+        <option value="cerebras">Cerebras</option>
+        <option value="bitdeer">Bitdeer AI</option>
+        <option value="openai">OpenAI</option>
+        <option value="custom">Custom base URL…</option>
+      </select>
+      <input id="base-url" class="hidden" placeholder="https://api.example.com/v1" autocomplete="off" />
       <label for="key-tavily">Tavily API key <span class="muted">(for @research)</span></label>
       <input id="key-tavily" type="password" placeholder="from tavily.com" autocomplete="off" />
       <label for="key-assemblyai">AssemblyAI API key <span class="muted">(for voice notes)</span></label>
       <input id="key-assemblyai" type="password" placeholder="from assemblyai.com" autocomplete="off" />
-      <label for="lang-select" data-i18n="set.language">Language</label>
-      <select id="lang-select" class="model-select"></select>
+      <p class="muted">Keys are stored locally in your vault&rsquo;s <code>.laido/settings.json</code>.
+      Nothing is sent anywhere until you ask.</p>
+        </div>
+      </details>
+      <details class="set-group">
+        <summary>Models</summary>
+        <div class="set-group-body">
+      <div id="model-locked" class="hidden">
+        <p class="muted">Models, embeddings &amp; OCR are managed by your Laido plan — the server picks them. Switch provider to choose your own.</p>
+      </div>
+      <div id="model-picks">
       <label>Fast model <span class="muted">— classification, runs on every save</span></label>
       <select id="model-fast" class="model-select"></select>
       <label>Main model <span class="muted">— annotation &amp; research</span></label>
@@ -281,9 +318,17 @@
       <select id="model-rewrite-set" class="model-select"></select>
       <label>OCR model <span class="muted">— vision only; transcribes scanned PDFs added to the Library</span></label>
       <select id="model-ocr-set" class="model-select"></select>
-      <button id="models-refresh" class="ghost">Load models from Nebius</button>
-      <p class="muted">Keys are stored locally in your vault&rsquo;s <code>.laido/settings.json</code>.
-      Nothing is sent anywhere until you ask.</p>
+      <button id="models-refresh" class="ghost">Load models</button>
+      </div>
+        </div>
+      </details>
+      <details class="set-group">
+        <summary>Preferences</summary>
+        <div class="set-group-body">
+      <label for="lang-select" data-i18n="set.language">Language</label>
+      <select id="lang-select" class="model-select"></select>
+        </div>
+      </details>
       <div class="modal-actions">
         <span id="settings-status" class="muted"></span>
         <button id="settings-test" class="ghost" data-i18n="set.save">Save &amp; test</button>

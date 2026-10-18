@@ -4,9 +4,7 @@ import { initTabs } from "./tabs.js";
 import { initCalendar } from "./calendar.js";
 import { initLibrary, toggleLibrary } from "./rag.js";
 import { initFsPane } from "./fspane.js";
-import { probeGpu, reportGpu } from "./gpu.js";
-import { initPerf } from "./perf.js";
-import { refreshStatus, testConnection, initAgent, initModels, syncModelSelects } from "./agent.js";
+import { refreshStatus, testConnection, initAgent, initModels, syncModelSelects, initAccount, keyBasePatch, modelPatch } from "./agent.js";
 import { initI18n, LANGS, setLang } from "./i18n.js";
 import { addActivity } from "./log.js";
 
@@ -48,15 +46,15 @@ function initRail() {
 }
 
 async function saveSettings() {
+  const gwKey = $<HTMLInputElement>("#key-nebius").value.trim();
+  const cur = await invoke<{ base_url: string }>("settings_get");
   await invoke("settings_set", {
     patch: {
-      nebius_api_key: $<HTMLInputElement>("#key-nebius").value.trim(),
+      nebius_api_key: gwKey,
+      base_url: keyBasePatch(gwKey, cur.base_url),
       tavily_api_key: $<HTMLInputElement>("#key-tavily").value.trim(),
       assemblyai_api_key: $<HTMLInputElement>("#key-assemblyai").value.trim(),
-      model_fast: $<HTMLSelectElement>("#model-fast").value,
-      model_main: $<HTMLSelectElement>("#model-main").value,
-      model_deep: $<HTMLSelectElement>("#model-deep").value,
-      model_rewrite: $<HTMLSelectElement>("#model-rewrite-set").value,
+      ...modelPatch(),
     },
   });
   $("#settings-status").textContent = "saved";
@@ -134,10 +132,6 @@ async function init() {
 
   initRail();
   initFsPane();
-  /* GPU tier probe — one activity line so a software-raster machine is
-   * visible in the feed instead of silently slow */
-  void probeGpu().then(reportGpu);
-  initPerf();
   initEditor();
   initCalendar();
   initLibrary();
@@ -152,6 +146,7 @@ async function init() {
   await refreshStatus();
   await initModels();
   await initAgent();
+  initAccount();
 
   $("#btn-settings").addEventListener("click", async () => {
     await refreshStatus();

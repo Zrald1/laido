@@ -22,6 +22,10 @@ pub struct Settings {
     pub model_rewrite: String,
     pub model_ocr: String,
     pub language: String,
+    /// Laido account session from the site sign-in flow (browser-poll)
+    pub laido_session: String,
+    /// account email for display — the session above can be re-validated
+    pub laido_email: String,
 }
 
 impl Default for Settings {
@@ -38,6 +42,8 @@ impl Default for Settings {
             model_rewrite: DEFAULT_FAST.into(),
             model_ocr: String::new(),
             language: String::new(),
+            laido_session: String::new(),
+            laido_email: String::new(),
         }
     }
 }
@@ -71,6 +77,8 @@ pub struct SettingsPatch {
     pub model_rewrite: Option<String>,
     pub model_ocr: Option<String>,
     pub language: Option<String>,
+    pub laido_session: Option<String>,
+    pub laido_email: Option<String>,
 }
 
 #[tauri::command]
@@ -114,11 +122,21 @@ pub fn settings_set(patch: SettingsPatch) -> Result<Settings, String> {
     if let Some(v) = patch.language.filter(|v| !v.is_empty()) {
         s.language = v;
     }
+    if let Some(v) = patch.laido_session {
+        s.laido_session = v;
+    }
+    if let Some(v) = patch.laido_email {
+        s.laido_email = v;
+    }
+    save_settings(&s)?;
+    Ok(s)
+}
+
+pub fn save_settings(s: &Settings) -> Result<(), String> {
     let path = settings_path();
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    fs::write(&path, serde_json::to_string_pretty(&s).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-    Ok(s)
+    fs::write(&path, serde_json::to_string_pretty(s).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())
 }

@@ -199,8 +199,14 @@ export function cardUndoHost() {
 const FLOW_TAGS = new Set(["P", "H1", "H2", "H3", "UL", "OL", "BLOCKQUOTE"]);
 
 /** Cards have arbitrary heights — snap their bottom margin up to the next
- *  26px rule so every block after them starts back on the line grid. */
+ *  26px rule so every block after them starts back on the line grid.
+ *  Read/compute/write phases: all geometry is measured BEFORE any style
+ *  write, and the cumulative shift each new margin adds is tracked in
+ *  plain math — no layout is ever forced inside the loop. */
 function snapCardsToGrid(kids: HTMLElement[]) {
+  /* phase 1 — reads */
+  interface Snap { k: HTMLElement; i: number; top: number; h: number; old: number; }
+  const snaps: Snap[] = [];
   for (let i = 0; i < kids.length; i++) {
     const k = kids[i];
     if (
@@ -209,12 +215,23 @@ function snapCardsToGrid(kids: HTMLElement[]) {
       k.classList.contains("drag-gap")
     )
       continue;
-    const m = (k.offsetTop + k.offsetHeight - 12) % 26;
+    snaps.push({
+      k, i, top: k.offsetTop, h: k.offsetHeight,
+      old: parseFloat(k.style.marginBottom) || 0,
+    });
+  }
+  /* phase 2 — compute: effective top = measured top + shift from margins
+   * we already changed above this card */
+  const writes: [HTMLElement, number][] = [];
+  let shift = 0;
+  for (const s of snaps) {
+    const effTop = s.top + shift;
+    const m = (effTop + s.h - 12) % 26;
     let mb = (26 - m) % 26;
     if (mb < 8) mb += 26; // keep a visible gap under the card
     // a heading's 26px margin-top collapses with ours — make ours win
     if (mb <= 26) {
-      for (let j = i + 1; j < kids.length; j++) {
+      for (let j = s.i + 1; j < kids.length; j++) {
         const n = kids[j];
         if (n.classList.contains("floating") || n.classList.contains("drag-gap"))
           continue;
@@ -222,8 +239,10 @@ function snapCardsToGrid(kids: HTMLElement[]) {
         break;
       }
     }
-    k.style.marginBottom = `${mb}px`;
+    if (mb !== s.old) { writes.push([s.k, mb]); shift += mb - s.old; }
   }
+  /* phase 3 — writes */
+  for (const [k, mb] of writes) k.style.marginBottom = `${mb}px`;
 }
 
 /** Indent in-flow blocks that share a floating card's vertical band, so the
@@ -236,55 +255,72 @@ function flowAroundCards() {
   const el = body();
   const kids = Array.from(el.children) as HTMLElement[];
   snapCardsToGrid(kids);
-  const floats = kids.filter(
+  const floatEls = kids.filter(
     (k) => k.classList.contains("floating") && !k.classList.contains("dragging"),
   );
-  const texts = kids.filter(
+  const textEls = kids.filter(
     (k) => FLOW_TAGS.has(k.tagName) && !k.classList.contains("drag-gap"),
   );
-  for (const k of texts) {
-    k.style.paddingLeft = "";
-    k.style.paddingRight = "";
-    if (k.dataset.fdrop) {
-      k.style.marginTop = "";
-      delete k.dataset.fdrop;
-    }
-  }
-  if (!floats.length) return;
+  /* phase 1 — one layout pass: every geometry read happens before any
+   * style write. Floats never receive writes here, so their rects stay
+   * valid for the whole pass. */
   const pageW = el.clientWidth;
-  for (const k of texts) {
-    const kt = k.offsetTop;
-    const kb = kt + k.offsetHeight;
-    const band = floats.filter(
-      (f) => kb > f.offsetTop && kt < f.offsetTop + f.offsetHeight,
-    );
-    if (!band.length) continue;
-    let padL = 0;
-    let padR = 0;
-    for (const f of band) {
-      const left = f.offsetLeft;
-      const right = left + f.offsetWidth;
-      if ((left + right) / 2 < pageW / 2) {
-        padL = Math.max(padL, right + 12 - k.offsetLeft);
-      } else {
-        padR = Math.max(padR, k.offsetLeft + k.offsetWidth - (left - 12));
+  const floats = floatEls.map((f) => ({
+    top: f.offsetTop, bottom: f.offsetTop + f.offsetHeight,
+    left: f.offsetLeft, right: f.offsetLeft + f.offsetWidth,
+  }));
+  const texts = textEls.map((k) => ({
+    k, top: k.offsetTop, h: k.offsetHeight,
+    left: k.offsetLeft, w: k.offsetWidth,
+    padL: parseFloat(k.style.paddingLeft) || 0,
+    padR: parseFloat(k.style.paddingRight) || 0,
+    drop: k.dataset.fdrop ? parseFloat(k.style.marginTop) || 0 : 0,
+    wasDrop: !!k.dataset.fdrop,
+  }));
+  /* phase 2 — pure math: effective top = measured + cumulative shift
+   * from drops already assigned above this block */
+  interface W { k: HTMLElement; padL: number; padR: number; drop: number; wasDrop: boolean; }
+  const writes: W[] = [];
+  let shift = 0;
+  for (const t of texts) {
+    const kt = t.top + shift;
+    const kb = kt + t.h;
+    let padL = 0, padR = 0, drop = 0;
+    if (floats.length) {
+      let bandBot = -Infinity;
+      let hasBand = false;
+      for (const f of floats) {
+        if (kb <= f.top || kt >= f.bottom) continue;
+        hasBand = true;
+        if (f.bottom > bandBot) bandBot = f.bottom;
+        if ((f.left + f.right) / 2 < pageW / 2) {
+          padL = Math.max(padL, f.right + 12 - t.left);
+        } else {
+          padR = Math.max(padR, t.left + t.w - (f.left - 12));
+        }
+      }
+      if (hasBand) {
+        padL = Math.max(0, padL);
+        padR = Math.max(0, padR);
+        if (t.w - padL - padR < FLOW_MIN_TEXT) {
+          // no room beside the cards — drop below the lowest float,
+          // snapped to the 26px rule grid
+          padL = padR = 0;
+          drop = Math.max(0, Math.ceil((bandBot - kt + 4) / 26) * 26);
+        }
       }
     }
-    padL = Math.max(0, padL);
-    padR = Math.max(0, padR);
-    if (k.offsetWidth - padL - padR >= FLOW_MIN_TEXT) {
-      if (padL > 0) k.style.paddingLeft = `${Math.round(padL)}px`;
-      if (padR > 0) k.style.paddingRight = `${Math.round(padR)}px`;
-      continue;
+    if (padL !== t.padL || padR !== t.padR || drop !== t.drop || (t.wasDrop && !drop)) {
+      writes.push({ k: t.k, padL, padR, drop, wasDrop: t.wasDrop });
     }
-    // no room beside the cards — drop the line below the lowest float,
-    // snapped to the 26px rule grid so the text still sits on a line
-    const bot = Math.max(...band.map((f) => f.offsetTop + f.offsetHeight));
-    const drop = Math.ceil((bot - kt + 4) / 26) * 26;
-    if (drop > 0) {
-      k.style.marginTop = `${drop}px`;
-      k.dataset.fdrop = "1";
-    }
+    shift += drop - t.drop;
+  }
+  /* phase 3 — writes, all after every read */
+  for (const w of writes) {
+    w.k.style.paddingLeft = w.padL ? `${Math.round(w.padL)}px` : "";
+    w.k.style.paddingRight = w.padR ? `${Math.round(w.padR)}px` : "";
+    if (w.drop) { w.k.style.marginTop = `${w.drop}px`; w.k.dataset.fdrop = "1"; }
+    else if (w.wasDrop) { w.k.style.marginTop = ""; delete w.k.dataset.fdrop; }
   }
 }
 
