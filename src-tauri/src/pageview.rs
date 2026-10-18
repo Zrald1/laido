@@ -306,15 +306,8 @@ pub async fn pv_open(
                 if !parked {
                     return;
                 }
-                let _ = com_call(&id, |pw| unsafe {
-                    use webview2_com::Microsoft::Web::WebView2::Win32::*;
-                    use windows::core::Interface;
-                    let core = pw.controller().CoreWebView2().map_err(|e| e.to_string())?;
-                    if let Ok(wv3) = core.cast::<ICoreWebView2_3>() {
-                        let _ = wv3.Resume();
-                    }
-                    Ok(())
-                });
+                #[cfg(windows)]
+                com_resume(&id);
                 let _ = wv.navigate(url.parse().unwrap_or_else(|_| {
                     "about:blank".parse().expect("about:blank is a valid url")
                 }));
@@ -457,6 +450,7 @@ pub async fn pv_visible(caller: tauri::Webview, id: String, on: bool) -> Result<
  * (1px shimmy + restore in the same main-thread call) forces WM_SIZE and
  * the compositor presents immediately — shared by pv_visible and the
  * batched pv_sync path */
+#[cfg(windows)]
 fn show_with_shimmy(id: &str, wv: &Webview<Wry>) -> Result<(), String> {
     wv.show().map_err(|e| e.to_string())?;
     com_call(id, |pw| unsafe {
@@ -470,6 +464,26 @@ fn show_with_shimmy(id: &str, wv: &Webview<Wry>) -> Result<(), String> {
         pw.controller().SetBounds(r).ok();
         Ok(())
     })
+}
+
+#[cfg(not(windows))]
+fn show_with_shimmy(_id: &str, wv: &Webview<Wry>) -> Result<(), String> {
+    wv.show().map_err(|e| e.to_string())
+}
+
+/// watchdog's wake poke — the engine can land half-suspended after an env
+/// churn; Resume() is a no-op on a healthy engine and revives a frozen one.
+#[cfg(windows)]
+fn com_resume(id: &str) {
+    let _ = com_call(id, |pw| unsafe {
+        use webview2_com::Microsoft::Web::WebView2::Win32::*;
+        use windows::core::Interface;
+        let core = pw.controller().CoreWebView2().map_err(|e| e.to_string())?;
+        if let Ok(wv3) = core.cast::<ICoreWebView2_3>() {
+            let _ = wv3.Resume();
+        }
+        Ok(())
+    });
 }
 
 #[derive(serde::Deserialize)]
@@ -540,6 +554,7 @@ pub async fn pv_url(caller: tauri::Webview, id: String) -> Result<String, String
 /// the window's dispatcher, and blocking a tauri worker on recv is safe
 /// here because every command in this module is async (sync would
 /// deadlock the main thread it waits on).
+#[cfg(windows)]
 fn com_call<T: Send + 'static>(
     id: &str,
     f: impl FnOnce(tauri::webview::PlatformWebview) -> Result<T, String> + Send + 'static,
@@ -563,6 +578,7 @@ fn com_call<T: Send + 'static>(
 /// report the truth — the frontend's suspended-set must not claim engines
 /// that are still running. Media-playing engines must keep running — the
 /// frontend only calls this on quiet tabs.
+#[cfg(windows)]
 #[tauri::command]
 pub async fn pv_suspend(id: String) -> Result<bool, String> {
     let armed = com_call(&id, |pw| unsafe {
@@ -606,10 +622,17 @@ pub async fn pv_suspend(id: String) -> Result<bool, String> {
     Ok(false)
 }
 
+#[cfg(not(windows))]
+#[tauri::command]
+pub async fn pv_suspend(_id: String) -> Result<bool, String> {
+    Ok(false)
+}
+
 /// wake a suspended engine. TrySuspend does NOT auto-undo on SetIsVisible —
 /// the WebView2 needs an explicit Resume or its scripts/timers stay frozen
 /// (every pv_eval times out and the page paints dead). Resume on a running
 /// engine is a documented no-op, so callers may fire it unconditionally.
+#[cfg(windows)]
 #[tauri::command]
 pub async fn pv_resume(id: String) -> Result<bool, String> {
     com_call(&id, |pw| unsafe {
@@ -622,11 +645,18 @@ pub async fn pv_resume(id: String) -> Result<bool, String> {
     })
 }
 
+#[cfg(not(windows))]
+#[tauri::command]
+pub async fn pv_resume(_id: String) -> Result<bool, String> {
+    Ok(true)
+}
+
 /// memory pressure without pausing scripts — for engines that must keep
 /// running (audio playing) but should swap cold pages to disk. Unlike
 /// suspend this does NOT auto-restore, so callers set Normal again when
 /// the engine becomes active. The cast fails on runtimes older than 114 —
 /// treated as a quiet no-op.
+#[cfg(windows)]
 #[tauri::command]
 pub async fn pv_memlevel(id: String, low: bool) -> Result<bool, String> {
     com_call(&id, move |pw| unsafe {
@@ -646,6 +676,12 @@ pub async fn pv_memlevel(id: String, low: bool) -> Result<bool, String> {
             .map_err(|e| e.to_string())?;
         Ok(true)
     })
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+pub async fn pv_memlevel(_id: String, _low: bool) -> Result<bool, String> {
+    Ok(false)
 }
 
 /// pull OS keyboard focus back into the calling window's webview. A child
