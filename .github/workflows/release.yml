@@ -50,6 +50,18 @@ jobs:
 
       - run: npm ci
 
+      # import the signing cert into the runner's store so tauri's
+      # certificateThumbprint lookup finds it (Windows only)
+      - name: Import signing certificate
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $b64 = "${{ secrets.LAIDO_SIGN_PFX }}"
+          if (-not $b64) { throw "LAIDO_SIGN_PFX secret is not set" }
+          [IO.File]::WriteAllBytes("$env:TEMP\sign.pfx", [Convert]::FromBase64String($b64))
+          certutil -f -importpfx -p "${{ secrets.LAIDO_SIGN_PFX_PASSWORD }}" "$env:TEMP\sign.pfx"
+          if ($LASTEXITCODE) { throw "cert import failed" }
+
       # a tag push (v*) builds AND publishes a GitHub Release with the
       # installers; a plain main push just verifies the build on all platforms
       - name: Build Laido
@@ -62,8 +74,9 @@ jobs:
           releaseBody: |
             **Laido — the notepad that acts on what you write.**
 
-            Installers for every platform are attached below. Unsigned builds —
-            your OS may ask you to confirm before the first launch.
+            Installers for every platform are attached below. Windows builds are
+            code-signed (self-signed dev cert — SmartScreen may still ask you to
+            confirm on the first launch while reputation builds).
 
             - **Windows:** `.msi` or `.exe` (NSIS)
             - **macOS:** `.dmg` (Apple Silicon)
