@@ -1,0 +1,10 @@
+{
+  "bundle": {
+    "macOS": {
+      "entitlements": "macos/entitlements.plist",
+      "files": {
+        "embedded.provisionprofile": "macos/Laido_AppStore.provisionprofile"
+      }
+    }
+  }
+}
