@@ -55,19 +55,22 @@ jobs:
       - name: Import signing certificate
         if: matrix.platform == 'windows-latest'
         shell: pwsh
+        timeout-minutes: 4
         run: |
           $b64 = "${{ secrets.LAIDO_SIGN_PFX }}"
           if (-not $b64) { throw "LAIDO_SIGN_PFX secret is not set" }
           [IO.File]::WriteAllBytes("$env:TEMP\sign.pfx", [Convert]::FromBase64String($b64))
-          certutil -f -user -importpfx -p "${{ secrets.LAIDO_SIGN_PFX_PASSWORD }}" "$env:TEMP\sign.pfx"
-          if ($LASTEXITCODE) { throw "cert import failed" }
+          $pass = ConvertTo-SecureString -String "${{ secrets.LAIDO_SIGN_PFX_PASSWORD }}" -AsPlainText -Force
+          Import-PfxCertificate -FilePath "$env:TEMP\sign.pfx" -CertStoreLocation Cert:\CurrentUser\My -Password $pass | Out-Null
+          $c = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Thumbprint -eq "467F2297F5AC262A4397EC253B43FC139D66F96E" }
+          if (-not $c) { throw "cert not found in CurrentUser\My after import" }
+          Write-Output "cert imported: $($c.Subject)"
           # prove signtool can find + use the cert before the real build
-          $st = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
-                Where-Object { $_.FullName -like "*\x64\*" } | Sort-Object FullName -Descending |
-                Select-Object -First 1 -ExpandProperty FullName
+          $st = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe"
           Copy-Item "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" "$env:TEMP\test-sign.exe"
           & $st sign /fd sha256 /sha1 467F2297F5AC262A4397EC253B43FC139D66F96E "$env:TEMP\test-sign.exe"
           if ($LASTEXITCODE) { throw "signtool verification failed" }
+          Write-Output "signtool verification OK"
 
       # a tag push (v*) builds AND publishes a GitHub Release with the
       # installers; a plain main push just verifies the build on all platforms
