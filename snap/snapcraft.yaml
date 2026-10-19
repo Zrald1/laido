@@ -1,0 +1,37 @@
+name: laido
+title: Laido
+version: '0.0.6'
+summary: Local-first AI notepad
+description: |
+  Laido is a local-first AI notepad. Notes live as plain markdown on
+  your disk — the agent researches, writes, and edits for you, with
+  every action visible as a proposal you accept or discard.
+  Bring your own API key (30+ providers) or use a managed account.
+base: core22
+confinement: strict
+grade: stable
+license: UNSET
+
+apps:
+  laido:
+    command: usr/bin/laido
+    desktop: usr/share/applications/laido.desktop
+    extensions: [gnome]
+    environment:
+      # WebKitGTK's own sandbox cannot nest inside snap confinement
+      WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS: '1'
+    plugs:
+      - home
+      - network
+      - removable-media
+
+parts:
+  laido:
+    plugin: dump
+    # build: download the release .deb, or point at a local file:
+    #   source: ./Laido_0.0.6_amd64.deb
+    source: https://github.com/Zrald1/laido/releases/download/v0.0.6/Laido_0.0.6_amd64.deb
+    source-type: deb
+    stage-packages:
+      - libwebkit2gtk-4.1-0
+      - libayatana-appindicator3-1

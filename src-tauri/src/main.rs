@@ -497,6 +497,22 @@ fn main() {
                 .extensions_path(&ext_dir)
                 .build()?;
             }
+            #[cfg(not(windows))]
+            {
+                use tauri::{WebviewUrl, WebviewWindowBuilder};
+                // same window, minus the WebView2-only extension options
+                WebviewWindowBuilder::new(
+                    app.handle(),
+                    "main",
+                    WebviewUrl::App("index.html".into()),
+                )
+                .title("Laido")
+                .inner_size(1180.0, 760.0)
+                .min_inner_size(720.0, 460.0)
+                .decorations(false)
+                .center()
+                .build()?;
+            }
             skills::seed_defaults();
             #[cfg(not(windows))]
             extensions::seed_bridge(app.handle());
