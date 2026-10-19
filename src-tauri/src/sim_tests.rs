@@ -102,7 +102,7 @@ fn sim_term_ai_fences() {
             "tell me about my files",
             "make me flashcards for spanish verbs",
         ] {
-            let r = crate::term::term_ai(prompt.into(), vec![], None, None, None)
+            let r = crate::term::term_ai(prompt.into(), vec![], None, None, None, None)
                 .await
                 .expect("term_ai");
             println!("--- {prompt}");
