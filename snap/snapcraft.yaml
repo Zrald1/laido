@@ -1,6 +1,6 @@
 name: laido
 title: Laido
-version: '0.0.6'
+version: '0.0.5'
 summary: Local-first AI notepad
 description: |
   Laido is a local-first AI notepad. Notes live as plain markdown on
@@ -29,8 +29,8 @@ parts:
   laido:
     plugin: dump
     # build: download the release .deb, or point at a local file:
-    #   source: ./Laido_0.0.6_amd64.deb
-    source: https://github.com/Zrald1/laido/releases/download/v0.0.6/Laido_0.0.6_amd64.deb
+    #   source: ./Laido_0.0.5_amd64.deb
+    source: https://github.com/Zrald1/laido/releases/download/v0.0.5/Laido_0.0.5_amd64.deb
     source-type: deb
     stage-packages:
       - libwebkit2gtk-4.1-0
