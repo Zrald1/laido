@@ -5,18 +5,18 @@
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
   IgnorableNamespaces="uap rescap">
 
-  <!-- Partner Center: replace Name + Publisher with the assigned package identity
-       (Partner Center → your app → Product management → Product identity).
-       Publisher must equal the signing cert's CN. Version must be 4-part. -->
+  <!-- Partner Center identity — app: Laido, store id 9NT11XSG8H4B
+       Publisher CN must equal the signing cert's subject. Version is
+       substituted by make-msix.ps1 (4-part, must increase per submission). -->
   <Identity
-    Name="ZraldWebDevelopmentServices.Laido"
-    Publisher="CN=Zrald Web Development Services"
+    Name="ZRALDWEBDEVELOPMENTSERVIC.Laido"
+    Publisher="CN=5681D04A-8CD3-43BB-AE2B-CE4042C680B1"
     Version="0.0.0.0"
     ProcessorArchitecture="x64" />
 
   <Properties>
     <DisplayName>Laido</DisplayName>
-    <PublisherDisplayName>Zrald Web Development Services</PublisherDisplayName>
+    <PublisherDisplayName>ZRALD WEB DEVELOPMENT SERVICES</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
 

@@ -2,7 +2,8 @@
 # Usage:  powershell -File make-msix.ps1 [-Version 0.0.5.0] [-Thumbprint <sha1>]
 param(
   [string]$Version    = "0.0.5.0",
-  [string]$Thumbprint = "467F2297F5AC262A4397EC253B43FC139D66F96E",
+  # cert whose CN equals the manifest Publisher (Partner Center identity)
+  [string]$Thumbprint = "0D21BEC2A6177E590904D0E4E7203E9DF0735284",
   [string]$AppExe     = "$PSScriptRoot\..\target\release\laido.exe",
   [string]$Icons      = "$PSScriptRoot\..\icons",
   [string]$OutDir     = "$PSScriptRoot\..\target\release\bundle\msix"
