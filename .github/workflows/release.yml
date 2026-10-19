@@ -50,8 +50,8 @@ jobs:
 
       - run: npm ci
 
-      # import the signing cert into the runner's store so tauri's
-      # certificateThumbprint lookup finds it (Windows only)
+      # import the signing cert into the runner's CURRENT USER store —
+      # signtool /sha1 only searches CurrentUser\My by default (Windows only)
       - name: Import signing certificate
         if: matrix.platform == 'windows-latest'
         shell: pwsh
@@ -59,8 +59,15 @@ jobs:
           $b64 = "${{ secrets.LAIDO_SIGN_PFX }}"
           if (-not $b64) { throw "LAIDO_SIGN_PFX secret is not set" }
           [IO.File]::WriteAllBytes("$env:TEMP\sign.pfx", [Convert]::FromBase64String($b64))
-          certutil -f -importpfx -p "${{ secrets.LAIDO_SIGN_PFX_PASSWORD }}" "$env:TEMP\sign.pfx"
+          certutil -f -user -importpfx -p "${{ secrets.LAIDO_SIGN_PFX_PASSWORD }}" "$env:TEMP\sign.pfx"
           if ($LASTEXITCODE) { throw "cert import failed" }
+          # prove signtool can find + use the cert before the real build
+          $st = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+                Where-Object { $_.FullName -like "*\x64\*" } | Sort-Object FullName -Descending |
+                Select-Object -First 1 -ExpandProperty FullName
+          Copy-Item "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" "$env:TEMP\test-sign.exe"
+          & $st sign /fd sha256 /sha1 467F2297F5AC262A4397EC253B43FC139D66F96E /t http://timestamp.digicert.com "$env:TEMP\test-sign.exe"
+          if ($LASTEXITCODE) { throw "signtool verification failed" }
 
       # a tag push (v*) builds AND publishes a GitHub Release with the
       # installers; a plain main push just verifies the build on all platforms
