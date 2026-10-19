@@ -111,12 +111,13 @@ pub async fn chat_vision(
     send(model, messages, max_tokens).await
 }
 
-async fn send(model: &str, messages: Vec<serde_json::Value>, max_tokens: u32) -> Result<String, String> {
+async fn send(spec: &str, messages: Vec<serde_json::Value>, max_tokens: u32) -> Result<String, String> {
     let s = load_settings();
-    if s.nebius_api_key.is_empty() {
-        return Err("no Nebius API key — open Settings and add one".into());
+    let (model, base_url, key) = crate::state::resolve_llm(&s, spec);
+    if key.is_empty() {
+        return Err("no API key for this provider — open Settings".into());
     }
-    let url = format!("{}/chat/completions", s.base_url.trim_end_matches('/'));
+    let url = format!("{base_url}/chat/completions");
 
     let base = json!({
         "model": model,
@@ -137,7 +138,7 @@ async fn send(model: &str, messages: Vec<serde_json::Value>, max_tokens: u32) ->
         }
         match client
             .post(&url)
-            .bearer_auth(&s.nebius_api_key)
+            .bearer_auth(&key)
             .json(&body)
             .send()
             .await
@@ -300,13 +301,14 @@ pub async fn sheet_tool_gen(app: AppHandle, prompt: String) -> Result<String, St
 #[tauri::command]
 pub async fn llm_models() -> Result<Vec<String>, String> {
     let s = load_settings();
-    if s.nebius_api_key.is_empty() {
-        return Err("no Nebius API key".into());
+    let (_, base_url, key) = crate::state::resolve_llm(&s, "");
+    if key.is_empty() {
+        return Err("no API key — open Settings and add one".into());
     }
-    let url = format!("{}/models", s.base_url.trim_end_matches('/'));
+    let url = format!("{base_url}/models");
     let resp = reqwest::Client::new()
         .get(&url)
-        .bearer_auth(&s.nebius_api_key)
+        .bearer_auth(&key)
         .send()
         .await
         .map_err(|e| format!("network error: {e}"))?;
@@ -331,17 +333,20 @@ pub async fn llm_models() -> Result<Vec<String>, String> {
 
 pub async fn embed(texts: &[String], dims: u32) -> Result<Vec<Vec<f32>>, String> {
     let s = load_settings();
-    if s.nebius_api_key.is_empty() {
-        return Err("no Nebius API key — open Settings and add one".into());
+    let (mut model, base_url, key) = crate::state::resolve_llm(&s, &s.model_embed);
+    if key.is_empty() {
+        return Err("no API key for this provider — open Settings".into());
     }
-    let url = format!("{}/embeddings", s.base_url.trim_end_matches('/'));
+    let url = format!("{base_url}/embeddings");
     // managed gateway picks the embed model server-side; direct BYOK needs a
-    // concrete model id
-    let model = if s.base_url.starts_with("https://laido.") {
-        "auto"
-    } else {
-        "Qwen/Qwen3-Embedding-8B"
-    };
+    // concrete model id (or the user's picked embedding model)
+    if model.is_empty() {
+        model = if base_url.starts_with("https://laido.") {
+            "auto".to_string()
+        } else {
+            "Qwen/Qwen3-Embedding-8B".to_string()
+        };
+    }
     let body = serde_json::json!({
         "model": model,
         "input": texts,
@@ -350,7 +355,7 @@ pub async fn embed(texts: &[String], dims: u32) -> Result<Vec<Vec<f32>>, String>
     });
     let resp = reqwest::Client::new()
         .post(url)
-        .bearer_auth(&s.nebius_api_key)
+        .bearer_auth(&key)
         .json(&body)
         .send()
         .await

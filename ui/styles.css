@@ -891,6 +891,17 @@ body.sticky-mode #note-body::after { content: none; }
 .model-select:focus { border-color: var(--accent); }
 .modal-card .model-select { margin-bottom: 2px; }
 #models-refresh { margin-top: 12px; font-size: 12px; padding: 5px 10px; }
+.prov-add { display: flex; gap: 6px; margin-top: 6px; }
+.prov-add .model-select { flex: 0 0 42%; }
+.prov-add input { flex: 1; min-width: 0; padding: 6px 8px; background: var(--bg-3); color: var(--text); border: 1px solid var(--line); border-radius: 8px; font-size: 12.5px; outline: none; }
+.prov-add input:focus { border-color: var(--accent); }
+.prov-row { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 4px 0; border-bottom: 1px dashed var(--line); }
+.prov-row .prov-name { flex: 0 0 auto; font-weight: 600; }
+.prov-row .prov-base { flex: 1; min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prov-row button { padding: 1px 7px; font-size: 11px; }
+.prov-row .prov-bad { color: var(--warn, #b7791f); font-size: 11px; }
+.model-select optgroup { font-style: normal; color: var(--muted); }
+.model-select.hidden, .rail-block.hidden, #model-picks.hidden { display: none; }
 .act-line { font-size: 12px; color: var(--muted); padding: 4px 0; border-bottom: 1px dashed var(--line); line-height: 1.45; }
 .act-line:first-child { color: var(--text); }
 

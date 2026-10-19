@@ -17,8 +17,20 @@ export interface Settings {
   model_deep: string;
   model_rewrite: string;
   model_ocr: string;
+  model_embed: string;
+  providers_json: string;
   laido_session: string;
   laido_email: string;
+}
+
+/** one provider's live catalog — the server fetches /models per provider */
+export interface ProvModels {
+  id: string;
+  label: string;
+  managed: boolean;
+  has_key: boolean;
+  models: string[];
+  error: string;
 }
 
 interface PingResult {
@@ -195,6 +207,7 @@ export function modelPatch(): Record<string, string> {
     model_deep: pick("#model-deep", settings?.model_deep ?? ""),
     model_rewrite: pick("#model-rewrite-set", settings?.model_rewrite ?? ""),
     model_ocr: pick("#model-ocr-set", settings?.model_ocr ?? ""),
+    model_embed: pick("#model-embed-set", settings?.model_embed ?? ""),
   };
 }
 
@@ -219,14 +232,17 @@ function applyProviderUI() {
     baseIn.classList.toggle("hidden", p !== "custom");
     if (p === "custom") baseIn.value = settings?.base_url ?? "";
   }
-  locked?.classList.toggle("hidden", !managed);
-  // every model select — settings panel + quick picks — locks under the plan
+  locked?.classList.toggle("hidden", !managedOnly());
+  // every model select — settings panel + quick picks — is only usable when
+  // there's something to pick (managed-only plans hide them entirely)
+  const pickable = !managedOnly();
   for (const id of [
     "#model-fast", "#model-main", "#model-deep", "#model-rewrite-set",
-    "#model-ocr-set", "#model-quick", "#model-rewrite", "#model-ocr",
+    "#model-ocr-set", "#model-embed-set",
+    "#model-quick", "#model-rewrite", "#model-ocr",
   ]) {
     const el = $<HTMLSelectElement>(id);
-    if (el) el.disabled = managed;
+    if (el) el.disabled = !pickable;
   }
   const refresh = $<HTMLButtonElement>("#models-refresh");
   if (refresh) refresh.disabled = managed;
@@ -259,6 +275,7 @@ export async function refreshStatus() {
   }
   renderAccount();
   applyProviderUI();
+  renderExtraProviders();
 }
 
 /* ---- Laido account: sign in with Google via the site, key auto-installed ---- */
@@ -345,66 +362,156 @@ async function laidoSignIn() {
   }
 }
 
+let catalog: ProvModels[] = [];
+
+/** every configured provider's live model list — active pair + extras */
 async function loadModels() {
   try {
-    models = await invoke<string[]>("llm_models");
+    catalog = await invoke<ProvModels[]>("llm_models_all");
   } catch {
-    models = FALLBACK_MODELS;
+    catalog = [];
   }
-  if (models.length === 0) models = FALLBACK_MODELS;
+  if (!catalog.length) {
+    // legacy fallback — single provider via the old command
+    try {
+      models = await invoke<string[]>("llm_models");
+    } catch {
+      models = FALLBACK_MODELS;
+    }
+    if (models.length === 0) models = FALLBACK_MODELS;
+    catalog = [{
+      id: "active", label: PROVIDER_LABELS[providerChoice] ?? "provider",
+      managed: false, has_key: true, models, error: "",
+    }];
+  }
+  // keep the flat list for callers that still expect it
+  models = catalog.flatMap((p) => p.models);
+  if (!models.length) models = FALLBACK_MODELS;
 }
 
-const NON_CHAT = /embed|rerank|moderation|guard/i;
+/** no selectable provider at all — laido-only managed mode hides pickers */
+export function managedOnly(): boolean {
+  return catalog.length > 0 && catalog.every((p) => p.managed || !p.has_key);
+}
+
+const NON_CHAT = /embed|rerank|moderation|guard|whisper|transcrib|tts|speech/i;
+/** ids that look embedding-capable — the Library index model only offers these */
+const EMBED_RE = /embed|bge-|e5-|gte-|retriev|text-embedding/i;
 /** ids that look vision-capable — the OCR select only offers these */
 const VISION =
   /vision|multimodal|vlm|vl2|[-_]vl\b|llava|pixtral|moondream|internvl|minicpm-[vo]|idefics|paligemma|gemma-3|gpt-4o|gpt-4\.1|gpt-5|gemini|molmo|got-?ocr|florence|kimi|deepseek-vl|qvq|janus|emu3|ovis|fuyu|bagel|llama-4|glm-\d.*v|4\.\d+v|nemotron-parse|ui-?tars|\baria\b|\b4v\b|ocr|image/i;
 
-function fillSelect(sel: HTMLSelectElement, current: string, visionOnly = false) {
-  sel.innerHTML = "";
-  const pool = models.filter(
-    (m) => !NON_CHAT.test(m) && (!visionOnly || VISION.test(m) || m === current),
+export type ModelKind = "chat" | "vision" | "embed";
+
+function poolFor(kind: ModelKind, list: string[]): string[] {
+  if (kind === "embed") return list.filter((m) => EMBED_RE.test(m));
+  return list.filter(
+    (m) => !NON_CHAT.test(m) && (kind !== "vision" || VISION.test(m)),
   );
-  const list = pool.includes(current) ? pool : current ? [current, ...pool] : pool;
-  for (const m of list) {
-    const o = document.createElement("option");
-    o.value = m;
-    o.textContent = m ? short(m) : "(no vision model — pick one)";
-    o.title = m;
-    o.disabled = !m;
-    sel.append(o);
+}
+
+/** spec → the part after the last :: — display + regex tests work on the model id */
+const bareModel = (spec: string) =>
+  spec.startsWith("prov::") ? spec.split("::").pop() ?? "" : spec;
+
+function opt(value: string, text: string, title = ""): HTMLOptionElement {
+  const o = document.createElement("option");
+  o.value = value;
+  o.textContent = text;
+  o.title = title || text;
+  return o;
+}
+
+/** multi-provider select — one optgroup per provider, values carry the
+ *  "prov::<id>::<model>" spec so the backend routes to that provider's key */
+function fillSelect(
+  sel: HTMLSelectElement | null,
+  current: string,
+  kind: ModelKind = "chat",
+) {
+  if (!sel) return;
+  sel.innerHTML = "";
+  let matched = false;
+  for (const p of catalog) {
+    if (p.managed) {
+      const g = document.createElement("optgroup");
+      g.label = p.label;
+      const v = `prov::${p.id}::auto`;
+      g.append(opt(v, "auto · managed by plan"));
+      if (current === v || current === "auto") matched = true;
+      sel.append(g);
+      continue;
+    }
+    const pool = poolFor(kind, p.models);
+    if (!pool.length) continue;
+    const g = document.createElement("optgroup");
+    g.label = p.label + (p.error ? ` — ${p.error}` : "");
+    for (const m of pool) {
+      const v = `prov::${p.id}::${m}`;
+      g.append(opt(v, short(m), `${p.label} — ${m}`));
+      if (current === v) matched = true;
+    }
+    sel.append(g);
+  }
+  // a legacy bare model id maps onto the active provider's spec
+  if (current && !matched && !current.startsWith("prov::")) {
+    const v = `prov::active::${current}`;
+    if (Array.from(sel.options).some((o) => o.value === v)) {
+      sel.value = v;
+      matched = true;
+    }
+  }
+  // keep the stored value visible even when it isn't in any live catalog
+  if (current && !matched) {
+    sel.prepend(opt(current, `${bareModel(current)} (saved)`));
+    if (sel.options.length > 1) sel.options[0].selected = false;
+  }
+  // kind-constrained selects must never silently keep a non-conforming pick
+  if (kind !== "chat" && current && !poolFor(kind, [bareModel(current)]).length && !matched) {
+    const bad = opt("", `(no ${kind} model — pick one)`);
+    bad.disabled = true;
+    sel.prepend(bad);
   }
   sel.value = current;
+  // nothing stored → show a neutral placeholder instead of pretending the
+  // first catalog entry is the active model
+  if (!current) {
+    const ph = opt("", "default model");
+    sel.prepend(ph);
+    sel.value = "";
+  }
+}
+
+/** hide or show a select's whole rail-block (header quick picks) */
+function hideBlock(id: string, hide: boolean) {
+  const sel = $<HTMLSelectElement>(id);
+  if (!sel) return;
+  const block = sel.closest(".rail-block");
+  if (block) block.classList.toggle("hidden", hide);
+  else sel.classList.toggle("hidden", hide);
 }
 
 export function syncModelSelects() {
   if (!settings) return;
-  if (managed) {
-    // server-managed — show what the gateway will route to, not a picker
-    const lock = (id: string, label: string) => {
-      const sel = $<HTMLSelectElement>(id);
-      if (!sel) return;
-      sel.innerHTML = "";
-      const o = document.createElement("option");
-      o.value = o.textContent = label;
-      sel.append(o);
-      sel.value = label;
-      sel.disabled = true;
-    };
-    const auto = "auto — managed by plan";
-    lock("#model-quick", auto); lock("#model-rewrite", auto);
-    lock("#model-fast", auto); lock("#model-main", auto);
-    lock("#model-deep", auto); lock("#model-rewrite-set", auto);
-    lock("#model-ocr", auto); lock("#model-ocr-set", auto);
-    return;
-  }
+  const only = managedOnly();
+  // settings group: show the managed note instead of pickers when the user's
+  // subscription owns model choice and there are no extra providers
+  $("#model-locked")?.classList.toggle("hidden", !only);
+  $("#model-picks")?.classList.toggle("hidden", only);
+  // header quick picks — same rule: gone entirely under a managed plan
+  hideBlock("#model-quick", only);
+  hideBlock("#model-rewrite", only);
+  hideBlock("#model-ocr", only);
+  if (only) return;
   fillSelect($<HTMLSelectElement>("#model-quick"), settings.model_main);
   fillSelect($<HTMLSelectElement>("#model-rewrite"), settings.model_rewrite);
   fillSelect($<HTMLSelectElement>("#model-fast"), settings.model_fast);
   fillSelect($<HTMLSelectElement>("#model-main"), settings.model_main);
   fillSelect($<HTMLSelectElement>("#model-deep"), settings.model_deep);
   fillSelect($<HTMLSelectElement>("#model-rewrite-set"), settings.model_rewrite);
-  fillSelect($<HTMLSelectElement>("#model-ocr"), settings.model_ocr, true);
-  fillSelect($<HTMLSelectElement>("#model-ocr-set"), settings.model_ocr, true);
+  fillSelect($<HTMLSelectElement>("#model-ocr"), settings.model_ocr, "vision");
+  fillSelect($<HTMLSelectElement>("#model-ocr-set"), settings.model_ocr, "vision");
+  fillSelect($<HTMLSelectElement>("#model-embed-set"), settings.model_embed, "embed");
 }
 
 export async function initModels() {
@@ -430,13 +537,24 @@ export async function initModels() {
   $<HTMLSelectElement>("#model-ocr").addEventListener("change", async (e) => {
     const value = (e.target as HTMLSelectElement).value;
     await invoke("settings_set", { patch: { model_ocr: value } });
-    addActivity(`ocr model → ${short(value)}`);
+    addActivity(`ocr model → ${short(bareModel(value))}`);
     await refreshStatus();
     syncModelSelects();
   });
 
+  $<HTMLSelectElement>("#model-embed-set")?.addEventListener("change", async (e) => {
+    const value = (e.target as HTMLSelectElement).value;
+    await invoke("settings_set", { patch: { model_embed: value } });
+    addActivity(`embedding model → ${short(bareModel(value))}`);
+    await refreshStatus();
+    syncModelSelects();
+  });
+
+  initExtraProviders();
+
   $("#models-refresh").addEventListener("click", async () => {
     await loadModels();
+    renderExtraProviders();
     syncModelSelects();
     addActivity(`✓ model catalog: ${models.length} models`);
   });
@@ -486,6 +604,126 @@ export async function initModels() {
     }
     applyProviderUI();
   });
+}
+
+/* ---- additional providers: several keys live side by side, every chat
+ * can route to any of them via a "prov::<id>::<model>" spec ---- */
+
+interface ProviderCfg {
+  id: string;
+  label: string;
+  key: string;
+  base: string;
+}
+
+function extraProviders(): ProviderCfg[] {
+  try {
+    const v = JSON.parse(settings?.providers_json ?? "[]");
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
+}
+
+async function saveExtraProviders(list: ProviderCfg[]) {
+  await invoke("settings_set", { patch: { providers_json: JSON.stringify(list) } });
+  settings = await invoke<Settings>("settings_get");
+}
+
+function renderExtraProviders() {
+  const list = $("#prov-list");
+  if (!list) return;
+  list.innerHTML = "";
+  for (const p of extraProviders()) {
+    const row = document.createElement("div");
+    row.className = "prov-row";
+    const name = document.createElement("span");
+    name.className = "prov-name";
+    name.textContent = p.label;
+    const base = document.createElement("span");
+    base.className = "prov-base";
+    base.textContent = p.base;
+    base.title = p.base;
+    const cat = catalog.find((c) => c.id === p.id);
+    if (cat?.error) {
+      const bad = document.createElement("span");
+      bad.className = "prov-bad";
+      bad.textContent = "✕";
+      bad.title = cat.error;
+      row.append(bad);
+    }
+    const rm = document.createElement("button");
+    rm.className = "ghost mini";
+    rm.textContent = "✕";
+    rm.title = "remove provider";
+    rm.addEventListener("click", async () => {
+      await saveExtraProviders(extraProviders().filter((x) => x.id !== p.id));
+      await loadModels();
+      renderExtraProviders();
+      syncModelSelects();
+      addActivity(`provider removed: ${p.label}`);
+    });
+    row.append(name, base, rm);
+    list.append(row);
+  }
+}
+
+function initExtraProviders() {
+  const preset = $<HTMLSelectElement>("#prov-add-preset");
+  const keyIn = $<HTMLInputElement>("#prov-add-key");
+  const baseIn = $<HTMLInputElement>("#prov-add-base");
+  if (!preset || !keyIn || !baseIn) return;
+  // presets: everything except laido (that's the sign-in key field) — plus custom
+  for (const [id] of Object.entries(PROVIDERS)) {
+    if (id === "laido") continue;
+    preset.append(opt(id, PROVIDER_LABELS[id] ?? id));
+  }
+  preset.append(opt("custom", "Custom (OpenAI-compatible)…"));
+  preset.addEventListener("change", () => {
+    baseIn.classList.toggle("hidden", preset.value !== "custom");
+    if (preset.value === "custom") baseIn.focus();
+  });
+  $<HTMLButtonElement>("#prov-add-btn")?.addEventListener("click", async () => {
+    const id = preset.value;
+    const key = keyIn.value.trim();
+    const base = id === "custom" ? baseIn.value.trim() : PROVIDERS[id];
+    if (!key) { keyIn.focus(); return; }
+    if (!base) { baseIn.focus(); return; }
+    const label = id === "custom"
+      ? (baseIn.value.trim().replace(/^https?:\/\//, "").split("/")[0] ?? "custom")
+      : (PROVIDER_LABELS[id] ?? id);
+    const list = extraProviders();
+    // same id twice → replace its key instead of duplicating the row
+    const i = list.findIndex((p) => p.id === id && id !== "custom");
+    const entry: ProviderCfg = {
+      id: id === "custom" ? `c${Date.now().toString(36)}` : id,
+      label, key, base,
+    };
+    if (i >= 0) list[i] = entry; else list.push(entry);
+    await saveExtraProviders(list);
+    keyIn.value = "";
+    baseIn.value = "";
+    await loadModels();
+    renderExtraProviders();
+    syncModelSelects();
+    addActivity(`provider added: ${label}`);
+  });
+  renderExtraProviders();
+}
+
+/** per-chat model picker — hidden when the plan owns model choice and no
+ *  BYOK providers exist; otherwise one optgroup per provider so a chat can
+ *  be pinned to "openai · gpt-4o" while another runs "groq · llama". The
+ *  select's value is a "prov::<id>::<model>" spec — the backend resolves it.
+ *  Returns false when the select was hidden (caller may remove it). */
+export function fillChatSelect(sel: HTMLSelectElement, current: string): boolean {
+  if (managedOnly()) {
+    sel.style.display = "none";
+    return false;
+  }
+  sel.style.display = "";
+  fillSelect(sel, current, "chat");
+  return true;
 }
 
 export async function testConnection() {

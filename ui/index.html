@@ -286,6 +286,14 @@
       <label for="provider-select">Provider <span class="muted">— where this key works</span></label>
       <select id="provider-select" class="model-select"></select>
       <input id="base-url" class="hidden" placeholder="https://api.example.com/v1" autocomplete="off" />
+      <label>Additional providers <span class="muted">— chats can use any of them at once</span></label>
+      <div id="prov-list" class="prov-list"></div>
+      <div class="prov-add">
+        <select id="prov-add-preset" class="model-select"></select>
+        <input id="prov-add-base" class="hidden" placeholder="https://api.example.com/v1" autocomplete="off" />
+        <input id="prov-add-key" type="password" placeholder="api key" autocomplete="off" />
+        <button id="prov-add-btn" class="ghost mini" title="Add provider">+</button>
+      </div>
       <label for="key-tavily">Tavily API key <span class="muted">(for @research)</span></label>
       <input id="key-tavily" type="password" placeholder="from tavily.com" autocomplete="off" />
       <label for="key-assemblyai">AssemblyAI API key <span class="muted">(for voice notes)</span></label>
@@ -311,6 +319,8 @@
       <select id="model-rewrite-set" class="model-select"></select>
       <label>OCR model <span class="muted">— vision only; transcribes scanned PDFs added to the Library</span></label>
       <select id="model-ocr-set" class="model-select"></select>
+      <label>Embedding model <span class="muted">— embedding models only; indexes the Library for search</span></label>
+      <select id="model-embed-set" class="model-select"></select>
       <button id="models-refresh" class="ghost">Load models</button>
       </div>
         </div>

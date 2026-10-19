@@ -2983,7 +2983,10 @@ export function wireTerminal(card: HTMLElement) {
     }
   };
 
-  // the per-widget model selector — top center of the head
+  // the per-widget model selector — top center of the head. Hidden when the
+  // account is a managed subscription with no BYOK providers: the server
+  // owns model choice, so there is nothing to pick. With providers set, the
+  // select groups every provider's catalog — "prov::<id>::<model>" specs.
   const head = card.querySelector<HTMLElement>(".callout-head");
   if (head && !card.querySelector(".term-model-select")) {
     const sel = document.createElement("select");
@@ -2991,31 +2994,63 @@ export function wireTerminal(card: HTMLElement) {
     sel.title = "Model for this chat";
     void (async () => {
       try {
-        const models = await invoke<string[]>("llm_models");
+        interface ProvModels {
+          id: string; label: string; managed: boolean;
+          has_key: boolean; models: string[]; error: string;
+        }
+        const provs = await invoke<ProvModels[]>("llm_models_all");
         const s = await invoke<{ model_main?: string }>("settings_get");
-        for (const m of models) {
-          const o = document.createElement("option");
-          o.value = m;
-          o.textContent = m.split("/").pop() ?? m;
-          sel.append(o);
+        // managed-only → no picker at all
+        if (provs.every((p) => p.managed || !p.has_key)) {
+          sel.remove();
+          return;
+        }
+        const NON_CHAT = /embed|rerank|moderation|guard|whisper|transcrib|tts|speech/i;
+        for (const p of provs) {
+          const g = document.createElement("optgroup");
+          g.label = p.label;
+          if (p.managed) {
+            const o = document.createElement("option");
+            o.value = `prov::${p.id}::auto`;
+            o.textContent = "auto · managed by plan";
+            g.append(o);
+          } else {
+            for (const m of p.models.filter((x) => !NON_CHAT.test(x))) {
+              const o = document.createElement("option");
+              o.value = `prov::${p.id}::${m}`;
+              o.textContent = m.split("/").pop() ?? m;
+              o.title = `${p.label} — ${m}`;
+              g.append(o);
+            }
+          }
+          if (g.children.length) sel.append(g);
         }
         const want = card.dataset.model || s.model_main || "";
         if (want && !Array.from(sel.options).some((o) => o.value === want)) {
+          // a bare saved model id maps onto the active provider's spec
+          const v = `prov::active::${want}`;
+          if (!want.startsWith("prov::") &&
+              Array.from(sel.options).some((o) => o.value === v)) {
+            sel.value = v;
+            head.append(sel);
+            return;
+          }
           const o = document.createElement("option");
           o.value = want;
-          o.textContent = want;
+          o.textContent = want.split("::").pop() ?? want;
           sel.append(o);
         }
         sel.value = want;
       } catch {
         /* no model list — the default model is used */
       }
+      head.append(sel);
     })();
     sel.addEventListener("change", () => {
       card.dataset.model = sel.value;
-      addActivity(`model → ${sel.value}`);
+      addActivity(`model → ${sel.value.split("::").pop()}`);
     });
-    head.append(sel);
+    // appended only once the catalog resolves — stays absent under managed-only
   }
 
   // 📎 + 🎙 — shared chat tools (attach/paste/drop images+files, voice

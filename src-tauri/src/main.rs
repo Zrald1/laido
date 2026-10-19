@@ -586,6 +586,7 @@ fn main() {
             state::detect_locale,
             llm::llm_ping,
             llm::llm_models,
+            state::llm_models_all,
             llm::deck_tool_gen,
             llm::sheet_tool_gen,
             tools::tavily_ping,
