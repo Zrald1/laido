@@ -126,17 +126,31 @@ pub fn open_url(url: String) -> Result<(), String> {
     if url.contains('"') || url.chars().any(|c| c.is_control()) {
         return Err("invalid url".into());
     }
+    // cmd /C start needs a console host — CREATE_NO_WINDOW keeps it hidden
+    // so sign-in/plan links open the browser without a console flash
     #[cfg(target_os = "windows")]
-    let (program, args): (&str, Vec<&str>) = ("cmd", vec!["/C", "start", "", &url]);
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        use std::os::windows::process::CommandExt;
+        return std::process::Command::new("cmd")
+            .args(["/C", "start", "", &url])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+    }
     #[cfg(target_os = "macos")]
-    let (program, args): (&str, Vec<&str>) = ("open", vec![&url]);
-    #[cfg(target_os = "linux")]
-    let (program, args): (&str, Vec<&str>) = ("xdg-open", vec![&url]);
-    std::process::Command::new(program)
-        .args(args)
+    return std::process::Command::new("open")
+        .arg(&url)
         .spawn()
-        .map_err(|e| e.to_string())?;
-    Ok(())
+        .map(|_| ())
+        .map_err(|e| e.to_string());
+    #[cfg(all(unix, not(target_os = "macos")))]
+    return std::process::Command::new("xdg-open")
+        .arg(&url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string());
 }
 
 /* ---------- page fetch — the browser widget's reader lane + AI page context ------
