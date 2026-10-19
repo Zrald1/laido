@@ -9,6 +9,7 @@
 
 <p align="center">
   <a href="https://github.com/Zrald1/laido/releases"><img src="https://img.shields.io/github/v/release/Zrald1/laido?label=download" alt="Download"></a>
+  <a href="https://apps.microsoft.com/detail/9NT11XSG8H4B"><img src="https://img.shields.io/badge/Microsoft%20Store-Laido-0067C0?logo=microsoft&logoColor=white" alt="Microsoft Store"></a>
   <a href="https://github.com/Zrald1/laido/actions/workflows/release.yml"><img src="https://github.com/Zrald1/laido/actions/workflows/release.yml/badge.svg" alt="Build"></a>
   <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License">
   <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey" alt="Platforms">
@@ -107,11 +108,20 @@ Commands run only when you press Enter on their line — pasting text is safe.
 
 ## Download
 
-Grab an installer from the [Releases](https://github.com/Zrald1/laido/releases)
-page — `.msi`/`.exe` for Windows, `.dmg` for macOS (Apple Silicon),
-`.AppImage`/`.deb`/`.rpm` for Linux. Builds are unsigned, so your OS may ask
-you to confirm before the first launch. Every push to `main` is built on all
-three platforms; pushing a `v*` tag publishes a release automatically.
+**Windows** — get it from the
+[Microsoft Store](https://apps.microsoft.com/detail/9NT11XSG8H4B) (signed,
+auto-updating), or grab `.msi`/`.msix`/`.exe` from
+[Releases](https://github.com/Zrald1/laido/releases).
+
+**macOS** — `.dmg` (Apple Silicon) from Releases.
+**Linux** — `.AppImage`/`.deb`/`.rpm` from Releases.
+**Android** — `app-release.apk` under the
+[mobile-nightly](https://github.com/Zrald1/laido/releases/tag/mobile-nightly)
+prerelease.
+
+GitHub builds are unsigned, so your OS may ask you to confirm before the
+first launch. Every push to `main` is built on all three desktop platforms;
+pushing a `v*` tag publishes a release automatically.
 
 ## Quickstart
 
