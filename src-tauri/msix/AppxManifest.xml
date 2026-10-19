@@ -25,7 +25,21 @@
   </Dependencies>
 
   <Resources>
+    <!-- UI languages shipped in src/i18n.ts LANGS -->
     <Resource Language="en-us" />
+    <Resource Language="es" />
+    <Resource Language="fr" />
+    <Resource Language="de" />
+    <Resource Language="pt" />
+    <Resource Language="it" />
+    <Resource Language="nl" />
+    <Resource Language="ru" />
+    <Resource Language="tr" />
+    <Resource Language="ar" />
+    <Resource Language="zh" />
+    <Resource Language="ja" />
+    <Resource Language="ko" />
+    <Resource Language="fil" />
   </Resources>
 
   <Applications>
