@@ -22,6 +22,8 @@ New-Item -ItemType Directory -Force "$layout\Assets" | Out-Null
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 
 Copy-Item $AppExe "$layout\laido.exe"
+# third-party notices ship inside the package (Apache-2.0/MIT redistribution terms)
+Copy-Item "$PSScriptRoot\..\..\THIRD_PARTY_LICENSES.md" "$layout\THIRD_PARTY_LICENSES.md"
 foreach ($a in "StoreLogo.png","Square44x44Logo.png","Square150x150Logo.png",
                "Square310x310Logo.png","Wide310x150Logo.png") {
   Copy-Item "$Icons\$a" "$layout\Assets\$a"
