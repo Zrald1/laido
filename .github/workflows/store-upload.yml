@@ -1,0 +1,85 @@
+name: Store Upload
+
+# Builds the MSIX, signs it with the Partner Center publisher cert, and
+# publishes a Microsoft Store submission — one click instead of the manual
+# Partner Center upload. Requires the secrets listed at the bottom.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Package version (4-part — blank uses tauri.conf version, e.g. 0.0.7.0)"
+        required: false
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        shell: pwsh
+        run: |
+          $v = "${{ inputs.version }}"
+          if ([string]::IsNullOrWhiteSpace($v)) {
+            $conf = Get-Content src-tauri\tauri.conf.json -Raw | ConvertFrom-Json
+            $v = $conf.version
+          }
+          $parts = $v -split '\.'
+          while ($parts.Count -lt 4) { $parts += "0" }
+          $v = $parts[0..3] -join '.'
+          "MSIX_VERSION=$v" | Out-File $env:GITHUB_ENV -Append
+          "version: $v"
+
+      - name: Import Partner Center signing cert
+        shell: pwsh
+        env:
+          PFX_B64: ${{ secrets.MSIX_PFX_BASE64 }}
+          PFX_PASS: ${{ secrets.MSIX_PFX_PASSWORD }}
+        run: |
+          $bytes = [Convert]::FromBase64String($env:PFX_B64)
+          $tmp = "$env:RUNNER_TEMP\laido.pfx"
+          [IO.File]::WriteAllBytes($tmp, $bytes)
+          $cert = Import-PfxCertificate -FilePath $tmp -CertStoreLocation Cert:\CurrentUser\My `
+            -Password (ConvertTo-SecureString $env:PFX_PASS -AsPlainText -Force)
+          "thumbprint: $($cert.Thumbprint)"
+
+      - name: Build release exe
+        working-directory: src-tauri
+        run: cargo build --release
+
+      - name: Make + sign MSIX
+        shell: pwsh
+        run: |
+          & src-tauri\msix\make-msix.ps1 `
+            -Version "${{ env.MSIX_VERSION }}" `
+            -Thumbprint "0D21BEC2A6177E590904D0E4E7203E9DF0735284"
+
+      - name: Upload MSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: laido-msix
+          path: src-tauri/target/release/bundle/msix/*.msix
+
+      - name: Configure Microsoft Store CLI
+        uses: microsoft/microsoft-store-apppublisher@v1.2
+
+      - name: Reconfigure store credentials
+        run: msstore reconfigure `
+              --tenantId ${{ secrets.AZURE_AD_TENANT_ID }} `
+              --sellerId ${{ secrets.SELLER_ID }} `
+              --clientId ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }} `
+              --clientSecret ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
+
+      - name: Publish submission
+        run: msstore publish '${{ github.workspace }}/src-tauri/target/release/bundle/msix/Laido_${{ env.MSIX_VERSION }}.msix' -id 9NT11XSG8H4B
+
+# Secrets to add once (repo → Settings → Secrets and variables → Actions):
+#   AZURE_AD_TENANT_ID              Entra tenant id
+#   SELLER_ID                       Partner Center publisher/seller id
+#   AZURE_AD_APPLICATION_CLIENT_ID  Entra app registration client id
+#   AZURE_AD_APPLICATION_SECRET     Entra app registration client secret
+#   MSIX_PFX_BASE64                 base64 of the 0D21BEC2 publisher .pfx
+#   MSIX_PFX_PASSWORD               password used when exporting the .pfx
