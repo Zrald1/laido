@@ -57,3 +57,4 @@ kernels/*/target/
 Backend/
 _cdp-*.mjs
 _*
+!THIRD_PARTY_LICENSES.md
