@@ -240,7 +240,10 @@ pub async fn models_all() -> Vec<ProvModels> {
     for p in providers(&s) {
         provs.push((p.id.clone(), p.label.clone(), p.base.trim_end_matches('/').to_string(), p.key));
     }
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let mut out = Vec::new();
     for (id, label, base, key) in provs {
         let managed = key.starts_with("lk-") || base.starts_with("https://laido.");

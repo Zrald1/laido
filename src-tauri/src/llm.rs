@@ -127,7 +127,12 @@ async fn send(spec: &str, messages: Vec<serde_json::Value>, max_tokens: u32) -> 
         "store": false
     });
 
-    let client = reqwest::Client::new();
+    // deep models can think for minutes — the bound is on a stalled
+    // connection, not a long answer
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let mut with_kwargs = true;
     let mut tries = 0u8;
     let text = loop {
@@ -306,7 +311,10 @@ pub async fn llm_models() -> Result<Vec<String>, String> {
         return Err("no API key — open Settings and add one".into());
     }
     let url = format!("{base_url}/models");
-    let resp = reqwest::Client::new()
+    let resp = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
         .get(&url)
         .bearer_auth(&key)
         .send()
@@ -353,7 +361,10 @@ pub async fn embed(texts: &[String], dims: u32) -> Result<Vec<Vec<f32>>, String>
         "encoding_format": "float",
         "dimensions": dims,
     });
-    let resp = reqwest::Client::new()
+    let resp = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(90))
+        .build()
+        .map_err(|e| e.to_string())?
         .post(url)
         .bearer_auth(&key)
         .json(&body)

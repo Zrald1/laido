@@ -71,7 +71,10 @@ pub async fn search(query: &str, max: u32) -> Result<Vec<SearchHit>, String> {
     if s.tavily_api_key.is_empty() {
         return Err("no Tavily key — add one in Settings".into());
     }
-    let resp = reqwest::Client::new()
+    let resp = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
         .post("https://api.tavily.com/search")
         .bearer_auth(&s.tavily_api_key)
         .json(&json!({

@@ -469,7 +469,10 @@ pub async fn transcribe_wav(wav: Vec<u8>) -> Result<String, String> {
     if key.is_empty() {
         return Err("add your AssemblyAI key in Settings (gear icon)".into());
     }
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let up = client
         .post("https://api.assemblyai.com/v2/upload")
         .header("authorization", &key)

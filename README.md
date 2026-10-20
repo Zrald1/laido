@@ -160,4 +160,7 @@ data stays in `~/Documents/Laido` unless you explicitly ask for web research.
 
 ## License
 
-Apache-2.0
+Apache-2.0 — see [LICENSE](LICENSE). Third-party notices for the crates
+compiled into the shipped binary are in
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) (also bundled with the
+installer).
