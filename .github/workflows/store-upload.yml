@@ -36,8 +36,8 @@ jobs:
       - name: Import Partner Center signing cert
         shell: pwsh
         env:
-          PFX_B64: ${{ secrets.MSIX_PFX_BASE64 }}
-          PFX_PASS: ${{ secrets.MSIX_PFX_PASSWORD }}
+          PFX_B64: ${{ secrets.LAIDO_SIGN_PFX }}
+          PFX_PASS: ${{ secrets.LAIDO_SIGN_PFX_PASSWORD }}
         run: |
           $bytes = [Convert]::FromBase64String($env:PFX_B64)
           $tmp = "$env:RUNNER_TEMP\laido.pfx"
@@ -81,5 +81,5 @@ jobs:
 #   SELLER_ID                       Partner Center publisher/seller id
 #   AZURE_AD_APPLICATION_CLIENT_ID  Entra app registration client id
 #   AZURE_AD_APPLICATION_SECRET     Entra app registration client secret
-#   MSIX_PFX_BASE64                 base64 of the 0D21BEC2 publisher .pfx
-#   MSIX_PFX_PASSWORD               password used when exporting the .pfx
+#   LAIDO_SIGN_PFX                  base64 of the 0D21BEC2 publisher .pfx (already set)
+#   LAIDO_SIGN_PFX_PASSWORD         its export password (already set)
