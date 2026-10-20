@@ -1,8 +1,10 @@
 use crate::{llm, state, tools};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
@@ -39,6 +41,10 @@ pub struct RagDoc {
     pub added: i64,
     #[serde(default = "default_kind")]
     pub kind: String,
+    /// which embedder produced this doc's vectors ("api:<model>" or
+    /// "hash:v1") — empty on legacy indexes; lanes never mix spaces
+    #[serde(default)]
+    pub embedder: String,
     pub chunks: Vec<Chunk>,
 }
 
@@ -301,16 +307,139 @@ fn rel_vecs_path(slug: &str) -> PathBuf {
     rag_dir().join("graph").join(format!("{slug}.rels.bin"))
 }
 
-fn load_index() -> Vec<RagDoc> {
-    fs::read_to_string(index_path())
+// ---- serving layer ------------------------------------------------------
+// the persisted store (index.json + per-doc .bin vectors) is loaded once and
+// then served from memory — the same "memory-resident index over a durable
+// store" shape a dedicated search engine runs, kept in-process. files are
+// keyed by (mtime, len); writes go through the cache so a fresh add is
+// queryable without a re-read. chunk vectors stay in ONE flat buffer so the
+// similarity scan is a sequential walk, not a pointer chase.
+
+#[derive(Clone)]
+struct VecFile {
+    dims: usize,
+    flat: Arc<Vec<f32>>,
+    mtime: u64,
+    len: u64,
+}
+
+impl VecFile {
+    fn chunk(&self, i: usize) -> Option<&[f32]> {
+        self.flat.get(i * self.dims..(i + 1) * self.dims)
+    }
+}
+
+fn file_sig(path: &PathBuf) -> (u64, u64) {
+    fs::metadata(path)
+        .map(|m| {
+            (
+                m.modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                m.len(),
+            )
+        })
+        .unwrap_or((0, 0))
+}
+
+fn vec_cache() -> &'static RwLock<HashMap<PathBuf, VecFile>> {
+    static C: OnceLock<RwLock<HashMap<PathBuf, VecFile>>> = OnceLock::new();
+    C.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn idx_cache() -> &'static RwLock<HashMap<PathBuf, (u64, u64, Arc<Vec<RagDoc>>)>> {
+    static C: OnceLock<RwLock<HashMap<PathBuf, (u64, u64, Arc<Vec<RagDoc>>)>>> = OnceLock::new();
+    C.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// read-through cached parse of a .bin vector file — flat f32 + stride
+fn vecfile(path: &PathBuf) -> Option<VecFile> {
+    let (mtime, len) = file_sig(path);
+    if len == 0 {
+        return None;
+    }
+    if let Some(hit) = vec_cache().read().unwrap().get(path) {
+        if hit.mtime == mtime && hit.len == len {
+            return Some(hit.clone());
+        }
+    }
+    let bytes = fs::read(path).ok()?;
+    if bytes.len() < 8 {
+        return None;
+    }
+    let count = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+    let dims = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+    if dims == 0 {
+        return None;
+    }
+    let mut flat: Vec<f32> = Vec::with_capacity(count * dims);
+    let mut off = 8;
+    for _ in 0..count {
+        if off + dims * 4 > bytes.len() {
+            break;
+        }
+        flat.extend(
+            bytes[off..off + dims * 4]
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+        );
+        off += dims * 4;
+    }
+    if flat.len() != count * dims {
+        return None; // truncated file — don't serve a partial index
+    }
+    let vf = VecFile {
+        dims,
+        flat: Arc::new(flat),
+        mtime,
+        len,
+    };
+    vec_cache()
+        .write()
+        .unwrap()
+        .insert(path.clone(), vf.clone());
+    Some(vf)
+}
+
+/// a doc's chunk vectors — library docs live in vectors/, notes in notes/
+fn vec_set(slug: &str) -> Option<VecFile> {
+    vecfile(&vectors_path(slug)).or_else(|| vecfile(&notes_vec_path(slug)))
+}
+
+fn drop_vec(path: &PathBuf) {
+    vec_cache().write().unwrap().remove(path);
+}
+
+/// read-through cached parse of an index.json (library or notes)
+fn cached_docs(path: &PathBuf) -> Arc<Vec<RagDoc>> {
+    let (mtime, len) = file_sig(path);
+    if let Some((m, l, docs)) = idx_cache().read().unwrap().get(path) {
+        if *m == mtime && *l == len {
+            return docs.clone();
+        }
+    }
+    let docs: Vec<RagDoc> = fs::read_to_string(path)
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let docs = Arc::new(docs);
+    idx_cache()
+        .write()
+        .unwrap()
+        .insert(path.clone(), (mtime, len, docs.clone()));
+    docs
+}
+
+fn load_index() -> Vec<RagDoc> {
+    cached_docs(&index_path()).as_ref().clone()
 }
 
 /// Write paths must never treat an unreadable index as "empty" — that turned
 /// one corrupt file into a silent full-library wipe on the next upload.
 /// A failed parse is kept aside for recovery and the write is refused.
+/// Always reads fresh from disk — never the cache.
 pub(crate) fn load_index_for_write() -> Result<Vec<RagDoc>, String> {
     let path = index_path();
     let Ok(raw) = fs::read_to_string(&path) else {
@@ -334,7 +463,8 @@ pub(crate) fn load_index_for_write() -> Result<Vec<RagDoc>, String> {
 }
 
 /// atomic write + one-generation backup: a partial write can no longer
-/// corrupt the index, and the previous good copy always survives
+/// corrupt the index, and the previous good copy always survives.
+/// write-through: the cache serves exactly what was just persisted
 fn save_index(docs: &[RagDoc]) -> Result<(), String> {
     fs::create_dir_all(rag_dir()).map_err(|e| e.to_string())?;
     let path = index_path();
@@ -344,7 +474,13 @@ fn save_index(docs: &[RagDoc]) -> Result<(), String> {
     let tmp = rag_dir().join("index.json.tmp");
     fs::write(&tmp, serde_json::to_string(docs).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
-    fs::rename(&tmp, &path).map_err(|e| e.to_string())
+    fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    let (mtime, len) = file_sig(&path);
+    idx_cache()
+        .write()
+        .unwrap()
+        .insert(path, (mtime, len, Arc::new(docs.to_vec())));
+    Ok(())
 }
 
 fn save_vectors(slug: &str, vecs: &[Vec<f32>]) -> Result<(), String> {
@@ -356,56 +492,30 @@ fn save_vectors_at(path: PathBuf, vecs: &[Vec<f32>]) -> Result<(), String> {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let dims = vecs.first().map(|v| v.len()).unwrap_or(0);
+    let mut flat: Vec<f32> = Vec::with_capacity(vecs.len() * dims);
     let mut bytes: Vec<u8> = Vec::with_capacity(8 + vecs.len() * dims * 4);
     bytes.extend_from_slice(&(vecs.len() as u32).to_le_bytes());
     bytes.extend_from_slice(&(dims as u32).to_le_bytes());
     for v in vecs {
+        flat.extend_from_slice(v);
         for x in v {
             bytes.extend_from_slice(&x.to_le_bytes());
         }
     }
-    fs::write(path, bytes).map_err(|e| e.to_string())
-}
-
-fn load_vectors(slug: &str) -> Vec<Vec<f32>> {
-    // library docs live in vectors/, notes in notes/ — the lanes must find
-    // whichever exists, or note retrieval silently loses every vector lane
-    let lib = load_vectors_at(&vectors_path(slug));
-    if !lib.is_empty() {
-        return lib;
+    fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    let (mtime, len) = file_sig(&path);
+    if dims > 0 {
+        vec_cache().write().unwrap().insert(
+            path,
+            VecFile {
+                dims,
+                flat: Arc::new(flat),
+                mtime,
+                len,
+            },
+        );
     }
-    load_vectors_at(&notes_vec_path(slug))
-}
-
-fn load_vectors_at(path: &PathBuf) -> Vec<Vec<f32>> {
-    let Ok(bytes) = fs::read(path) else {
-        return Vec::new();
-    };
-    if bytes.len() < 8 {
-        return Vec::new();
-    }
-    let count = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
-    let dims = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
-    let mut out = Vec::with_capacity(count);
-    let mut off = 8;
-    for _ in 0..count {
-        if off + dims * 4 > bytes.len() {
-            break;
-        }
-        let mut v = Vec::with_capacity(dims);
-        for i in 0..dims {
-            let p = off + i * 4;
-            v.push(f32::from_le_bytes([
-                bytes[p],
-                bytes[p + 1],
-                bytes[p + 2],
-                bytes[p + 3],
-            ]));
-        }
-        out.push(v);
-        off += dims * 4;
-    }
-    out
+    Ok(())
 }
 
 // ---- knowledge graph (LightRAG-style dual-level retrieval) --------------
@@ -433,6 +543,8 @@ struct Rel {
 
 #[derive(Serialize, Deserialize, Default)]
 struct Graph {
+    #[serde(default)]
+    embedder: String,
     ents: Vec<Ent>,
     rels: Vec<Rel>,
 }
@@ -549,18 +661,24 @@ async fn build_graph(
         .iter()
         .map(|r| format!("{} — {}: {} {}", r.a, r.b, r.kw, r.desc))
         .collect();
+    let mut tag = String::new();
     let mut ev = Vec::new();
     for b in ein.chunks(BATCH) {
-        for v in llm::embed(&b.to_vec(), DIMS).await? {
+        let (t, vs) = embed_lane(&b.to_vec()).await;
+        tag = t;
+        for v in vs {
             ev.push(normalize(v));
         }
     }
     let mut rv = Vec::new();
     for b in rin.chunks(BATCH) {
-        for v in llm::embed(&b.to_vec(), DIMS).await? {
+        let (t, vs) = embed_lane(&b.to_vec()).await;
+        tag = t;
+        for v in vs {
             rv.push(normalize(v));
         }
     }
+    g.embedder = tag;
     save_vectors_at(ent_vecs_path(slug), &ev)?;
     save_vectors_at(rel_vecs_path(slug), &rv)?;
     fs::write(
@@ -674,6 +792,7 @@ fn graph_lanes(
     scoped: &[RagDoc],
     qlow: &[f32],
     qhigh: &[f32],
+    qtag: &str,
 ) -> (Vec<Vec<(String, u32)>>, String, usize) {
     const ENT_TOP: usize = 4;
     const REL_TOP: usize = 4;
@@ -688,15 +807,23 @@ fn graph_lanes(
         if g.ents.is_empty() && g.rels.is_empty() {
             continue;
         }
+        if !space_match(&g.embedder, qtag) {
+            continue; // entity vectors live in a different embedding space
+        }
         // local lane — entity vectors
         if !qlow.is_empty() {
-            let evs = load_vectors_at(&ent_vecs_path(&d.slug));
+            let evs = vecfile(&ent_vecs_path(&d.slug));
             let mut scored: Vec<(f32, usize)> = evs
-                .iter()
-                .enumerate()
-                .filter(|(_, v)| v.len() == qlow.len())
-                .map(|(i, v)| (dot(qlow, v), i))
-                .collect();
+                .as_ref()
+                .map(|vf| {
+                    vf.flat
+                        .chunks(vf.dims)
+                        .enumerate()
+                        .filter(|(_, v)| v.len() == qlow.len())
+                        .map(|(i, v)| (dot(qlow, v), i))
+                        .collect()
+                })
+                .unwrap_or_default();
             scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
             let mut lane: Vec<(String, u32)> = Vec::new();
             let mut seen = std::collections::HashSet::new();
@@ -730,13 +857,18 @@ fn graph_lanes(
         }
         // global lane — relation vectors
         if !qhigh.is_empty() {
-            let rvs = load_vectors_at(&rel_vecs_path(&d.slug));
+            let rvs = vecfile(&rel_vecs_path(&d.slug));
             let mut scored: Vec<(f32, usize)> = rvs
-                .iter()
-                .enumerate()
-                .filter(|(_, v)| v.len() == qhigh.len())
-                .map(|(i, v)| (dot(qhigh, v), i))
-                .collect();
+                .as_ref()
+                .map(|vf| {
+                    vf.flat
+                        .chunks(vf.dims)
+                        .enumerate()
+                        .filter(|(_, v)| v.len() == qhigh.len())
+                        .map(|(i, v)| (dot(qhigh, v), i))
+                        .collect()
+                })
+                .unwrap_or_default();
             scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
             let mut lane: Vec<(String, u32)> = Vec::new();
             let mut seen = std::collections::HashSet::new();
@@ -776,14 +908,20 @@ fn graph_lanes(
 /// mixture ρ = Σ wᵢ|vᵢ⟩⟨vᵢ| over its rewritten meanings, and a chunk's
 /// relevance is tr(ρ·Π_d) = weighted squared cosines. Costs nothing — reuses
 /// the query vectors already embedded for the plain vector lanes.
-fn density_lane(scoped: &[RagDoc], qvecs: &[Vec<f32>]) -> Vec<(String, u32)> {
+fn density_lane(scoped: &[RagDoc], qvecs: &[Vec<f32>], qtag: &str) -> Vec<(String, u32)> {
     if qvecs.is_empty() {
         return Vec::new();
     }
     let w = 1.0 / qvecs.len() as f32;
     let mut ranked: Vec<(f32, String, u32)> = Vec::new();
     for d in scoped {
-        for (i, v) in load_vectors(&d.slug).iter().enumerate() {
+        if !space_match(&d.embedder, qtag) {
+            continue;
+        }
+        let Some(vf) = vec_set(&d.slug) else {
+            continue;
+        };
+        for (i, v) in vf.flat.chunks(vf.dims).enumerate() {
             let mut s = 0f32;
             for qv in qvecs {
                 if v.len() == qv.len() {
@@ -807,7 +945,7 @@ fn density_lane(scoped: &[RagDoc], qvecs: &[Vec<f32>]) -> Vec<(String, u32)> {
 /// a chunk, and settles where several matched concepts converge. The sim
 /// measured +33% P@1 and doubled chunk contiguity vs plain RRF: coherent
 /// passages instead of scattered fragments.
-fn walk_lane(scoped: &[RagDoc], qlow: &[f32]) -> Vec<(String, u32)> {
+fn walk_lane(scoped: &[RagDoc], qlow: &[f32], qtag: &str) -> Vec<(String, u32)> {
     if qlow.is_empty() {
         return Vec::new();
     }
@@ -817,12 +955,15 @@ fn walk_lane(scoped: &[RagDoc], qlow: &[f32]) -> Vec<(String, u32)> {
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default();
-        if g.ents.is_empty() {
+        if g.ents.is_empty() || !space_match(&g.embedder, qtag) {
             continue;
         }
-        let evs = load_vectors_at(&ent_vecs_path(&d.slug));
+        let Some(evs) = vecfile(&ent_vecs_path(&d.slug)) else {
+            continue;
+        };
         let mut em: Vec<f32> = evs
-            .iter()
+            .flat
+            .chunks(evs.dims)
             .map(|v| if v.len() == qlow.len() { dot(qlow, v).max(0.0) } else { 0.0 })
             .collect();
         let total: f32 = em.iter().sum();
@@ -900,19 +1041,27 @@ fn walk_lane(scoped: &[RagDoc], qlow: &[f32]) -> Vec<(String, u32)> {
 /// greedily: a chunk gains score when it is coherent with the one just picked
 /// (constructive interference between "already relevant" material), so the
 /// final context reads as a passage. Pure dot products, zero API calls.
-fn interference_rerank(cands: &[(f32, String, u32)]) -> Vec<(f32, String, u32)> {
+fn interference_rerank(cands: &[(f32, String, u32)], scoped: &[RagDoc]) -> Vec<(f32, String, u32)> {
     const POOL: usize = 15;
     const LAMBDA: f32 = 0.2;
     if cands.len() < 3 {
         return cands.to_vec();
     }
-    let mut vecs: std::collections::HashMap<String, Vec<Vec<f32>>> = std::collections::HashMap::new();
+    let tag_of = |slug: &str| -> &str {
+        scoped
+            .iter()
+            .find(|d| d.slug == slug)
+            .map(|d| d.embedder.as_str())
+            .unwrap_or("")
+    };
+    let mut vecs: HashMap<String, VecFile> = HashMap::new();
     for (_, slug, _) in cands.iter().take(POOL) {
-        vecs.entry(slug.clone())
-            .or_insert_with(|| load_vectors(slug));
+        if let Some(vf) = vec_set(slug) {
+            vecs.entry(slug.clone()).or_insert(vf);
+        }
     }
-    let vec_of = |slug: &str, idx: u32| -> Option<&Vec<f32>> {
-        vecs.get(slug).and_then(|vs| vs.get(idx as usize))
+    let vec_of = |slug: &str, idx: u32| -> Option<&[f32]> {
+        vecs.get(slug).and_then(|vf| vf.chunk(idx as usize))
     };
     let pool: Vec<(f32, String, u32)> = cands.iter().take(POOL).cloned().collect();
     let mut picked: Vec<(f32, String, u32)> = vec![pool[0].clone()];
@@ -924,9 +1073,11 @@ fn interference_rerank(cands: &[(f32, String, u32)]) -> Vec<(f32, String, u32)> 
                 continue;
             }
             let mut s = p.0;
-            if let (Some(a), Some(b)) = (vec_of(&p.1, p.2), vec_of(&last.1, last.2)) {
-                if a.len() == b.len() {
-                    s += LAMBDA * p.0 * dot(a, b).max(0.0);
+            if space_match(tag_of(&p.1), tag_of(&last.1)) {
+                if let (Some(a), Some(b)) = (vec_of(&p.1, p.2), vec_of(&last.1, last.2)) {
+                    if a.len() == b.len() {
+                        s += LAMBDA * p.0 * dot(a, b).max(0.0);
+                    }
                 }
             }
             if best.map(|(bs, _)| s > bs).unwrap_or(true) {
@@ -957,6 +1108,94 @@ fn normalize(mut v: Vec<f32>) -> Vec<f32> {
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+}
+
+// ---- embedder modes -----------------------------------------------------
+// like a standalone search engine, retrieval doesn't hard-depend on one
+// remote model: the configured provider is preferred, and a deterministic
+// local hash embedder covers offline/keyless operation so the vector lanes
+// degrade to lexical instead of silently returning nothing. every indexed
+// doc records which space its vectors live in — lanes only compare
+// same-space vectors (a hash vector and an API vector are not comparable
+// even at equal length).
+
+const LEX_TAG: &str = "hash:v1";
+
+/// deterministic offline embedder — signed feature hashing over word
+/// unigrams, adjacent bigrams and char trigrams (FNV-1a), L2-normalized.
+/// lexical, not semantic: strong on shared vocabulary, blind to paraphrase.
+fn lexical_embed(text: &str, dims: usize) -> Vec<f32> {
+    fn h(s: &str, seed: u64) -> u64 {
+        let mut x = 0xcbf29ce484222325u64 ^ seed.wrapping_mul(0x9e3779b97f4a7c15);
+        for b in s.as_bytes() {
+            x ^= *b as u64;
+            x = x.wrapping_mul(0x100000001b3);
+        }
+        x
+    }
+    let mut v = vec![0f32; dims];
+    let bump = |v: &mut Vec<f32>, key: &str, seed: u64, w: f32| {
+        let x = h(key, seed);
+        v[(x % dims as u64) as usize] += if x >> 63 == 0 { w } else { -w };
+    };
+    let toks = tokenize(text);
+    for (i, t) in toks.iter().enumerate() {
+        bump(&mut v, t, 1, 1.0);
+        if i + 1 < toks.len() {
+            bump(&mut v, &format!("{} {}", t, toks[i + 1]), 2, 0.7);
+        }
+        let chs: Vec<char> = t.chars().collect();
+        if chs.len() >= 3 {
+            for w3 in chs.windows(3) {
+                let g: String = w3.iter().collect();
+                bump(&mut v, &g, 3, 0.35);
+            }
+        } else {
+            bump(&mut v, t, 3, 0.35);
+        }
+    }
+    normalize(v)
+}
+
+/// which embedder space the current settings would produce
+fn api_tag() -> String {
+    let s = state::load_settings();
+    let (m, _b, k) = state::resolve_llm(&s, &s.model_embed);
+    if k.is_empty() {
+        return LEX_TAG.to_string();
+    }
+    format!("api:{}", if m.is_empty() { "auto".into() } else { m })
+}
+
+/// embed a batch in whichever space is available — provider first (one
+/// retry), hash fallback on failure. returns (space tag, vectors).
+async fn embed_lane(texts: &[String]) -> (String, Vec<Vec<f32>>) {
+    let tag = api_tag();
+    if tag.starts_with("api:") {
+        for attempt in 0..2 {
+            match llm::embed(texts, DIMS).await {
+                Ok(vs) => return (tag, vs),
+                Err(_) if attempt == 0 => continue,
+                Err(_) => break,
+            }
+        }
+    }
+    (
+        LEX_TAG.to_string(),
+        texts.iter().map(|t| lexical_embed(t, DIMS as usize)).collect(),
+    )
+}
+
+/// may a query vector in space `q` be scored against a doc vector in space
+/// `d`? legacy docs have no tag — they predate tagging and are api space.
+fn space_match(d: &str, q: &str) -> bool {
+    if d.is_empty() {
+        return q.is_empty() || q.starts_with("api:");
+    }
+    if q.is_empty() {
+        return d.starts_with("api:");
+    }
+    d == q
 }
 
 fn slugify(name: &str) -> String {
@@ -1320,19 +1559,20 @@ fn notes_vec_path(slug: &str) -> PathBuf {
 }
 
 fn load_notes_index() -> Vec<RagDoc> {
-    fs::read_to_string(notes_index_path())
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
+    cached_docs(&notes_index_path()).as_ref().clone()
 }
 
 fn save_notes_index(docs: &[RagDoc]) -> Result<(), String> {
     fs::create_dir_all(rag_dir().join("notes")).map_err(|e| e.to_string())?;
-    fs::write(
-        notes_index_path(),
-        serde_json::to_string(docs).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())
+    let path = notes_index_path();
+    fs::write(&path, serde_json::to_string(docs).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    let (mtime, len) = file_sig(&path);
+    idx_cache()
+        .write()
+        .unwrap()
+        .insert(path, (mtime, len, Arc::new(docs.to_vec())));
+    Ok(())
 }
 
 /// a stable, filesystem-safe slug per note name — the hash keeps two names
@@ -1384,10 +1624,7 @@ pub async fn ensure_notes_index() -> Result<usize, String> {
         if pieces.is_empty() {
             continue;
         }
-        let vecs = match llm::embed(&pieces, DIMS).await {
-            Ok(v) => v,
-            Err(e) => return Err(format!("embedding {}: {e}", n.name)),
-        };
+        let (tag, vecs) = embed_lane(&pieces).await;
         save_vectors_at(notes_vec_path(&slug), &vecs)?;
         let chunks: Vec<Chunk> = pieces
             .iter()
@@ -1405,6 +1642,7 @@ pub async fn ensure_notes_index() -> Result<usize, String> {
             dims: DIMS,
             added: now(),
             kind: "note".into(),
+            embedder: tag,
             chunks,
         });
     }
@@ -1562,15 +1800,18 @@ pub async fn related_notes(name: String) -> Result<Vec<RelatedNote>, String> {
     if head.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let vecs = llm::embed(&[head], DIMS).await?;
+    let (qtag, vecs) = embed_lane(&[head]).await;
     let qv = normalize(vecs.into_iter().next().ok_or("embed failed")?);
     let mut scored: Vec<RelatedNote> = Vec::new();
     for d in load_notes_index() {
-        if d.name == name {
+        if d.name == name || !space_match(&d.embedder, &qtag) {
             continue;
         }
+        let Some(vf) = vecfile(&notes_vec_path(&d.slug)) else {
+            continue;
+        };
         let mut best = 0f32;
-        for v in load_vectors_at(&notes_vec_path(&d.slug)) {
+        for v in vf.flat.chunks(vf.dims) {
             if v.len() == qv.len() {
                 let s: f32 = v.iter().zip(&qv).map(|(a, b)| a * b).sum();
                 best = best.max(s);
@@ -1630,26 +1871,26 @@ pub async fn rag_add_files(app: AppHandle, paths: Vec<String>) -> Result<(), Str
             },
         );
         let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(chunks.len());
-        let mut failed: Option<String> = None;
+        let mut tag = String::new();
         let total_batches = chunks.len().div_ceil(BATCH);
         for (bi, batch) in chunks.chunks(BATCH).enumerate() {
             let input: Vec<String> = batch.to_vec();
-            match llm::embed(&input, DIMS).await {
-                Ok(mut vs) => {
-                    for v in vs.drain(..) {
-                        vectors.push(normalize(v));
-                    }
-                    prog(&app, &name, fi, file_count, "embed", bi + 1, total_batches);
-                }
-                Err(e) => {
-                    failed = Some(e);
-                    break;
-                }
+            let (t, vs) = embed_lane(&input).await;
+            tag = t;
+            if tag == LEX_TAG && bi == 0 {
+                let _ = app.emit(
+                    "agent:activity",
+                    Activity {
+                        text: format!(
+                            "⚠ {name}: embedder unavailable — indexed with local hash vectors (lexical match only)"
+                        ),
+                    },
+                );
             }
-        }
-        if let Some(e) = failed {
-            fail_activity(&app, format!("✕ {name}: {e}"));
-            continue;
+            for v in vs.into_iter() {
+                vectors.push(normalize(v));
+            }
+            prog(&app, &name, fi, file_count, "embed", bi + 1, total_batches);
         }
         if vectors.len() != chunks.len() {
             fail_activity(&app, format!("✕ {name}: embedding count mismatch"));
@@ -1667,6 +1908,7 @@ pub async fn rag_add_files(app: AppHandle, paths: Vec<String>) -> Result<(), Str
             size: text.len() as u64,
             dims,
             added: now(),
+            embedder: tag,
             chunks: chunks
                 .into_iter()
                 .enumerate()
@@ -1706,6 +1948,9 @@ pub fn rag_remove(slug: String) -> Result<(), String> {
     let mut docs = load_index_for_write()?;
     docs.retain(|d| d.slug != slug);
     save_index(&docs)?;
+    drop_vec(&vectors_path(&slug));
+    drop_vec(&ent_vecs_path(&slug));
+    drop_vec(&rel_vecs_path(&slug));
     let _ = fs::remove_file(vectors_path(&slug));
     let _ = fs::remove_file(graph_path(&slug));
     let _ = fs::remove_file(ent_vecs_path(&slug));
@@ -1734,41 +1979,45 @@ pub async fn rag_search(query: &str, k: usize, target: Option<&str>) -> Vec<Stri
     let mut lists: Vec<Vec<(String, u32)>> = Vec::new();
     let (mut qlow, mut qhigh) = (Vec::new(), Vec::new());
     let mut qvecs: Vec<Vec<f32>> = Vec::new();
-    if let Ok(vecs) = llm::embed(&embed_in, DIMS).await {
-        for (i, qv) in vecs.into_iter().enumerate() {
-            let qv = normalize(qv);
-            if i == queries.len() {
-                qlow = qv;
+    let (qtag, qvec_raw) = embed_lane(&embed_in).await;
+    for (i, qv) in qvec_raw.into_iter().enumerate() {
+        let qv = normalize(qv);
+        if i == queries.len() {
+            qlow = qv;
+            continue;
+        }
+        if i == queries.len() + 1 {
+            qhigh = qv;
+            continue;
+        }
+        qvecs.push(qv.clone());
+        let mut ranked: Vec<(f32, String, u32)> = Vec::new();
+        for d in &docs {
+            if !space_match(&d.embedder, &qtag) {
                 continue;
             }
-            if i == queries.len() + 1 {
-                qhigh = qv;
-                continue;
-            }
-            qvecs.push(qv.clone());
-            let mut ranked: Vec<(f32, String, u32)> = Vec::new();
-            for d in &docs {
-                for (j, v) in load_vectors(&d.slug).iter().enumerate() {
+            if let Some(vf) = vec_set(&d.slug) {
+                for (j, v) in vf.flat.chunks(vf.dims).enumerate() {
                     if v.len() == qv.len() {
                         ranked.push((dot(&qv, v), d.slug.clone(), j as u32));
                     }
                 }
             }
-            ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            lists.push(ranked.into_iter().take(25).map(|(_, s, i)| (s, i)).collect());
         }
+        ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        lists.push(ranked.into_iter().take(25).map(|(_, s, i)| (s, i)).collect());
     }
     let bm = bm25_rank(&docs, &queries.join(" "));
     if !bm.is_empty() {
         lists.push(bm);
     }
-    let (glanes, _digest, _hits) = graph_lanes(&docs, &qlow, &qhigh);
+    let (glanes, _digest, _hits) = graph_lanes(&docs, &qlow, &qhigh, &qtag);
     lists.extend(glanes);
-    let dl = density_lane(&docs, &qvecs);
+    let dl = density_lane(&docs, &qvecs, &qtag);
     if !dl.is_empty() {
         lists.push(dl);
     }
-    let wl = walk_lane(&docs, &qlow);
+    let wl = walk_lane(&docs, &qlow, &qtag);
     if !wl.is_empty() {
         lists.push(wl);
     }
@@ -1844,41 +2093,45 @@ pub async fn rag_ask(
     let mut lists: Vec<Vec<(String, u32)>> = Vec::new();
     let (mut qlow, mut qhigh) = (Vec::new(), Vec::new());
     let mut qvecs: Vec<Vec<f32>> = Vec::new();
-    if let Ok(vecs) = llm::embed(&embed_in, DIMS).await {
-        for (i, qv) in vecs.into_iter().enumerate() {
-            let qv = normalize(qv);
-            if i == queries.len() {
-                qlow = qv;
+    let (qtag, qvec_raw) = embed_lane(&embed_in).await;
+    for (i, qv) in qvec_raw.into_iter().enumerate() {
+        let qv = normalize(qv);
+        if i == queries.len() {
+            qlow = qv;
+            continue;
+        }
+        if i == queries.len() + 1 {
+            qhigh = qv;
+            continue;
+        }
+        qvecs.push(qv.clone());
+        let mut ranked: Vec<(f32, String, u32)> = Vec::new();
+        for d in &scoped {
+            if !space_match(&d.embedder, &qtag) {
                 continue;
             }
-            if i == queries.len() + 1 {
-                qhigh = qv;
-                continue;
-            }
-            qvecs.push(qv.clone());
-            let mut ranked: Vec<(f32, String, u32)> = Vec::new();
-            for d in &scoped {
-                for (j, v) in load_vectors(&d.slug).iter().enumerate() {
+            if let Some(vf) = vec_set(&d.slug) {
+                for (j, v) in vf.flat.chunks(vf.dims).enumerate() {
                     if v.len() == qv.len() {
                         ranked.push((dot(&qv, v), d.slug.clone(), j as u32));
                     }
                 }
             }
-            ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            lists.push(ranked.into_iter().take(25).map(|(_, s, i)| (s, i)).collect());
         }
+        ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        lists.push(ranked.into_iter().take(25).map(|(_, s, i)| (s, i)).collect());
     }
     let bm = bm25_rank(&scoped, &queries.join(" "));
     if !bm.is_empty() {
         lists.push(bm);
     }
-    let (glanes, digest, ghits) = graph_lanes(&scoped, &qlow, &qhigh);
+    let (glanes, digest, ghits) = graph_lanes(&scoped, &qlow, &qhigh, &qtag);
     lists.extend(glanes);
-    let dl = density_lane(&scoped, &qvecs);
+    let dl = density_lane(&scoped, &qvecs, &qtag);
     if !dl.is_empty() {
         lists.push(dl);
     }
-    let wl = walk_lane(&scoped, &qlow);
+    let wl = walk_lane(&scoped, &qlow, &qtag);
     if !wl.is_empty() {
         lists.push(wl);
     }
@@ -1896,6 +2149,7 @@ pub async fn rag_ask(
             .enumerate()
             .map(|(r, (s, i))| (1.0 / (1.0 + r as f32), s, i))
             .collect::<Vec<_>>(),
+        &scoped,
     );
     let q = query.to_lowercase();
     let wants_all = intent == "all"
@@ -2137,4 +2391,69 @@ pub async fn rag_ask(
         }),
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lexical_embed_deterministic() {
+        let a = lexical_embed("the mitochondria is the powerhouse of the cell", 1024);
+        let b = lexical_embed("the mitochondria is the powerhouse of the cell", 1024);
+        assert_eq!(a, b);
+        let n: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((n - 1.0).abs() < 1e-4); // normalized
+    }
+
+    #[test]
+    fn lexical_embed_related_beats_unrelated() {
+        let q = lexical_embed("quarterly revenue grew by twelve percent", 1024);
+        let related = lexical_embed("revenue growth this quarter reached twelve percent", 1024);
+        let unrelated = lexical_embed("the mitochondria is the powerhouse of the cell", 1024);
+        assert!(dot(&q, &related) > dot(&q, &unrelated));
+    }
+
+    #[test]
+    fn space_match_rules() {
+        assert!(space_match("", "api:qwen")); // legacy index = api space
+        assert!(!space_match("", LEX_TAG)); // legacy api vec vs hash query
+        assert!(space_match("api:qwen", "api:qwen"));
+        assert!(!space_match("api:qwen", "api:bge")); // model change = new space
+        assert!(space_match(LEX_TAG, LEX_TAG));
+        assert!(!space_match(LEX_TAG, "api:qwen"));
+    }
+
+    #[test]
+    fn vecfile_roundtrip_serve_and_invalidate() {
+        let dir = std::env::temp_dir().join(format!("laido-rag-vec-test-{}", now()));
+        let p = dir.join("t.bin");
+        save_vectors_at(p.clone(), &[vec![1.0f32, 2.0], vec![3.0, 4.0]]).unwrap();
+        let a = vecfile(&p).unwrap();
+        assert_eq!(a.dims, 2);
+        assert_eq!(a.chunk(1), Some(&[3.0f32, 4.0][..]));
+        // same signature → same buffer served from cache, not a re-parse
+        let b = vecfile(&p).unwrap();
+        assert!(Arc::ptr_eq(&a.flat, &b.flat));
+        // rewrite → the cache must serve the NEW data, not the stale buffer
+        save_vectors_at(p.clone(), &[vec![9.0f32, 9.0], vec![8.0, 7.0], vec![6.0, 5.0]]).unwrap();
+        let c = vecfile(&p).unwrap();
+        assert_eq!(c.flat.as_slice(), &[9.0f32, 9.0, 8.0, 7.0, 6.0, 5.0]);
+        drop_vec(&p);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn truncated_vecfile_is_refused() {
+        let dir = std::env::temp_dir().join(format!("laido-rag-trunc-{}", now()));
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("bad.bin");
+        // header promises 4×2 f32, file ends early
+        let mut bytes = (4u32).to_le_bytes().to_vec();
+        bytes.extend_from_slice(&(2u32).to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 8]);
+        fs::write(&p, bytes).unwrap();
+        assert!(vecfile(&p).is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
