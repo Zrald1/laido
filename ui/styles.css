@@ -1307,6 +1307,18 @@ body:not(.lib-open) #library { padding: 0; border-right: 0; }
   transition: border-color .15s ease, background-color .15s ease;
 }
 .lib-drop:hover { border-color: var(--accent); background: var(--bg-3); }
+.lib-sec-label { font-size: 10px; font-weight: 600; letter-spacing: .7px; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; flex: none; }
+#lib-notes { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; }
+.lib-note {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 8px; border-radius: 7px; font-size: 12px; cursor: pointer;
+  color: var(--text); border: 1px solid transparent; flex: none;
+}
+.lib-note:hover { background: var(--bg-3); }
+.lib-note.active { border-color: var(--accent); background: var(--accent-soft); }
+.lib-note .n-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lib-note .n-time { font-size: 10px; color: var(--muted); flex: none; }
+.lib-divider { height: 1px; background: var(--line); margin: 10px 0; flex: none; }
 #lib-list { flex: 1; overflow-y: auto; margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
 .lib-row {
   display: flex; align-items: center; gap: 8px;

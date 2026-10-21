@@ -15,7 +15,10 @@ export function toggleLibrary(force?: boolean) {
   const open = force ?? !document.body.classList.contains("lib-open");
   document.body.classList.toggle("lib-open", open);
   localStorage.setItem("laido.library", open ? "1" : "0");
-  if (open) void refreshLibrary();
+  if (open) {
+    void refreshLibrary();
+    void refreshLibNotes();
+  }
 }
 
 export async function refreshLibrary() {
@@ -95,6 +98,64 @@ export async function refreshLibrary() {
       list.length === 0 ? "" : `${list.length} files · ${chunks} chunks · ${dims} dims`;
   } catch {
     /* ignore */
+  }
+}
+
+/* ---- the panel's top half: every note in the vault ---------------- */
+
+interface NoteRow {
+  name: string;
+  modified: number;
+}
+
+const openNote = (name: string) =>
+  document.dispatchEvent(new CustomEvent("nav:open", { detail: name }));
+
+function relTime(ms: number): string {
+  const d = Date.now() - ms;
+  if (d < 60_000) return "now";
+  if (d < 3_600_000) return `${Math.floor(d / 60_000)}m`;
+  if (d < 86_400_000) return `${Math.floor(d / 3_600_000)}h`;
+  if (d < 30 * 86_400_000) return `${Math.floor(d / 86_400_000)}d`;
+  return new Date(ms).toLocaleDateString();
+}
+
+let notesSig = "";
+
+export async function refreshLibNotes() {
+  const el = $("#lib-notes");
+  if (!el) return;
+  try {
+    const list = await invoke<NoteRow[]>("vault_list");
+    const cur = currentNote();
+    // rebuild only when data actually changed — keeps scroll + selection
+    const sig = `${cur}|${list.map((n) => `${n.name}:${n.modified}`).join("|")}`;
+    if (sig === notesSig) return;
+    notesSig = sig;
+    el.innerHTML = "";
+    if (list.length === 0) {
+      const e = document.createElement("div");
+      e.className = "muted";
+      e.style.fontSize = "11.5px";
+      e.textContent = "no notes yet";
+      el.append(e);
+    }
+    for (const n of list) {
+      const row = document.createElement("div");
+      row.className = "lib-note" + (n.name === cur ? " active" : "");
+      const nm = document.createElement("span");
+      nm.className = "n-name";
+      nm.textContent = n.name.replace(/\.(laido|md)$/i, "");
+      nm.title = n.name;
+      const tm = document.createElement("span");
+      tm.className = "n-time";
+      tm.textContent = relTime(n.modified);
+      row.append(nm, tm);
+      row.addEventListener("click", () => openNote(n.name));
+      el.append(row);
+    }
+  } catch {
+    /* vault not ready yet */
   }
 }
 
@@ -228,4 +289,11 @@ export function initLibrary() {
   });
   if (localStorage.getItem("laido.library") === "1") toggleLibrary(true);
   void refreshLibrary();
+  void refreshLibNotes();
+  // the notes world follows note opens and picks up vault changes on a slow
+  // poll — the sig check means it only re-renders when something moved
+  document.addEventListener("nav:open", () => void refreshLibNotes());
+  window.setInterval(() => {
+    if (document.body.classList.contains("lib-open")) void refreshLibNotes();
+  }, 6000);
 }
