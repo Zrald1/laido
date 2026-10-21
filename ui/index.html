@@ -286,8 +286,11 @@
       <details class="set-group">
         <summary>Keys &amp; provider</summary>
         <div class="set-group-body">
+      <div id="nebius-row">
       <label for="key-nebius">Gateway / provider API key <span class="muted">(lk- key from your dashboard, or a provider key)</span></label>
       <input id="key-nebius" type="password" placeholder="lk-… or your provider key" autocomplete="off" />
+      </div>
+      <p id="nebius-managed" class="muted hidden">API access is managed by your Laido account — your key lives on the server, not here. <button id="nebius-byok" class="ghost mini">use your own provider key</button></p>
       <label for="provider-select">Provider <span class="muted">— where this key works</span></label>
       <select id="provider-select" class="model-select"></select>
       <input id="base-url" class="hidden" placeholder="https://api.example.com/v1" autocomplete="off" />

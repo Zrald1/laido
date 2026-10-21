@@ -4,7 +4,7 @@ import { initTabs } from "./tabs.js";
 import { initCalendar } from "./calendar.js";
 import { initLibrary, toggleLibrary } from "./rag.js";
 import { initFsPane } from "./fspane.js";
-import { refreshStatus, testConnection, initAgent, initModels, syncModelSelects, initAccount, providerBasePatch, modelPatch } from "./agent.js";
+import { refreshStatus, testConnection, initAgent, initModels, syncModelSelects, initAccount, providerBasePatch, modelPatch, currentSettings } from "./agent.js";
 import { initI18n, LANGS, setLang } from "./i18n.js";
 import { addActivity } from "./log.js";
 
@@ -46,7 +46,11 @@ function initRail() {
 }
 
 async function saveSettings() {
-  const gwKey = $<HTMLInputElement>("#key-nebius").value.trim();
+  const typed = $<HTMLInputElement>("#key-nebius").value.trim();
+  // the key field is hidden under a managed plan — an empty input means
+  // "keep the stored lk- token", never "wipe it"
+  const stored = currentSettings()?.nebius_api_key ?? "";
+  const gwKey = typed || (stored.startsWith("lk-") ? stored : "");
   await invoke("settings_set", {
     patch: {
       nebius_api_key: gwKey,

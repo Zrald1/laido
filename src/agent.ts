@@ -228,6 +228,10 @@ function applyProviderUI() {
   providerChoice = p;
   prov.value = p;
   managed = p === "laido";
+  // managed: the lk- token authenticates calls but is never rendered — the
+  // field stays hidden so nothing secrets-shaped sits in the UI
+  $("#nebius-row")?.classList.toggle("hidden", managed);
+  $("#nebius-managed")?.classList.toggle("hidden", !managed);
   if (baseIn) {
     baseIn.classList.toggle("hidden", p !== "custom");
     if (p === "custom") baseIn.value = settings?.base_url ?? "";
@@ -264,11 +268,16 @@ const FALLBACK_MODELS = [
 const short = (m: string) => m.split("/").pop() ?? m;
 
 let settings: Settings | null = null;
+export const currentSettings = () => settings;
 let models: string[] = [];
 
 export async function refreshStatus() {
   settings = await invoke<Settings>("settings_get");
-  $<HTMLInputElement>("#key-nebius").value = settings.nebius_api_key;
+  // managed tokens authenticate silently — only a user's own BYOK key is
+  // ever painted into the field
+  $<HTMLInputElement>("#key-nebius").value = settings.nebius_api_key.startsWith("lk-")
+    ? ""
+    : settings.nebius_api_key;
   $<HTMLInputElement>("#key-tavily").value = settings.tavily_api_key;
   const dot = $("#api-status .dot");
   const text = $("#api-status-text");
@@ -310,6 +319,13 @@ export function renderAccount() {
 
 export function initAccount() {
   $("#laido-signin")?.addEventListener("click", () => void laidoSignIn());
+  // managed → BYOK escape hatch: drop the lk- token locally (the site copy
+  // is untouched) so the key field comes back for a provider key
+  $("#nebius-byok")?.addEventListener("click", async () => {
+    await invoke("settings_set", { patch: { nebius_api_key: "", base_url: "" } });
+    await refreshStatus();
+    acctHint("Laido key removed locally — paste your own provider key above");
+  });
   // header button — signed in → the site dashboard (buy credits / manage
   // plan); signed out → the same Google sign-in flow
   $("#hdr-acct")?.addEventListener("click", async () => {
@@ -740,7 +756,9 @@ export async function testConnection() {
   };
 
   set("saving…");
-  const gwKey = $<HTMLInputElement>("#key-nebius").value.trim();
+  const typed = $<HTMLInputElement>("#key-nebius").value.trim();
+  const stored = settings?.nebius_api_key ?? "";
+  const gwKey = typed || (stored.startsWith("lk-") ? stored : "");
   await invoke("settings_set", {
     patch: {
       nebius_api_key: gwKey,
