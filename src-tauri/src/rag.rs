@@ -32,6 +32,10 @@ fn default_kind() -> String {
     "file".into()
 }
 
+fn default_scope() -> String {
+    "global".into()
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct RagDoc {
     pub slug: String,
@@ -45,6 +49,11 @@ pub struct RagDoc {
     /// "hash:v1") — empty on legacy indexes; lanes never mix spaces
     #[serde(default)]
     pub embedder: String,
+    /// ownership scope — "global" (the shared library, usable when the user
+    /// asks for everything) or "note:<file>" (dedicated to one note; the
+    /// default retrieval pool for that note's chats)
+    #[serde(default = "default_scope")]
+    pub scope: String,
     pub chunks: Vec<Chunk>,
 }
 
@@ -55,6 +64,7 @@ pub struct RagInfo {
     pub size: u64,
     pub chunks: usize,
     pub dims: u32,
+    pub scope: String,
 }
 
 const RAG_SYSTEM: &str = "You are Laido answering questions from the user's own files. \
@@ -1540,6 +1550,7 @@ pub fn rag_list() -> Vec<RagInfo> {
             size: d.size,
             chunks: d.chunks.len(),
             dims: d.dims,
+            scope: d.scope,
         })
         .collect()
 }
@@ -1643,6 +1654,7 @@ pub async fn ensure_notes_index() -> Result<usize, String> {
             added: now(),
             kind: "note".into(),
             embedder: tag,
+            scope: "global".into(),
             chunks,
         });
     }
@@ -1672,6 +1684,12 @@ async fn docs_for(target: &str) -> Result<Vec<RagDoc>, String> {
             Ok(docs)
         }
         "all-files" => Ok(load_index()),
+        // dedicated note library — "note:<file>" selects only the docs the
+        // user attached to that note; the strict default for note chats
+        t if t.starts_with("note:") => Ok(load_index()
+            .into_iter()
+            .filter(|d| d.scope == t)
+            .collect()),
         slug => {
             let mut docs: Vec<RagDoc> = load_index()
                 .into_iter()
@@ -1837,7 +1855,17 @@ fn fail_activity(app: &AppHandle, text: String) {
 }
 
 #[tauri::command]
-pub async fn rag_add_files(app: AppHandle, paths: Vec<String>) -> Result<(), String> {
+pub async fn rag_add_files(
+    app: AppHandle,
+    paths: Vec<String>,
+    note: Option<String>,
+) -> Result<(), String> {
+    // note-scoped uploads become that note's dedicated library; anything
+    // without a note goes to the shared global library
+    let scope = note
+        .filter(|n| !n.trim().is_empty())
+        .map(|n| format!("note:{}", n.trim()))
+        .unwrap_or_else(|| "global".into());
     let mut docs = load_index_for_write()?;
     let file_count = paths.len();
     for (fi, p) in paths.into_iter().enumerate() {
@@ -1909,6 +1937,7 @@ pub async fn rag_add_files(app: AppHandle, paths: Vec<String>) -> Result<(), Str
             dims,
             added: now(),
             embedder: tag,
+            scope: scope.clone(),
             chunks: chunks
                 .into_iter()
                 .enumerate()

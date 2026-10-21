@@ -250,6 +250,8 @@ function applyProviderUI() {
   // Tavily key, so the field is hidden rather than asked for
   $("#tavily-row")?.classList.toggle("hidden", managed);
   $("#tavily-managed")?.classList.toggle("hidden", !managed);
+  $("#aai-row")?.classList.toggle("hidden", managed);
+  $("#aai-managed")?.classList.toggle("hidden", !managed);
 }
 
 const FALLBACK_MODELS = [

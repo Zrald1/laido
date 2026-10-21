@@ -9,6 +9,7 @@ interface RagInfo {
   size: number;
   chunks: number;
   dims: number;
+  scope: string;
 }
 
 export function toggleLibrary(force?: boolean) {
@@ -17,24 +18,12 @@ export function toggleLibrary(force?: boolean) {
   localStorage.setItem("laido.library", open ? "1" : "0");
   if (open) {
     void refreshLibrary();
-    void refreshLibNotes();
+    void refreshNoteFiles();
   }
 }
 
-export async function refreshLibrary() {
-  try {
-    const list = await invoke<RagInfo[]>("rag_list");
-    const el = $("#lib-list");
-    el.innerHTML = "";
-    if (list.length === 0) {
-      const e = document.createElement("div");
-      e.className = "muted";
-      e.style.fontSize = "11.5px";
-      e.textContent = "no files yet — drop a document or picture above";
-      el.append(e);
-    }
-    for (const d of list) {
-      const row = document.createElement("div");
+function fileRow(d: RagInfo, el: HTMLElement): HTMLElement {
+  const row = document.createElement("div");
       row.className = "lib-row";
       const name = document.createElement("span");
       name.className = "lib-name";
@@ -51,6 +40,7 @@ export async function refreshLibrary() {
         void invoke("rag_remove", { slug: d.slug }).then(() => {
           addActivity(`🗑 removed ${d.name} from the library`);
           void refreshLibrary();
+          void refreshNoteFiles();
         });
       });
       // click a row → an inline ask box; the answer card lands in the note
@@ -91,7 +81,26 @@ export async function refreshLibrary() {
       });
       row.append(name, meta, del, ask);
       el.append(row);
+      return row;
+}
+
+/** the shared file library — global docs, usable by anyone who asks for
+ *  the whole library (or a file by name) */
+export async function refreshLibrary() {
+  try {
+    const list = (await invoke<RagInfo[]>("rag_list")).filter(
+      (d) => d.scope === "global",
+    );
+    const el = $("#lib-list");
+    el.innerHTML = "";
+    if (list.length === 0) {
+      const e = document.createElement("div");
+      e.className = "muted";
+      e.style.fontSize = "11.5px";
+      e.textContent = "no shared files — drop a document or picture below";
+      el.append(e);
     }
+    for (const d of list) fileRow(d, el);
     const chunks = list.reduce((a, b) => a + b.chunks, 0);
     const dims = list.length > 0 ? list[0].dims : 1024;
     $("#lib-stats").textContent =
@@ -101,59 +110,44 @@ export async function refreshLibrary() {
   }
 }
 
-/* ---- the panel's top half: every note in the vault ---------------- */
-
-interface NoteRow {
-  name: string;
-  modified: number;
-}
-
-const openNote = (name: string) =>
-  document.dispatchEvent(new CustomEvent("nav:open", { detail: name }));
-
-function relTime(ms: number): string {
-  const d = Date.now() - ms;
-  if (d < 60_000) return "now";
-  if (d < 3_600_000) return `${Math.floor(d / 60_000)}m`;
-  if (d < 86_400_000) return `${Math.floor(d / 3_600_000)}h`;
-  if (d < 30 * 86_400_000) return `${Math.floor(d / 86_400_000)}d`;
-  return new Date(ms).toLocaleDateString();
-}
+/* ---- the panel's top half: the CURRENT note's dedicated library ----
+ *  files attached to the open note only — this is the default retrieval
+ *  pool for the note's chats; the global library below stays opt-in */
 
 let notesSig = "";
 
-export async function refreshLibNotes() {
+export async function refreshNoteFiles() {
   const el = $("#lib-notes");
+  const label = $("#lib-note-name");
   if (!el) return;
+  const cur = currentNote();
+  if (label) label.textContent = cur ? `— ${cur.replace(/\.(laido|md)$/i, "")}` : "";
   try {
-    const list = await invoke<NoteRow[]>("vault_list");
-    const cur = currentNote();
+    const want = `note:${cur ?? ""}`;
+    const list = (await invoke<RagInfo[]>("rag_list")).filter(
+      (d) => d.scope === want,
+    );
     // rebuild only when data actually changed — keeps scroll + selection
-    const sig = `${cur}|${list.map((n) => `${n.name}:${n.modified}`).join("|")}`;
+    const sig = `${cur}|${list.map((d) => d.slug).join("|")}`;
     if (sig === notesSig) return;
     notesSig = sig;
     el.innerHTML = "";
+    if (!cur) {
+      const e = document.createElement("div");
+      e.className = "muted";
+      e.style.fontSize = "11.5px";
+      e.textContent = "open a note to attach files to it";
+      el.append(e);
+      return;
+    }
     if (list.length === 0) {
       const e = document.createElement("div");
       e.className = "muted";
       e.style.fontSize = "11.5px";
-      e.textContent = "no notes yet";
+      e.textContent = "no files attached to this note — drop them above";
       el.append(e);
     }
-    for (const n of list) {
-      const row = document.createElement("div");
-      row.className = "lib-note" + (n.name === cur ? " active" : "");
-      const nm = document.createElement("span");
-      nm.className = "n-name";
-      nm.textContent = n.name.replace(/\.(laido|md)$/i, "");
-      nm.title = n.name;
-      const tm = document.createElement("span");
-      tm.className = "n-time";
-      tm.textContent = relTime(n.modified);
-      row.append(nm, tm);
-      row.addEventListener("click", () => openNote(n.name));
-      el.append(row);
-    }
+    for (const d of list) fileRow(d, el);
   } catch {
     /* vault not ready yet */
   }
@@ -195,15 +189,22 @@ async function askLibrary(slug: string, label: string, query: string) {
   }
 }
 
-async function addPaths(paths: string[]) {
+async function addPaths(paths: string[], forNote = false) {
   if (paths.length === 0) return;
-  addActivity(`📄 embedding ${paths.length} file(s)…`);
+  const note = forNote ? currentNote() : null;
+  if (forNote && !note) {
+    addActivity("✕ open a note first — files attach to the open note");
+    return;
+  }
+  addActivity(
+    `📄 embedding ${paths.length} file(s)${note ? ` for ${note.replace(/\.(laido|md)$/i, "")}` : ""}…`,
+  );
   const bar = $("#lib-progress");
   bar.classList.remove("hidden");
   setProgress(0, "preparing…");
   try {
-    await invoke("rag_add_files", { paths });
-    addActivity("✓ library updated");
+    await invoke("rag_add_files", { paths, note });
+    addActivity(note ? `✓ attached to ${note.replace(/\.(laido|md)$/i, "")}` : "✓ library updated");
     setProgress(100, "done");
     window.setTimeout(() => bar.classList.add("hidden"), 1200);
   } catch (e) {
@@ -211,6 +212,7 @@ async function addPaths(paths: string[]) {
     bar.classList.add("hidden");
   }
   void refreshLibrary();
+  void refreshNoteFiles();
 }
 
 function setProgress(pct: number, label: string) {
@@ -223,7 +225,7 @@ function setProgress(pct: number, label: string) {
 export function initLibrary() {
   $("#btn-library").addEventListener("click", () => toggleLibrary());
   $("#lib-close").addEventListener("click", () => toggleLibrary(false));
-  const browse = async () => {
+  const browse = async (forNote = false) => {
     const api = window.__TAURI__.dialog;
     if (!api) return;
     try {
@@ -242,7 +244,7 @@ export function initLibrary() {
       });
       const paths = Array.isArray(picked) ? picked : picked ? [picked] : [];
       if (paths.length > 0) addActivity(`⤓ selected ${paths.length} file(s)`);
-      await addPaths(paths);
+      await addPaths(paths, forNote);
     } catch (e) {
       addActivity(`✕ ${String(e)}`);
     }
@@ -252,14 +254,25 @@ export function initLibrary() {
     void browse();
   });
   $("#lib-drop").addEventListener("click", () => void browse());
+  $("#lib-note-drop").addEventListener("click", () => void browse(true));
   void window.__TAURI__.event.listen("rag:changed", () => {
     void refreshLibrary();
+    void refreshNoteFiles();
   });
-  void window.__TAURI__.event.listen<{ paths: string[] }>("tauri://drag-drop", (e) => {
+  void window.__TAURI__.event.listen<{
+    paths: string[];
+    position?: { x: number; y: number };
+  }>("tauri://drag-drop", (e) => {
     if (document.body.classList.contains("lib-open")) {
       const paths = e.payload.paths ?? [];
-      addActivity(`⤓ dropped ${paths.length} file(s)`);
-      void addPaths(paths);
+      // drop position routes the upload: over the note's half → that note's
+      // dedicated library; anywhere else → the shared global library
+      const zone = $("#lib-note-drop").getBoundingClientRect();
+      const p = e.payload.position;
+      const forNote =
+        !!p && !!currentNote() && p.y >= zone.top && p.y <= zone.bottom;
+      addActivity(`⤓ dropped ${paths.length} file(s)${forNote ? " on this note" : ""}`);
+      void addPaths(paths, forNote);
     }
   });
   void window.__TAURI__.event.listen<{
@@ -289,11 +302,11 @@ export function initLibrary() {
   });
   if (localStorage.getItem("laido.library") === "1") toggleLibrary(true);
   void refreshLibrary();
-  void refreshLibNotes();
-  // the notes world follows note opens and picks up vault changes on a slow
+  void refreshNoteFiles();
+  // the note world follows note opens and picks up library changes on a slow
   // poll — the sig check means it only re-renders when something moved
-  document.addEventListener("nav:open", () => void refreshLibNotes());
+  document.addEventListener("nav:open", () => void refreshNoteFiles());
   window.setInterval(() => {
-    if (document.body.classList.contains("lib-open")) void refreshLibNotes();
+    if (document.body.classList.contains("lib-open")) void refreshNoteFiles();
   }, 6000);
 }

@@ -471,12 +471,31 @@ pub async fn term_web(query: String) -> Result<String, String> {
         .join("\n\n"))
 }
 
-/// notes/library retrieval for the terminal AI — hybrid search excerpts
+/// notes/library retrieval for the terminal AI — hybrid search excerpts.
+/// A doc token in the query or an explicit "all-files"/"everything" target
+/// widens the pool; otherwise a note's chats only see that note's dedicated
+/// library — the global library stays opt-in ("ask all files" → all-files).
 #[tauri::command]
-pub async fn term_notes(query: String, target: Option<String>) -> Result<String, String> {
-    let chunks = crate::rag::rag_search(&query, 6, target.as_deref()).await;
+pub async fn term_notes(
+    query: String,
+    target: Option<String>,
+    note: Option<String>,
+) -> Result<String, String> {
+    let effective = target.or_else(|| {
+        note.filter(|n| !n.trim().is_empty() && n != "sticky")
+            .map(|n| format!("note:{n}"))
+    });
+    let dedicated = effective
+        .as_deref()
+        .map(|t| t.starts_with("note:"))
+        .unwrap_or(false);
+    let chunks = crate::rag::rag_search(&query, 6, effective.as_deref()).await;
     if chunks.is_empty() {
-        return Ok("(nothing found in your notes or library)".into());
+        return Ok(if dedicated {
+            "(nothing in this note's files — attach files above the editor, or ask \"all files\" for the whole library)".into()
+        } else {
+            "(nothing found in your notes or library)".into()
+        });
     }
     Ok(chunks.join("\n"))
 }

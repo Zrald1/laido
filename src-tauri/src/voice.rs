@@ -158,8 +158,61 @@ pub fn encode_wav(samples: &[f32], rate: u32, channels: u16) -> Result<Vec<u8>, 
 
 /* ---------- live transcription: AssemblyAI streaming v3 websocket ---------- */
 
-fn ws_request(rate: u32) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, String> {
+/// managed (lk- / Laido cloud) session → (base, token): the gateway holds
+/// the AssemblyAI key, the app only ever sees short-lived grants
+fn managed() -> Option<(String, String)> {
+    let s = crate::state::load_settings();
+    let on = s.nebius_api_key.starts_with("lk-") || s.base_url.starts_with("https://laido.");
+    if on && !s.nebius_api_key.is_empty() {
+        Some((
+            s.base_url.trim_end_matches('/').to_string(),
+            s.nebius_api_key,
+        ))
+    } else {
+        None
+    }
+}
+
+async fn ws_request(
+    rate: u32,
+) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, String> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let url = format!(
+        "wss://streaming.assemblyai.com/v3/ws?sample_rate={rate}&encoding=pcm_s16le&speech_model=universal-3-6-pro"
+    );
+    // managed: mint a temporary realtime token via the gateway and put it in
+    // the url — no AssemblyAI key is held (or sent) by the client at all
+    if let Some((base, lk)) = managed() {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        if let Ok(resp) = client
+            .post(format!("{base}/realtime-token"))
+            .bearer_auth(&lk)
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
+                if let Ok(j) = resp.json::<serde_json::Value>().await {
+                    if let Some(tok) = j["token"].as_str() {
+                        return format!("{url}&token={tok}")
+                            .into_client_request()
+                            .map_err(|e| e.to_string());
+                    }
+                }
+            }
+        }
+        // gateway unreachable / token mint failed — BYOK fallback if the user
+        // pasted their own key, else surface the real error
+        if crate::state::load_settings()
+            .assemblyai_api_key
+            .trim()
+            .is_empty()
+        {
+            return Err("voice service unreachable — check your connection".into());
+        }
+    }
     let key = crate::state::load_settings()
         .assemblyai_api_key
         .trim()
@@ -167,9 +220,6 @@ fn ws_request(rate: u32) -> Result<tokio_tungstenite::tungstenite::handshake::cl
     if key.is_empty() {
         return Err("add your AssemblyAI key in Settings (gear icon)".into());
     }
-    let url = format!(
-        "wss://streaming.assemblyai.com/v3/ws?sample_rate={rate}&encoding=pcm_s16le&speech_model=universal-3-6-pro"
-    );
     let mut req = url.into_client_request().map_err(|e| e.to_string())?;
     req.headers_mut().insert(
         "Authorization",
@@ -254,7 +304,7 @@ pub fn to_pcm16k(samples: &[i16], rate: u32, channels: u16) -> Vec<i16> {
 /// pacing) and return the final transcript — the same session logic the live
 /// mic uses, feedable from a file so it can be simulated end to end
 pub async fn stream_pcm_to_text(pcm: Vec<i16>, rate: u32) -> Result<String, String> {
-    let (ws, _) = tokio_tungstenite::connect_async(ws_request(rate)?)
+    let (ws, _) = tokio_tungstenite::connect_async(ws_request(rate).await?)
         .await
         .map_err(|e| format!("streaming connect failed: {e}"))?;
     let (mut sink, mut stream) = ws.split();
@@ -352,7 +402,7 @@ async fn live_loop(
     mic_rate: u32,
     channels: u16,
 ) -> Result<(), String> {
-    let (ws, _) = tokio_tungstenite::connect_async(ws_request(16000)?)
+    let (ws, _) = tokio_tungstenite::connect_async(ws_request(16000).await?)
         .await
         .map_err(|e| format!("streaming connect failed: {e}"))?;
     let (mut sink, mut stream) = ws.split();
@@ -463,16 +513,71 @@ async fn live_loop(
     Ok(())
 }
 
+/// poll a transcript until AssemblyAI reports done — `auth` is the full
+/// Authorization header value (raw key for BYOK, "Bearer lk-…" for managed)
+async fn wait_transcript(
+    client: &reqwest::Client,
+    url: &str,
+    auth: &str,
+) -> Result<String, String> {
+    for _ in 0..60 {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let poll = client
+            .get(url)
+            .header("authorization", auth)
+            .send()
+            .await
+            .map_err(|e| format!("poll failed: {e}"))?;
+        let j: serde_json::Value = poll.json().await.map_err(|e| e.to_string())?;
+        match j["status"].as_str().unwrap_or("") {
+            "completed" => return Ok(j["text"].as_str().unwrap_or("").trim().to_string()),
+            "error" => {
+                return Err(j["error"].as_str().unwrap_or("transcription failed").to_string())
+            }
+            _ => {}
+        }
+    }
+    Err("transcription timed out".into())
+}
+
 /// the AssemblyAI flow: upload bytes → submit transcript → poll until done
 pub async fn transcribe_wav(wav: Vec<u8>) -> Result<String, String> {
     let key = crate::state::load_settings().assemblyai_api_key.trim().to_string();
-    if key.is_empty() {
-        return Err("add your AssemblyAI key in Settings (gear icon)".into());
-    }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
+    // managed: the gateway performs upload+submit server-side and we poll it
+    // back through the same proxy — the real key never leaves the server
+    if let Some((base, lk)) = managed() {
+        let sub = client
+            .post(format!("{base}/transcribe"))
+            .bearer_auth(&lk)
+            .header("content-type", "application/octet-stream")
+            .body(wav.clone())
+            .send()
+            .await;
+        if let Ok(sub) = sub {
+            if sub.status().is_success() {
+                if let Ok(subj) = sub.json::<serde_json::Value>().await {
+                    if let Some(id) = subj["id"].as_str() {
+                        return wait_transcript(
+                            &client,
+                            &format!("{base}/transcript/{id}"),
+                            &format!("Bearer {lk}"),
+                        )
+                        .await;
+                    }
+                }
+            }
+        }
+        if key.is_empty() {
+            return Err("voice service unreachable — check your connection".into());
+        }
+    }
+    if key.is_empty() {
+        return Err("add your AssemblyAI key in Settings (gear icon)".into());
+    }
     let up = client
         .post("https://api.assemblyai.com/v2/upload")
         .header("authorization", &key)
@@ -501,22 +606,10 @@ pub async fn transcribe_wav(wav: Vec<u8>) -> Result<String, String> {
         .as_str()
         .ok_or("assemblyai returned no transcript id")?
         .to_string();
-    for _ in 0..60 {
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let poll = client
-            .get(format!("https://api.assemblyai.com/v2/transcript/{id}"))
-            .header("authorization", &key)
-            .send()
-            .await
-            .map_err(|e| format!("poll failed: {e}"))?;
-        let j: serde_json::Value = poll.json().await.map_err(|e| e.to_string())?;
-        match j["status"].as_str().unwrap_or("") {
-            "completed" => return Ok(j["text"].as_str().unwrap_or("").trim().to_string()),
-            "error" => {
-                return Err(j["error"].as_str().unwrap_or("transcription failed").to_string())
-            }
-            _ => {}
-        }
-    }
-    Err("transcription timed out".into())
+    wait_transcript(
+        &client,
+        &format!("https://api.assemblyai.com/v2/transcript/{id}"),
+        &key,
+    )
+    .await
 }

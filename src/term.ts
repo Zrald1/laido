@@ -2675,9 +2675,11 @@ export function wireTerminal(card: HTMLElement) {
           }
         }
         line("laido", `notes${target ? ` [${target}]` : ""}: ${query}`);
-        const chunks = await invoke<string>("term_notes", { query, target }).catch(
-          (e) => `✕ ${String(e)}`,
-        );
+        const chunks = await invoke<string>("term_notes", {
+          query,
+          target,
+          note: noteName(),
+        }).catch((e) => `✕ ${String(e)}`);
         history.push({ role: "user", content: `notes/library excerpts for \`${q}\`:\n${chunks}` });
         if (steps < MAX_STEPS) {
           finalText = await aiTurn(

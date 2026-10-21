@@ -35,10 +35,11 @@
         <span class="head-spacer"></span>
         <button id="lib-close" class="ghost mini" title="Hide library">&#x00AB;</button>
       </div>
-      <div class="lib-sec-label" data-i18n="lib.notes">Notes</div>
+      <div class="lib-sec-label"><span data-i18n="lib.notes">Note files</span> <span id="lib-note-name" class="lib-note-name muted"></span></div>
+      <div id="lib-note-drop" class="lib-note-drop">+ <span data-i18n="lib.attach">attach files to this note</span></div>
       <div id="lib-notes"></div>
       <div class="lib-divider"></div>
-      <div class="lib-sec-label" data-i18n="lib.files">Files</div>
+      <div class="lib-sec-label" data-i18n="lib.files">All files</div>
       <div id="lib-drop" class="lib-drop">
         <div class="lib-drop-text" data-i18n="lib.drop">Drop files here</div>
         <button id="lib-browse" class="ghost mini" data-i18n="lib.browse">Browse…</button>
@@ -303,8 +304,11 @@
       <input id="key-tavily" type="password" placeholder="from tavily.com" autocomplete="off" />
       </div>
       <p id="tavily-managed" class="muted hidden">Web search is included with your Laido plan — no key needed.</p>
+      <div id="aai-row">
       <label for="key-assemblyai">AssemblyAI API key <span class="muted">(for voice notes)</span></label>
       <input id="key-assemblyai" type="password" placeholder="from assemblyai.com" autocomplete="off" />
+      </div>
+      <p id="aai-managed" class="muted hidden">Voice transcription is included with your Laido plan — no key needed.</p>
       <p class="muted">Keys are stored locally in your vault&rsquo;s <code>.laido/settings.json</code>.
       Nothing is sent anywhere until you ask.</p>
         </div>
