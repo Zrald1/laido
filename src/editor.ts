@@ -5667,11 +5667,14 @@ export function initEditor() {
   });
   const vlisten = window.__TAURI__.event.listen;
   void vlisten<{ final: string; partial: string }>("voice:partial", (e) => {
-    if (!liveBubble) return;
+    // only the editor's own live session drives the bubble — chat mics
+    // emit the same global event and must not pop it
+    if (!liveBubble || voiceMode !== "live") return;
     liveBubble.textContent = `${e.payload.final}${e.payload.partial}`.trim() || "listening…";
     liveBubble.classList.remove("hidden");
   });
   void vlisten<{ error: string }>("voice:error", (e) => {
+    if (!voiceMode) return;
     addActivity(`✕ live transcription: ${e.payload.error}`);
     stopVoiceUI();
   });
