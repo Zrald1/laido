@@ -10,6 +10,8 @@ const S = (v: unknown): string => typeof v === "string" ? v : typeof v === "numb
 export interface Settings {
   nebius_api_key: string;
   tavily_api_key: string;
+  assemblyai_api_key: string;
+  voyage_api_key: string;
   theme: string;
   base_url: string;
   model_fast: string;
@@ -256,6 +258,8 @@ function applyProviderUI() {
   $("#tavily-managed")?.classList.toggle("hidden", !managed);
   $("#aai-row")?.classList.toggle("hidden", managed);
   $("#aai-managed")?.classList.toggle("hidden", !managed);
+  $("#voy-row")?.classList.toggle("hidden", managed);
+  $("#voy-managed")?.classList.toggle("hidden", !managed);
 }
 
 const FALLBACK_MODELS = [
@@ -279,6 +283,8 @@ export async function refreshStatus() {
     ? ""
     : settings.nebius_api_key;
   $<HTMLInputElement>("#key-tavily").value = settings.tavily_api_key;
+  $<HTMLInputElement>("#key-assemblyai").value = settings.assemblyai_api_key;
+  $<HTMLInputElement>("#key-voyage").value = settings.voyage_api_key;
   const dot = $("#api-status .dot");
   const text = $("#api-status-text");
   if (settings.nebius_api_key) {
@@ -764,6 +770,11 @@ export async function testConnection() {
       nebius_api_key: gwKey,
       base_url: providerBasePatch(gwKey),
       tavily_api_key: $<HTMLInputElement>("#key-tavily").value.trim(),
+      // hidden under a managed plan — empty field means keep the stored key
+      assemblyai_api_key: $<HTMLInputElement>("#key-assemblyai").value.trim()
+        || (stored.startsWith("lk-") ? settings?.assemblyai_api_key ?? "" : ""),
+      voyage_api_key: $<HTMLInputElement>("#key-voyage").value.trim()
+        || (stored.startsWith("lk-") ? settings?.voyage_api_key ?? "" : ""),
       ...modelPatch(),
     },
   });

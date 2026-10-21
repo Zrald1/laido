@@ -1123,6 +1123,102 @@ fn interference_rerank(cands: &[(f32, String, u32)], scoped: &[RagDoc]) -> Vec<(
     out
 }
 
+/// Voyage cross-encoder rerank over the fused candidates — managed users go
+/// through the gateway (the Voyage key stays server-side, metered as 'rerank'),
+/// BYOK users call api.voyageai.com directly with their own key. Reorders the
+/// head of the list by relevance_score; any failure keeps the incoming order
+/// so retrieval is never worse than the local lanes alone.
+async fn voyage_rerank(
+    query: &str,
+    cands: Vec<(f32, String, u32)>,
+    scoped: &[RagDoc],
+) -> Vec<(f32, String, u32)> {
+    const RERANK_N: usize = 30;
+    if cands.len() < 3 {
+        return cands;
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut head: Vec<(f32, String, u32)> = Vec::new();
+    for c in &cands {
+        if head.len() >= RERANK_N {
+            break;
+        }
+        if seen.insert((c.1.clone(), c.2)) {
+            head.push(c.clone());
+        }
+    }
+    let texts: Vec<String> = head
+        .iter()
+        .map(|(_, slug, idx)| {
+            scoped
+                .iter()
+                .find(|d| d.slug == *slug)
+                .and_then(|d| d.chunks.iter().find(|c| c.idx == *idx))
+                .map(|c| c.text.chars().take(3500).collect())
+                .unwrap_or_default()
+        })
+        .collect();
+    if texts.iter().all(|t| t.is_empty()) {
+        return cands;
+    }
+    // managed → gateway /v1/rerank; BYOK → Voyage direct. Neither = local only.
+    let (url, auth) = if let Some((base, lk)) = crate::voice::managed() {
+        (format!("{base}/rerank"), lk)
+    } else {
+        let k = state::load_settings().voyage_api_key.trim().to_string();
+        if k.is_empty() {
+            return cands;
+        }
+        ("https://api.voyageai.com/v1/rerank".into(), k)
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let resp = client
+        .post(&url)
+        .bearer_auth(&auth)
+        .json(&serde_json::json!({
+            "query": query, "documents": texts, "top_k": head.len(),
+        }))
+        .send()
+        .await;
+    let Ok(resp) = resp else { return cands };
+    if !resp.status().is_success() {
+        return cands;
+    }
+    let j: serde_json::Value = match resp.json().await {
+        Ok(j) => j,
+        Err(_) => return cands,
+    };
+    let Some(rows) = j["data"].as_array() else {
+        return cands;
+    };
+    let mut order: Vec<usize> = rows
+        .iter()
+        .filter_map(|r| r["index"].as_u64().map(|i| i as usize))
+        .collect();
+    for i in 0..head.len() {
+        if !order.contains(&i) {
+            order.push(i); // any index Voyage omitted keeps its local rank
+        }
+    }
+    let inset: std::collections::HashSet<(String, u32)> =
+        head.iter().map(|c| (c.1.clone(), c.2)).collect();
+    let mut out: Vec<(f32, String, u32)> = Vec::with_capacity(cands.len());
+    for i in &order {
+        if let Some(c) = head.get(*i) {
+            out.push(c.clone());
+        }
+    }
+    out.extend(
+        cands
+            .into_iter()
+            .filter(|c| !inset.contains(&(c.1.clone(), c.2))),
+    );
+    out
+}
+
 fn normalize(mut v: Vec<f32>) -> Vec<f32> {
     let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if n > 0.0 {
@@ -2601,9 +2697,19 @@ pub async fn rag_search(query: &str, k: usize, target: Option<&str>) -> Vec<Stri
     if !wl.is_empty() {
         lists.push(wl);
     }
+    let cands: Vec<(f32, String, u32)> = voyage_rerank(
+        query,
+        rrf_fuse(lists)
+            .into_iter()
+            .enumerate()
+            .map(|(r, (s, i))| (1.0 / (1.0 + r as f32), s, i))
+            .collect::<Vec<_>>(),
+        &docs,
+    )
+    .await;
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
-    for (slug, idx) in rrf_fuse(lists) {
+    for (_, slug, idx) in cands {
         if !seen.insert((slug.clone(), idx)) {
             continue;
         }
@@ -2723,14 +2829,19 @@ pub async fn rag_ask(
             },
         );
     }
-    let cands: Vec<(f32, String, u32)> = interference_rerank(
-        &rrf_fuse(lists)
-            .into_iter()
-            .enumerate()
-            .map(|(r, (s, i))| (1.0 / (1.0 + r as f32), s, i))
-            .collect::<Vec<_>>(),
+    let cands: Vec<(f32, String, u32)> = voyage_rerank(
+        &query,
+        interference_rerank(
+            &rrf_fuse(lists)
+                .into_iter()
+                .enumerate()
+                .map(|(r, (s, i))| (1.0 / (1.0 + r as f32), s, i))
+                .collect::<Vec<_>>(),
+            &scoped,
+        ),
         &scoped,
-    );
+    )
+    .await;
     let q = query.to_lowercase();
     let wants_all = intent == "all"
         || ["all the", "all of", "every", "each ", "list all", "everything"]

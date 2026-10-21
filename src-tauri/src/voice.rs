@@ -160,7 +160,7 @@ pub fn encode_wav(samples: &[f32], rate: u32, channels: u16) -> Result<Vec<u8>, 
 
 /// managed (lk- / Laido cloud) session → (base, token): the gateway holds
 /// the AssemblyAI key, the app only ever sees short-lived grants
-fn managed() -> Option<(String, String)> {
+pub(crate) fn managed() -> Option<(String, String)> {
     let s = crate::state::load_settings();
     let on = s.nebius_api_key.starts_with("lk-") || s.base_url.starts_with("https://laido.");
     if on && !s.nebius_api_key.is_empty() {

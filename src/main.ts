@@ -56,7 +56,11 @@ async function saveSettings() {
       nebius_api_key: gwKey,
       base_url: providerBasePatch(gwKey),
       tavily_api_key: $<HTMLInputElement>("#key-tavily").value.trim(),
-      assemblyai_api_key: $<HTMLInputElement>("#key-assemblyai").value.trim(),
+      // hidden under a managed plan — empty field means keep the stored key
+      assemblyai_api_key: $<HTMLInputElement>("#key-assemblyai").value.trim()
+        || (stored.startsWith("lk-") ? currentSettings()?.assemblyai_api_key ?? "" : ""),
+      voyage_api_key: $<HTMLInputElement>("#key-voyage").value.trim()
+        || (stored.startsWith("lk-") ? currentSettings()?.voyage_api_key ?? "" : ""),
       ...modelPatch(),
     },
   });

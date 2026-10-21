@@ -14,6 +14,8 @@ pub struct Settings {
     pub nebius_api_key: String,
     pub tavily_api_key: String,
     pub assemblyai_api_key: String,
+    /// BYOK Voyage AI key — rerank stage in retrieval; unused when managed
+    pub voyage_api_key: String,
     pub theme: String,
     pub base_url: String,
     pub model_fast: String,
@@ -39,6 +41,7 @@ impl Default for Settings {
             nebius_api_key: String::new(),
             tavily_api_key: String::new(),
             assemblyai_api_key: String::new(),
+            voyage_api_key: String::new(),
             theme: "system".into(),
             base_url: DEFAULT_BASE_URL.into(),
             model_fast: DEFAULT_FAST.into(),
@@ -76,6 +79,7 @@ pub struct SettingsPatch {
     pub nebius_api_key: Option<String>,
     pub tavily_api_key: Option<String>,
     pub assemblyai_api_key: Option<String>,
+    pub voyage_api_key: Option<String>,
     pub theme: Option<String>,
     pub base_url: Option<String>,
     pub model_fast: Option<String>,
@@ -106,6 +110,9 @@ pub fn settings_set(patch: SettingsPatch) -> Result<Settings, String> {
     }
     if let Some(v) = patch.assemblyai_api_key {
         s.assemblyai_api_key = v;
+    }
+    if let Some(v) = patch.voyage_api_key {
+        s.voyage_api_key = v;
     }
     if let Some(v) = patch.theme.filter(|v| !v.is_empty()) {
         s.theme = v;
