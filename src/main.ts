@@ -61,6 +61,9 @@ async function saveSettings() {
         || (stored.startsWith("lk-") ? currentSettings()?.assemblyai_api_key ?? "" : ""),
       voyage_api_key: $<HTMLInputElement>("#key-voyage").value.trim()
         || (stored.startsWith("lk-") ? currentSettings()?.voyage_api_key ?? "" : ""),
+      voyage_model: stored.startsWith("lk-")
+        ? currentSettings()?.voyage_model ?? "rerank-2.5"
+        : $<HTMLSelectElement>("#voy-model").value,
       ...modelPatch(),
     },
   });

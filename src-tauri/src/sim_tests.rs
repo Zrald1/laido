@@ -595,3 +595,17 @@ fn sim_feature1_voice_pipeline() {
         }
     });
 }
+
+#[test]
+fn sim_html_to_text_strips_boilerplate() {
+    // rust `regex` has no backreferences — guards the block-strip pattern
+    let html = "<html><head><script>var x=1;</script><style>.a{}</style></head>\
+                <body><nav>menu</nav><p>Hello <b>world</b></p><br><p>line two</p></body></html>";
+    let out = crate::rag::html_to_text(html);
+    assert!(out.contains("Hello world"), "body text lost: {out}");
+    assert!(out.contains("line two"), "second paragraph lost: {out}");
+    assert!(!out.contains("var x"), "script leaked: {out}");
+    assert!(!out.contains(".a{}"), "style leaked: {out}");
+    assert!(!out.contains("menu"), "nav leaked: {out}");
+    assert!(!out.contains('<'), "tag leaked: {out}");
+}

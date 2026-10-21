@@ -315,8 +315,14 @@
       </div>
       <p id="aai-managed" class="muted hidden">Voice transcription is included with your Laido plan — no key needed.</p>
       <div id="voy-row">
-      <label for="key-voyage">Voyage AI key <span class="muted">(reranks retrieval — sharper answers)</span></label>
-      <input id="key-voyage" type="password" placeholder="from voyageai.com" autocomplete="off" />
+      <label for="key-voyage">Voyage AI key <span class="muted">(reranks retrieval — sharper answers; optional)</span></label>
+      <input id="key-voyage" type="password" placeholder="from voyageai.com — leave empty to keep classic retrieval" autocomplete="off" />
+      <select id="voy-model" class="model-select" title="rerank model">
+        <option value="rerank-2.5">rerank-2.5 — best quality</option>
+        <option value="rerank-2.5-lite">rerank-2.5-lite — fastest</option>
+        <option value="rerank-3">rerank-3 — newest</option>
+        <option value="rerank-3-lite">rerank-3-lite — newest + fast</option>
+      </select>
       </div>
       <p id="voy-managed" class="muted hidden">Retrieval reranking is included with your Laido plan — no key needed.</p>
       <p class="muted">Keys are stored locally in your vault&rsquo;s <code>.laido/settings.json</code>.

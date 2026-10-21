@@ -16,6 +16,8 @@ pub struct Settings {
     pub assemblyai_api_key: String,
     /// BYOK Voyage AI key — rerank stage in retrieval; unused when managed
     pub voyage_api_key: String,
+    /// BYOK rerank model — rerank-2.5 / -lite / -3; empty falls back server-side
+    pub voyage_model: String,
     pub theme: String,
     pub base_url: String,
     pub model_fast: String,
@@ -42,6 +44,7 @@ impl Default for Settings {
             tavily_api_key: String::new(),
             assemblyai_api_key: String::new(),
             voyage_api_key: String::new(),
+            voyage_model: "rerank-2.5".into(),
             theme: "system".into(),
             base_url: DEFAULT_BASE_URL.into(),
             model_fast: DEFAULT_FAST.into(),
@@ -80,6 +83,7 @@ pub struct SettingsPatch {
     pub tavily_api_key: Option<String>,
     pub assemblyai_api_key: Option<String>,
     pub voyage_api_key: Option<String>,
+    pub voyage_model: Option<String>,
     pub theme: Option<String>,
     pub base_url: Option<String>,
     pub model_fast: Option<String>,
@@ -113,6 +117,9 @@ pub fn settings_set(patch: SettingsPatch) -> Result<Settings, String> {
     }
     if let Some(v) = patch.voyage_api_key {
         s.voyage_api_key = v;
+    }
+    if let Some(v) = patch.voyage_model {
+        s.voyage_model = v;
     }
     if let Some(v) = patch.theme.filter(|v| !v.is_empty()) {
         s.theme = v;

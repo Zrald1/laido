@@ -12,6 +12,7 @@ export interface Settings {
   tavily_api_key: string;
   assemblyai_api_key: string;
   voyage_api_key: string;
+  voyage_model: string;
   theme: string;
   base_url: string;
   model_fast: string;
@@ -285,6 +286,7 @@ export async function refreshStatus() {
   $<HTMLInputElement>("#key-tavily").value = settings.tavily_api_key;
   $<HTMLInputElement>("#key-assemblyai").value = settings.assemblyai_api_key;
   $<HTMLInputElement>("#key-voyage").value = settings.voyage_api_key;
+  $<HTMLSelectElement>("#voy-model").value = settings.voyage_model || "rerank-2.5";
   const dot = $("#api-status .dot");
   const text = $("#api-status-text");
   if (settings.nebius_api_key) {
@@ -775,6 +777,9 @@ export async function testConnection() {
         || (stored.startsWith("lk-") ? settings?.assemblyai_api_key ?? "" : ""),
       voyage_api_key: $<HTMLInputElement>("#key-voyage").value.trim()
         || (stored.startsWith("lk-") ? settings?.voyage_api_key ?? "" : ""),
+      voyage_model: stored.startsWith("lk-")
+        ? settings?.voyage_model ?? "rerank-2.5"
+        : $<HTMLSelectElement>("#voy-model").value,
       ...modelPatch(),
     },
   });

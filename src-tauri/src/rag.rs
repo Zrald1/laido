@@ -1161,26 +1161,40 @@ async fn voyage_rerank(
     if texts.iter().all(|t| t.is_empty()) {
         return cands;
     }
-    // managed → gateway /v1/rerank; BYOK → Voyage direct. Neither = local only.
-    let (url, auth) = if let Some((base, lk)) = crate::voice::managed() {
-        (format!("{base}/rerank"), lk)
+    // managed → gateway /v1/rerank — only a real lk- session may spend the
+    // server-held key; anyone else falls through to their own Voyage key.
+    // The managed call carries no model — the admin's voyage_model setting
+    // is authoritative; BYOK sends the user's own pick.
+    let (url, auth, model) = if let Some((base, lk)) =
+        crate::voice::managed().filter(|(_, k)| k.starts_with("lk-"))
+    {
+        (format!("{base}/rerank"), lk, String::new())
     } else {
-        let k = state::load_settings().voyage_api_key.trim().to_string();
+        let s = state::load_settings();
+        let k = s.voyage_api_key.trim().to_string();
         if k.is_empty() {
             return cands;
         }
-        ("https://api.voyageai.com/v1/rerank".into(), k)
+        (
+            "https://api.voyageai.com/v1/rerank".into(),
+            k,
+            s.voyage_model.trim().to_string(),
+        )
     };
+    let mut payload = serde_json::json!({
+        "query": query, "documents": texts, "top_k": head.len(),
+    });
+    if !model.is_empty() {
+        payload["model"] = serde_json::Value::String(model.into());
+    }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
     let resp = client
         .post(&url)
-        .bearer_auth(&auth)
-        .json(&serde_json::json!({
-            "query": query, "documents": texts, "top_k": head.len(),
-        }))
+        .bearer_auth(auth)
+        .json(&payload)
         .send()
         .await;
     let Ok(resp) = resp else { return cands };
@@ -2091,17 +2105,26 @@ const SITE_MAX_PAGES: usize = 8; // same-host article pages, not the whole crawl
 const SRC_MAX_CHARS: usize = 500_000;
 
 pub(crate) fn html_to_text(html: &str) -> String {
-    let blocks = regex::Regex::new(
-        r"(?is)<(script|style|noscript|svg|iframe|template|head|form|nav|footer)[^>]*>.*?</\1>",
-    )
-    .unwrap();
+    // regex has no backreferences — the close tag matches any block tag;
+    // compiled once, not per call (site indexing runs this per source)
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let blocks = RE.get_or_init(|| {
+        regex::Regex::new(
+            r"(?is)<(script|style|noscript|svg|iframe|template|head|form|nav|footer)\b[^>]*>.*?</(script|style|noscript|svg|iframe|template|head|form|nav|footer)\s*>",
+        )
+        .unwrap()
+    });
     let mut s = blocks.replace_all(html, " ").to_string();
-    let nl = regex::Regex::new(
-        r"(?i)</(p|div|li|ul|ol|h[1-6]|tr|table|section|article|header|blockquote|pre)\s*>|<br\s*/?>",
-    )
-    .unwrap();
+    static NL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let nl = NL.get_or_init(|| {
+        regex::Regex::new(
+            r"(?i)</(p|div|li|ul|ol|h[1-6]|tr|table|section|article|header|blockquote|pre)\s*>|<br\s*/?>",
+        )
+        .unwrap()
+    });
     s = nl.replace_all(&s, "\n").to_string();
-    let tags = regex::Regex::new(r"<[^>]+>").unwrap();
+    static TAGS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let tags = TAGS.get_or_init(|| regex::Regex::new(r"<[^>]+>").unwrap());
     s = tags.replace_all(&s, "").to_string();
     for (a, b) in [
         ("&nbsp;", " "),
