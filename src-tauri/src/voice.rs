@@ -187,21 +187,34 @@ async fn ws_request(
             .timeout(std::time::Duration::from_secs(15))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        if let Ok(resp) = client
+        let mut gw_err: Option<String> = None;
+        match client
             .post(format!("{base}/realtime-token"))
             .bearer_auth(&lk)
             .send()
             .await
         {
-            if resp.status().is_success() {
-                if let Ok(j) = resp.json::<serde_json::Value>().await {
-                    if let Some(tok) = j["token"].as_str() {
-                        return format!("{url}&token={tok}")
-                            .into_client_request()
-                            .map_err(|e| e.to_string());
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    if let Ok(j) = resp.json::<serde_json::Value>().await {
+                        if let Some(tok) = j["token"].as_str() {
+                            return format!("{url}&token={tok}")
+                                .into_client_request()
+                                .map_err(|e| e.to_string());
+                        }
                     }
+                    gw_err = Some("voice token: bad gateway response".into());
+                } else {
+                    let body = resp.text().await.unwrap_or_default();
+                    let body = body.trim().trim_matches('"');
+                    gw_err = Some(if body.is_empty() {
+                        "voice service error".into()
+                    } else {
+                        format!("voice service: {body}")
+                    });
                 }
             }
+            Err(_) => gw_err = Some("voice service unreachable — check your connection".into()),
         }
         // gateway unreachable / token mint failed — BYOK fallback if the user
         // pasted their own key, else surface the real error
@@ -210,7 +223,7 @@ async fn ws_request(
             .trim()
             .is_empty()
         {
-            return Err("voice service unreachable — check your connection".into());
+            return Err(gw_err.unwrap_or_else(|| "voice service error".into()));
         }
     }
     let key = crate::state::load_settings()

@@ -1,4 +1,5 @@
 use crate::{llm, state, tools};
+use futures_util::StreamExt as _;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -2176,7 +2177,7 @@ pub async fn rag_add_site(app: AppHandle, url: String, note: Option<String>) -> 
     // real per-resource count — then flattened into the doc's chunk list
     let mut all_chunks: Vec<String> = Vec::new();
     let push_source =
-        |sources: &mut Vec<SiteSource>, all: &mut Vec<String>, u: String, t: String, k: &str, text: String| {
+        |sources: &mut Vec<SiteSource>, all: &mut Vec<String>, u: String, t: String, k: String, text: String| {
             let text = text.trim();
             let chunks = if text.len() >= 40 {
                 let capped: String = text.chars().take(SRC_MAX_CHARS).collect();
@@ -2189,7 +2190,7 @@ pub async fn rag_add_site(app: AppHandle, url: String, note: Option<String>) -> 
             sources.push(SiteSource {
                 url: u,
                 title: if t.is_empty() { "untitled".into() } else { t },
-                kind: k.to_string(),
+                kind: k,
                 chunks,
             });
         };
@@ -2216,55 +2217,84 @@ pub async fn rag_add_site(app: AppHandle, url: String, note: Option<String>) -> 
             &mut all_chunks,
             final_url.clone(),
             name.clone(),
-            "page",
+            "page".into(),
             html_to_text(&html),
         );
         let host = host_of(&final_url);
+        // collect the work first, then run it ~6-wide: a procurement page can
+        // link 150+ pdfs — sequential fetches + ocr made the bar sit dead
+        let mut jobs: Vec<(String, String, String)> = Vec::new(); // (url, label, kind)
         let mut pages = 0usize;
         for (link, label) in extract_links(&html, &final_url) {
-            if sources.len() >= SITE_MAX_SRC {
+            if jobs.len() >= SITE_MAX_SRC - 1 {
                 break;
             }
             let clean = link.split(['?', '#']).next().unwrap_or(&link).to_string();
             let lext = clean.rsplit('.').next().unwrap_or("").to_lowercase();
-            let is_file = FILE_EXTS.contains(&lext.as_str());
-            let is_page = !is_file && host_of(&link) == host && link != final_url;
-            if is_page {
-                if pages >= SITE_MAX_PAGES {
-                    continue;
-                }
-            } else if !is_file {
-                continue;
+            if FILE_EXTS.contains(&lext.as_str()) {
+                jobs.push((link, label, lext));
+            } else if host_of(&link) == host && link != final_url && pages < SITE_MAX_PAGES {
+                pages += 1;
+                jobs.push((link, label, "page".into()));
             }
-            prog(&app, &name, 0, 1, "read", 0, 1);
-            match fetch_url(&client, &link).await {
+        }
+        if !jobs.is_empty() {
+            let _ = app.emit(
+                "agent:activity",
+                Activity {
+                    text: format!("🌐 {name}: found {} resources — indexing…", jobs.len()),
+                },
+            );
+        }
+        let app2 = app.clone();
+        let job_count = jobs.len() + 1;
+        let results = futures_util::stream::iter(jobs.into_iter().enumerate().map(
+            |(ji, (link, label, kind))| {
+                let client = client.clone();
+                let app = app2.clone();
+                let name = name.clone();
+                async move {
+                    prog(&app, &name, ji + 1, job_count, "read", 0, 1);
+                    let out = fetch_url(&client, &link).await;
+                    (link, label, kind, out)
+                }
+            },
+        ))
+        .buffered(6)
+        .collect::<Vec<_>>()
+        .await;
+        for (_, (link, label, kind, out)) in results.into_iter().enumerate() {
+            match out {
                 Ok((lurl, lctype, lbody)) => {
-                    let mut ok = true;
-                    if is_page {
-                        pages += 1;
+                    if kind == "page" {
                         let lh = String::from_utf8_lossy(&lbody).to_string();
                         let lt = {
                             let t = title_of(&lh);
                             if t.is_empty() { label.clone() } else { t }
                         };
-                        push_source(&mut sources, &mut all_chunks, lurl, lt, "page", html_to_text(&lh));
+                        push_source(&mut sources, &mut all_chunks, lurl, lt, "page".into(), html_to_text(&lh));
                     } else {
-                        // file child: real extensions route through the same
-                        // extract_document pipeline as local uploads (pdf,
-                        // pptx, image ocr, plain text)
-                        let fname = clean
+                        let fname = link
+                            .split(['?', '#'])
+                            .next()
+                            .unwrap_or(&link)
                             .rsplit('/')
                             .next()
                             .unwrap_or("file")
                             .chars()
                             .take(80)
                             .collect::<String>();
-                        let title = if label.is_empty() { fname.clone() } else { label.clone() };
+                        let mut title = if label.is_empty() { fname.clone() } else { label.clone() };
+                        // web pdfs get the native layer only — scanned docs
+                        // would each cost ~30 ocr calls and look like a hang
                         let text = if lctype.contains("html") {
-                            ok = false; // a file-ish link that served a page — not a real file
-                            String::new()
+                            Err("not a real file".to_string())
+                        } else if kind == "pdf" {
+                            pdf_native_text(&lbody)
+                        } else if matches!(kind.as_str(), "txt" | "md" | "markdown" | "csv" | "json" | "log") {
+                            Ok(String::from_utf8_lossy(&lbody).to_string())
                         } else {
-                            let tmp = rag_dir().join(format!("site-dl-{}.{}", now(), lext));
+                            let tmp = rag_dir().join(format!("site-dl-{}.{}", now(), kind));
                             let text = match fs::write(&tmp, &lbody) {
                                 Ok(()) => {
                                     extract_document(&app, &fname, &tmp, sources.len(), SITE_MAX_SRC)
@@ -2273,17 +2303,18 @@ pub async fn rag_add_site(app: AppHandle, url: String, note: Option<String>) -> 
                                 Err(e) => Err(e.to_string()),
                             };
                             let _ = fs::remove_file(&tmp);
-                            match text {
-                                Ok(t) => t,
-                                Err(e) => {
-                                    ok = false;
+                            text
+                        };
+                        match text {
+                            Ok(t) => push_source(&mut sources, &mut all_chunks, lurl, title, kind.clone(), t),
+                            Err(e) => {
+                                if e == "no text layer" {
+                                    title = format!("{title} (scanned — no text)");
+                                    push_source(&mut sources, &mut all_chunks, lurl, title, kind.clone(), String::new());
+                                } else {
                                     fail_activity(&app, format!("✕ {fname}: {e}"));
-                                    String::new()
                                 }
                             }
-                        };
-                        if ok {
-                            push_source(&mut sources, &mut all_chunks, lurl, title, lext.as_str(), text);
                         }
                     }
                 }
@@ -2312,7 +2343,7 @@ pub async fn rag_add_site(app: AppHandle, url: String, note: Option<String>) -> 
         };
         let _ = fs::remove_file(&tmp);
         match text {
-            Ok(t) => push_source(&mut sources, &mut all_chunks, final_url.clone(), fname, ext.as_str(), t),
+            Ok(t) => push_source(&mut sources, &mut all_chunks, final_url.clone(), fname, ext.clone(), t),
             Err(e) => return Err(format!("{fname}: {e}")),
         }
     }
