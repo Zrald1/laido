@@ -1,6 +1,6 @@
 [package]
 name = "laido"
-version = "0.0.5"
+version = "0.0.7"
 description = "Laido — a notepad that acts on what you write"
 edition = "2021"
 license = "Apache-2.0"
