@@ -294,8 +294,11 @@
         <input id="prov-add-key" type="password" placeholder="api key" autocomplete="off" />
         <button id="prov-add-btn" class="ghost mini" title="Add provider">+</button>
       </div>
+      <div id="tavily-row">
       <label for="key-tavily">Tavily API key <span class="muted">(for @research)</span></label>
       <input id="key-tavily" type="password" placeholder="from tavily.com" autocomplete="off" />
+      </div>
+      <p id="tavily-managed" class="muted hidden">Web search is included with your Laido plan — no key needed.</p>
       <label for="key-assemblyai">AssemblyAI API key <span class="muted">(for voice notes)</span></label>
       <input id="key-assemblyai" type="password" placeholder="from assemblyai.com" autocomplete="off" />
       <p class="muted">Keys are stored locally in your vault&rsquo;s <code>.laido/settings.json</code>.

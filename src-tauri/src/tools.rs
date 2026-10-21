@@ -66,15 +66,57 @@ pub async fn arxiv(query: &str, max: u32) -> Vec<SearchHit> {
     out
 }
 
+fn hits_from(v: &serde_json::Value) -> Vec<SearchHit> {
+    v["results"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|r| SearchHit {
+                    title: r["title"].as_str().unwrap_or("").to_string(),
+                    url: r["url"].as_str().unwrap_or("").to_string(),
+                    content: r["content"].as_str().unwrap_or("").to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub async fn search(query: &str, max: u32) -> Result<Vec<SearchHit>, String> {
     let s = load_settings();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    // managed (lk- / Laido cloud): the gateway holds the Tavily key — the
+    // user never needs one and the server key is never sent to the client
+    let managed = s.nebius_api_key.starts_with("lk-")
+        || s.base_url.starts_with("https://laido.");
+    if managed && !s.nebius_api_key.is_empty() {
+        let resp = client
+            .post(format!("{}/search", s.base_url.trim_end_matches('/')))
+            .bearer_auth(&s.nebius_api_key)
+            .json(&json!({ "query": query, "max_results": max }))
+            .send()
+            .await;
+        if let Ok(resp) = resp {
+            if resp.status().is_success() {
+                if let Ok(v) = resp.json::<serde_json::Value>().await {
+                    return Ok(hits_from(&v));
+                }
+            } else if s.tavily_api_key.is_empty() {
+                let st = resp.status();
+                let msg = resp.text().await.unwrap_or_default();
+                return Err(format!("managed search failed (HTTP {st}): {msg}"));
+            }
+        }
+        if s.tavily_api_key.is_empty() {
+            return Err("managed search unreachable".into());
+        }
+    }
     if s.tavily_api_key.is_empty() {
         return Err("no Tavily key — add one in Settings".into());
     }
-    let resp = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+    let resp = client
         .post("https://api.tavily.com/search")
         .bearer_auth(&s.tavily_api_key)
         .json(&json!({
@@ -93,18 +135,7 @@ pub async fn search(query: &str, max: u32) -> Result<Vec<SearchHit>, String> {
         return Err(format!("HTTP {status}: {snippet}"));
     }
     let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    Ok(v["results"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .map(|r| SearchHit {
-                    title: r["title"].as_str().unwrap_or("").to_string(),
-                    url: r["url"].as_str().unwrap_or("").to_string(),
-                    content: r["content"].as_str().unwrap_or("").to_string(),
-                })
-                .collect()
-        })
-        .unwrap_or_default())
+    Ok(hits_from(&v))
 }
 
 #[tauri::command]

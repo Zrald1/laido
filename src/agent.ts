@@ -246,6 +246,10 @@ function applyProviderUI() {
   }
   const refresh = $<HTMLButtonElement>("#models-refresh");
   if (refresh) refresh.disabled = managed;
+  // managed plans get search through the gateway — the server holds the
+  // Tavily key, so the field is hidden rather than asked for
+  $("#tavily-row")?.classList.toggle("hidden", managed);
+  $("#tavily-managed")?.classList.toggle("hidden", !managed);
 }
 
 const FALLBACK_MODELS = [
