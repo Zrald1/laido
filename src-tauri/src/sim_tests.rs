@@ -499,7 +499,7 @@ fn sim_ask_hybrid_diag() {
             println!("  - {}", d.chars().take(110).collect::<String>());
         }
         assert!(!docs.is_empty(), "everything lane returned nothing");
-        match crate::tools::search("arxiv quantization breakthrough", 3).await {
+        match crate::tools::search("arxiv quantization breakthrough", 3, None).await {
             Ok(h) => {
                 println!("web lane hits: {}", h.len());
                 for x in h.iter().take(2) {
