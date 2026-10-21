@@ -81,7 +81,68 @@ fn hits_from(v: &serde_json::Value) -> Vec<SearchHit> {
         .unwrap_or_default()
 }
 
-pub async fn search(query: &str, max: u32) -> Result<Vec<SearchHit>, String> {
+/// one hit, upgraded: article urls get their real page text; pdf urls are
+/// downloaded and embedded into the library so follow-up asks can cite them.
+/// All hits enrich in parallel — total cost ≈ the slowest single fetch.
+async fn enrich_hit(mut h: SearchHit, scope: &str) -> SearchHit {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::limited(4))
+        .user_agent("Laido/0.0.6 research fetcher")
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let Ok((final_url, ctype, body)) = crate::rag::fetch_url(&client, &h.url).await else {
+        return h; // keep the snippet when the page won't load
+    };
+    let is_pdf = ctype.contains("pdf")
+        || final_url.split('?').next().unwrap_or("").to_lowercase().ends_with(".pdf");
+    if is_pdf {
+        let name = h
+            .title
+            .clone()
+            .chars()
+            .take(60)
+            .collect::<String>();
+        let name = if name.is_empty() { "web document".into() } else { name };
+        match crate::rag::pdf_native_text(&body) {
+            Ok(text) => {
+                let head: String = text.chars().take(1500).collect();
+                match crate::rag::ingest_text(
+                    None,
+                    name.clone(),
+                    format!("SOURCE: {final_url}\n{name}\n\n{text}"),
+                    "file",
+                    scope.to_string(),
+                    vec![crate::rag::SiteSource {
+                        url: final_url.clone(),
+                        title: name.clone(),
+                        kind: "pdf".into(),
+                        chunks: 0,
+                    }],
+                )
+                .await
+                {
+                    Ok(slug) => {
+                        h.content = format!(
+                            "[embedded in your library as '{slug}' — cite or re-ask it with @document {slug}]\n{head}"
+                        );
+                    }
+                    Err(_) => h.content = head,
+                }
+            }
+            Err(_) => {} // scanned pdf — keep the snippet
+        }
+    } else if ctype.contains("html") || ctype.is_empty() {
+        let text = crate::rag::html_to_text(&String::from_utf8_lossy(&body));
+        if text.chars().count() > h.content.chars().count() {
+            h.content = text.chars().take(4000).collect();
+        }
+    }
+    h.url = final_url;
+    h
+}
+
+pub async fn search(query: &str, max: u32, note: Option<&str>) -> Result<Vec<SearchHit>, String> {
     let s = load_settings();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -91,6 +152,7 @@ pub async fn search(query: &str, max: u32) -> Result<Vec<SearchHit>, String> {
     // user never needs one and the server key is never sent to the client
     let managed = s.nebius_api_key.starts_with("lk-")
         || s.base_url.starts_with("https://laido.");
+    let mut hits: Option<Vec<SearchHit>> = None;
     if managed && !s.nebius_api_key.is_empty() {
         let resp = client
             .post(format!("{}/search", s.base_url.trim_end_matches('/')))
@@ -101,7 +163,7 @@ pub async fn search(query: &str, max: u32) -> Result<Vec<SearchHit>, String> {
         if let Ok(resp) = resp {
             if resp.status().is_success() {
                 if let Ok(v) = resp.json::<serde_json::Value>().await {
-                    return Ok(hits_from(&v));
+                    hits = Some(hits_from(&v));
                 }
             } else if s.tavily_api_key.is_empty() {
                 let st = resp.status();
@@ -109,38 +171,53 @@ pub async fn search(query: &str, max: u32) -> Result<Vec<SearchHit>, String> {
                 return Err(format!("managed search failed (HTTP {st}): {msg}"));
             }
         }
-        if s.tavily_api_key.is_empty() {
+        if hits.is_none() && s.tavily_api_key.is_empty() {
             return Err("managed search unreachable".into());
         }
     }
-    if s.tavily_api_key.is_empty() {
-        return Err("no Tavily key — add one in Settings".into());
-    }
-    let resp = client
-        .post("https://api.tavily.com/search")
-        .bearer_auth(&s.tavily_api_key)
-        .json(&json!({
-            "query": query,
-            "max_results": max,
-            "search_depth": "basic"
-        }))
-        .send()
-        .await
-        .map_err(|e| format!("network error: {e}"))?;
+    if hits.is_none() {
+        if s.tavily_api_key.is_empty() {
+            return Err("no Tavily key — add one in Settings".into());
+        }
+        let resp = client
+            .post("https://api.tavily.com/search")
+            .bearer_auth(&s.tavily_api_key)
+            .json(&json!({
+                "query": query,
+                "max_results": max,
+                "search_depth": "basic"
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("network error: {e}"))?;
 
-    let status = resp.status();
-    let text = resp.text().await.map_err(|e| e.to_string())?;
-    if !status.is_success() {
-        let snippet: String = text.chars().take(300).collect();
-        return Err(format!("HTTP {status}: {snippet}"));
+        let status = resp.status();
+        let text = resp.text().await.map_err(|e| e.to_string())?;
+        if !status.is_success() {
+            let snippet: String = text.chars().take(300).collect();
+            return Err(format!("HTTP {status}: {snippet}"));
+        }
+        let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        hits = Some(hits_from(&v));
     }
-    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    Ok(hits_from(&v))
+    // enrich every hit in parallel: real page text replaces the snippet, and
+    // pdf results are downloaded + embedded into the asking note's library
+    let scope = note
+        .filter(|n| !n.trim().is_empty() && *n != "sticky")
+        .map(|n| format!("note:{n}"))
+        .unwrap_or_else(|| "global".into());
+    let hits = futures_util::future::join_all(
+        hits.unwrap()
+            .into_iter()
+            .map(|h| enrich_hit(h, &scope)),
+    )
+    .await;
+    Ok(hits)
 }
 
 #[tauri::command]
 pub async fn tavily_ping() -> Result<TavilyPing, String> {
-    let hits = search("personal ai notepad", 3).await?;
+    let hits = search("personal ai notepad", 3, None).await?;
     Ok(TavilyPing {
         results: hits.len(),
         first_title: hits

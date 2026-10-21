@@ -571,6 +571,7 @@ fn main() {
             skills::habit_track,
             rag::rag_list,
             rag::rag_add_files,
+            rag::rag_add_site,
             rag::rag_remove,
             rag::rag_ask,
             rag::rag_quiz,

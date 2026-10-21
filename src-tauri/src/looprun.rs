@@ -270,7 +270,7 @@ pub async fn loop_iteration(
     };
 
     let arxiv = tools::arxiv(&refined, 4).await;
-    let web = tools::search(&refined, 5).await.unwrap_or_default();
+    let web = tools::search(&refined, 5, Some(note)).await.unwrap_or_default();
     let local = match target {
         Some(t) => rag::rag_search(&refined, 5, Some(t)).await,
         None => Vec::new(),

@@ -10,6 +10,8 @@ interface RagInfo {
   chunks: number;
   dims: number;
   scope: string;
+  kind: string;
+  sources: { url: string; title: string; kind: string; chunks: number }[];
 }
 
 export function toggleLibrary(force?: boolean) {
@@ -27,11 +29,35 @@ function fileRow(d: RagInfo, el: HTMLElement): HTMLElement {
       row.className = "lib-row";
       const name = document.createElement("span");
       name.className = "lib-name";
-      name.textContent = d.name;
+      name.textContent = (d.kind === "site" ? "🌐 " : "") + d.name;
       name.title = "click to ask this file";
       const meta = document.createElement("span");
       meta.className = "lib-meta";
       meta.textContent = `${d.chunks} chunks`;
+      // site docs expand into the resources that were embedded under them —
+      // the dropdown is the user's proof the knowledge base is complete
+      let det: HTMLDetailsElement | null = null;
+      if (d.kind === "site" && d.sources?.length) {
+        det = document.createElement("details");
+        det.className = "lib-srcs";
+        const sum = document.createElement("summary");
+        sum.textContent = `${d.sources.length} sources embedded`;
+        det.append(sum);
+        for (const s of d.sources) {
+          const li = document.createElement("a");
+          li.className = "lib-src";
+          li.href = "#";
+          li.title = s.url;
+          const icon = s.kind === "page" ? "📄" : s.kind === "pdf" ? "📕" : "🧾";
+          li.textContent = `${icon} ${s.title} — ${s.chunks} chunks`;
+          li.addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            void invoke("open_url", { url: s.url });
+          });
+          det.append(li);
+        }
+      }
       const del = document.createElement("button");
       del.className = "lib-del";
       del.textContent = "\u2715";
@@ -59,7 +85,7 @@ function fileRow(d: RagInfo, el: HTMLElement): HTMLElement {
       });
       row.addEventListener("click", (e) => {
         const t = e.target as HTMLElement;
-        if (t.closest(".lib-del") || t.closest(".lib-ask")) return;
+        if (t.closest(".lib-del") || t.closest(".lib-ask") || t.closest(".lib-srcs")) return;
         el.querySelectorAll(".lib-ask").forEach((n) => n.classList.add("hidden"));
         ask.classList.remove("hidden");
         input.focus();
@@ -80,6 +106,7 @@ function fileRow(d: RagInfo, el: HTMLElement): HTMLElement {
         void askLibrary(d.slug, d.name, send.prompt);
       });
       row.append(name, meta, del, ask);
+      if (det) row.append(det);
       el.append(row);
       return row;
 }
@@ -255,6 +282,48 @@ export function initLibrary() {
   });
   $("#lib-drop").addEventListener("click", () => void browse());
   $("#lib-note-drop").addEventListener("click", () => void browse(true));
+  // url rows: a pasted site is fetched, its pdf/text links chased and
+  // embedded — scope follows the section it was typed into
+  const addSite = async (input: HTMLInputElement, forNote: boolean) => {
+    const url = input.value.trim();
+    if (!url) return;
+    const note = forNote ? currentNote() : null;
+    if (forNote && !note) {
+      addActivity("✕ open a note first — sites attach to the open note");
+      return;
+    }
+    input.value = "";
+    input.disabled = true;
+    addActivity(`🌐 indexing ${url}${note ? ` for ${note.replace(/\.(laido|md)$/i, "")}` : ""}…`);
+    const bar = $("#lib-progress");
+    bar.classList.remove("hidden");
+    setProgress(0, "fetching…");
+    try {
+      await invoke("rag_add_site", { url, note });
+      addActivity(`✓ site indexed${note ? ` for ${note.replace(/\.(laido|md)$/i, "")}` : ""}`);
+      setProgress(100, "done");
+      window.setTimeout(() => bar.classList.add("hidden"), 1200);
+    } catch (e) {
+      addActivity(`✕ ${String(e)}`);
+      bar.classList.add("hidden");
+    }
+    input.disabled = false;
+    void refreshLibrary();
+    void refreshNoteFiles();
+  };
+  const wireSite = (inputId: string, btnId: string, forNote: boolean) => {
+    const inp = $<HTMLInputElement>(inputId);
+    inp.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") void addSite(inp, forNote);
+    });
+    $(btnId)?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void addSite(inp, forNote);
+    });
+  };
+  wireSite("#lib-site", "#lib-site-btn", false);
+  wireSite("#lib-note-site", "#lib-note-site-btn", true);
   void window.__TAURI__.event.listen("rag:changed", () => {
     void refreshLibrary();
     void refreshNoteFiles();

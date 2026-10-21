@@ -2642,7 +2642,7 @@ export function wireTerminal(card: HTMLElement) {
           continue;
         }
         line("laido", `web: ${q}`);
-        const hits = await invoke<string>("term_web", { query: q }).catch((e) => `✕ ${String(e)}`);
+        const hits = await invoke<string>("term_web", { query: q, note: noteName() }).catch((e) => `✕ ${String(e)}`);
         history.push({ role: "user", content: `web results for \`${q}\`:\n${hits}` });
         if (steps < MAX_STEPS) {
           finalText = await aiTurn(

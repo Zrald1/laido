@@ -1325,6 +1325,25 @@ body:not(.lib-open) #library { padding: 0; border-right: 0; }
   cursor: pointer; flex-wrap: wrap;
 }
 .lib-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lib-site-row { display: flex; gap: 6px; margin-bottom: 6px; flex: none; }
+.lib-site-row input {
+  flex: 1; box-sizing: border-box; padding: 6px 8px; font-size: 11.5px;
+  border: 1px dashed var(--line); border-radius: 8px;
+  background: transparent; color: var(--text);
+}
+.lib-site-row input:focus { border-color: var(--accent); outline: none; border-style: solid; }
+.lib-srcs { width: 100%; font-size: 11px; margin: 2px 0 4px; }
+.lib-srcs summary {
+  cursor: pointer; color: var(--muted); padding: 2px 0;
+  list-style-position: inside; user-select: none;
+}
+.lib-srcs summary:hover { color: var(--text); }
+.lib-src {
+  display: block; padding: 3px 4px 3px 18px; border-radius: 5px;
+  color: var(--muted); text-decoration: none;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.lib-src:hover { color: var(--accent); background: var(--bg-2); }
 .lib-ask { width: 100%; padding: 2px 0 4px; }
 .lib-ask textarea {
   width: 100%; box-sizing: border-box; padding: 6px 8px;

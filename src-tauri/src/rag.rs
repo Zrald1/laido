@@ -54,7 +54,21 @@ pub struct RagDoc {
     /// default retrieval pool for that note's chats)
     #[serde(default = "default_scope")]
     pub scope: String,
+    /// kind:"site" docs record every embedded page/file under the site so
+    /// the UI can show the user exactly what the index contains
+    #[serde(default)]
+    pub sources: Vec<SiteSource>,
     pub chunks: Vec<Chunk>,
+}
+
+/// one indexed resource under a kind:"site" document — a page or a linked
+/// file (pdf, pptx, text…) that was fetched and embedded
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct SiteSource {
+    pub url: String,
+    pub title: String,
+    pub kind: String,
+    pub chunks: usize,
 }
 
 #[derive(Serialize)]
@@ -65,6 +79,8 @@ pub struct RagInfo {
     pub chunks: usize,
     pub dims: u32,
     pub scope: String,
+    pub kind: String,
+    pub sources: Vec<SiteSource>,
 }
 
 const RAG_SYSTEM: &str = "You are Laido answering questions from the user's own files. \
@@ -1551,6 +1567,8 @@ pub fn rag_list() -> Vec<RagInfo> {
             chunks: d.chunks.len(),
             dims: d.dims,
             scope: d.scope,
+            kind: d.kind,
+            sources: d.sources,
         })
         .collect()
 }
@@ -1655,6 +1673,7 @@ pub async fn ensure_notes_index() -> Result<usize, String> {
             kind: "note".into(),
             embedder: tag,
             scope: "global".into(),
+            sources: Vec::new(),
             chunks,
         });
     }
@@ -1938,6 +1957,7 @@ pub async fn rag_add_files(
             added: now(),
             embedder: tag,
             scope: scope.clone(),
+            sources: Vec::new(),
             chunks: chunks
                 .into_iter()
                 .enumerate()
@@ -1965,6 +1985,506 @@ pub async fn rag_add_files(
     }
     save_index(&docs)?;
     Ok(())
+}
+
+/* ---------- site indexing: fetch a page, chase its pdf/text links ---------- */
+
+const SITE_MAX_SRC: usize = 25; // the root page plus discovered children
+const SITE_MAX_PAGES: usize = 8; // same-host article pages, not the whole crawl
+const SRC_MAX_CHARS: usize = 500_000;
+
+pub(crate) fn html_to_text(html: &str) -> String {
+    let blocks = regex::Regex::new(
+        r"(?is)<(script|style|noscript|svg|iframe|template|head|form|nav|footer)[^>]*>.*?</\1>",
+    )
+    .unwrap();
+    let mut s = blocks.replace_all(html, " ").to_string();
+    let nl = regex::Regex::new(
+        r"(?i)</(p|div|li|ul|ol|h[1-6]|tr|table|section|article|header|blockquote|pre)\s*>|<br\s*/?>",
+    )
+    .unwrap();
+    s = nl.replace_all(&s, "\n").to_string();
+    let tags = regex::Regex::new(r"<[^>]+>").unwrap();
+    s = tags.replace_all(&s, "").to_string();
+    for (a, b) in [
+        ("&nbsp;", " "),
+        ("&amp;", "&"),
+        ("&lt;", "<"),
+        ("&gt;", ">"),
+        ("&quot;", "\""),
+        ("&#39;", "'"),
+        ("&apos;", "'"),
+        ("&mdash;", "—"),
+        ("&ndash;", "–"),
+        ("&hellip;", "…"),
+    ] {
+        s = s.replace(a, b);
+    }
+    let ws = regex::Regex::new(r"[ \t]+").unwrap();
+    let mut out = Vec::new();
+    for l in s.lines() {
+        let l = ws.replace_all(l, " ").trim().to_string();
+        if !l.is_empty() {
+            out.push(l);
+        }
+    }
+    out.join("\n")
+}
+
+fn title_of(html: &str) -> String {
+    regex::Regex::new(r"(?is)<title[^>]*>(.*?)</title>")
+        .unwrap()
+        .captures(html)
+        .map(|c| html_to_text(&c[1]))
+        .unwrap_or_default()
+        .chars()
+        .take(80)
+        .collect()
+}
+
+fn host_of(u: &str) -> String {
+    let s = u.find("://").map(|i| i + 3).unwrap_or(0);
+    u[s..].split('/').next().unwrap_or("").to_lowercase()
+}
+
+fn url_join(base: &str, rel: &str) -> String {
+    let rel = rel.trim().split('#').next().unwrap_or("").to_string();
+    if rel.is_empty()
+        || rel.starts_with("mailto:")
+        || rel.starts_with("javascript:")
+        || rel.starts_with("tel:")
+        || rel.starts_with("data:")
+    {
+        return String::new();
+    }
+    if rel.starts_with("http://") || rel.starts_with("https://") {
+        return rel;
+    }
+    let scheme_end = base.find("://").map(|i| i + 3).unwrap_or(0);
+    let host_end = base[scheme_end..]
+        .find('/')
+        .map(|i| scheme_end + i)
+        .unwrap_or(base.len());
+    let origin = &base[..host_end];
+    if rel.starts_with("//") {
+        return format!("{}{}", &base[..scheme_end], rel);
+    }
+    let joined = if rel.starts_with('/') {
+        format!("{origin}{rel}")
+    } else {
+        let dir = base
+            .rsplit_once('/')
+            .map(|(d, _)| format!("{d}/"))
+            .unwrap_or_else(|| format!("{base}/"));
+        format!("{dir}{rel}")
+    };
+    // resolve . and .. segments
+    let (head, rest) = joined.split_at(scheme_end);
+    let mut segs: Vec<&str> = Vec::new();
+    for s in rest.split('/') {
+        match s {
+            "." | "" => {}
+            ".." => {
+                segs.pop();
+            }
+            _ => segs.push(s),
+        }
+    }
+    format!("{head}{}", segs.join("/"))
+}
+
+fn extract_links(html: &str, base: &str) -> Vec<(String, String)> {
+    let re = regex::Regex::new(r#"(?is)<a\s[^>]*href=["']([^"'#]+)["'][^>]*>(.*?)</a>"#).unwrap();
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for c in re.captures_iter(html) {
+        let abs = url_join(base, &c[1]);
+        if abs.is_empty() || !seen.insert(abs.clone()) {
+            continue;
+        }
+        let label: String = html_to_text(&c[2]).chars().take(80).collect();
+        out.push((abs, label));
+    }
+    out
+}
+
+/// GET a url into bytes — redirects followed, 10 MB cap, content-type kept
+/// so callers can route html vs. binary
+pub(crate) async fn fetch_url(
+    client: &reqwest::Client,
+    u: &str,
+) -> Result<(String, String, Vec<u8>), String> {
+    let mut resp = client.get(u).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    if let Some(len) = resp.content_length() {
+        if len > MAX_FILE {
+            return Err("larger than 10 MB".into());
+        }
+    }
+    let final_url = resp.url().to_string();
+    let ctype = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    let mut buf = Vec::new();
+    while let Some(item) = resp.chunk().await.map_err(|e| e.to_string())? {
+        buf.extend_from_slice(&item);
+        if buf.len() as u64 > MAX_FILE {
+            return Err("larger than 10 MB".into());
+        }
+    }
+    Ok((final_url, ctype, buf))
+}
+
+const FILE_EXTS: &[&str] = &[
+    "pdf", "pptx", "txt", "md", "markdown", "csv", "json", "log", "png", "jpg", "jpeg", "webp",
+];
+
+/// index a website into the library: the page's text plus every linked file
+/// (pdf/pptx/text/image) and a handful of same-host article pages, each
+/// recorded as a SiteSource so the panel can show exactly what was embedded
+#[tauri::command]
+pub async fn rag_add_site(app: AppHandle, url: String, note: Option<String>) -> Result<(), String> {
+    let url = url.trim().to_string();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("site url must start with http:// or https://".into());
+    }
+    let scope = note
+        .filter(|n| !n.trim().is_empty())
+        .map(|n| format!("note:{}", n.trim()))
+        .unwrap_or_else(|| "global".into());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .user_agent("Laido/0.0.6 library indexer")
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    prog(&app, &url, 0, 1, "read", 0, 1);
+    let (final_url, ctype, body) = fetch_url(&client, &url).await?;
+    let mut docs = load_index_for_write()?;
+    let mut sources: Vec<SiteSource> = Vec::new();
+    // each source's chunks are built separately so the dropdown can report a
+    // real per-resource count — then flattened into the doc's chunk list
+    let mut all_chunks: Vec<String> = Vec::new();
+    let push_source =
+        |sources: &mut Vec<SiteSource>, all: &mut Vec<String>, u: String, t: String, k: &str, text: String| {
+            let text = text.trim();
+            let chunks = if text.len() >= 40 {
+                let capped: String = text.chars().take(SRC_MAX_CHARS).collect();
+                let parts = chunk_text(&format!("SOURCE: {u}\n{t}\n\n{capped}"));
+                all.extend(parts.iter().cloned());
+                parts.len()
+            } else {
+                0
+            };
+            sources.push(SiteSource {
+                url: u,
+                title: if t.is_empty() { "untitled".into() } else { t },
+                kind: k.to_string(),
+                chunks,
+            });
+        };
+
+    let ext = final_url
+        .split('?')
+        .next()
+        .unwrap_or("")
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    let is_html = ctype.contains("html") || (!FILE_EXTS.contains(&ext.as_str()) && !ctype.contains("pdf"));
+
+    let mut name: String;
+    if is_html {
+        let html = String::from_utf8_lossy(&body).to_string();
+        name = title_of(&html);
+        if name.is_empty() {
+            name = host_of(&final_url);
+        }
+        push_source(
+            &mut sources,
+            &mut all_chunks,
+            final_url.clone(),
+            name.clone(),
+            "page",
+            html_to_text(&html),
+        );
+        let host = host_of(&final_url);
+        let mut pages = 0usize;
+        for (link, label) in extract_links(&html, &final_url) {
+            if sources.len() >= SITE_MAX_SRC {
+                break;
+            }
+            let clean = link.split(['?', '#']).next().unwrap_or(&link).to_string();
+            let lext = clean.rsplit('.').next().unwrap_or("").to_lowercase();
+            let is_file = FILE_EXTS.contains(&lext.as_str());
+            let is_page = !is_file && host_of(&link) == host && link != final_url;
+            if is_page {
+                if pages >= SITE_MAX_PAGES {
+                    continue;
+                }
+            } else if !is_file {
+                continue;
+            }
+            prog(&app, &name, 0, 1, "read", 0, 1);
+            match fetch_url(&client, &link).await {
+                Ok((lurl, lctype, lbody)) => {
+                    let mut ok = true;
+                    if is_page {
+                        pages += 1;
+                        let lh = String::from_utf8_lossy(&lbody).to_string();
+                        let lt = {
+                            let t = title_of(&lh);
+                            if t.is_empty() { label.clone() } else { t }
+                        };
+                        push_source(&mut sources, &mut all_chunks, lurl, lt, "page", html_to_text(&lh));
+                    } else {
+                        // file child: real extensions route through the same
+                        // extract_document pipeline as local uploads (pdf,
+                        // pptx, image ocr, plain text)
+                        let fname = clean
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or("file")
+                            .chars()
+                            .take(80)
+                            .collect::<String>();
+                        let title = if label.is_empty() { fname.clone() } else { label.clone() };
+                        let text = if lctype.contains("html") {
+                            ok = false; // a file-ish link that served a page — not a real file
+                            String::new()
+                        } else {
+                            let tmp = rag_dir().join(format!("site-dl-{}.{}", now(), lext));
+                            let text = match fs::write(&tmp, &lbody) {
+                                Ok(()) => {
+                                    extract_document(&app, &fname, &tmp, sources.len(), SITE_MAX_SRC)
+                                        .await
+                                }
+                                Err(e) => Err(e.to_string()),
+                            };
+                            let _ = fs::remove_file(&tmp);
+                            match text {
+                                Ok(t) => t,
+                                Err(e) => {
+                                    ok = false;
+                                    fail_activity(&app, format!("✕ {fname}: {e}"));
+                                    String::new()
+                                }
+                            }
+                        };
+                        if ok {
+                            push_source(&mut sources, &mut all_chunks, lurl, title, lext.as_str(), text);
+                        }
+                    }
+                }
+                Err(e) => {
+                    fail_activity(&app, format!("✕ {link}: {e}"));
+                }
+            }
+        }
+    } else {
+        // direct link to a file — index it as the site's only source
+        let fname = final_url
+            .split('?')
+            .next()
+            .unwrap_or("")
+            .rsplit('/')
+            .next()
+            .unwrap_or("document")
+            .chars()
+            .take(80)
+            .collect::<String>();
+        name = fname.clone();
+        let tmp = rag_dir().join(format!("site-dl-{}.{}", now(), ext));
+        let text = match fs::write(&tmp, &body) {
+            Ok(()) => extract_document(&app, &fname, &tmp, 0, 1).await,
+            Err(e) => Err(e.to_string()),
+        };
+        let _ = fs::remove_file(&tmp);
+        match text {
+            Ok(t) => push_source(&mut sources, &mut all_chunks, final_url.clone(), fname, ext.as_str(), t),
+            Err(e) => return Err(format!("{fname}: {e}")),
+        }
+    }
+
+    if all_chunks.is_empty() {
+        return Err("no readable text on that site".into());
+    }
+    name = name.chars().take(80).collect();
+    let mut slug = slugify(&name);
+    let mut i = 2;
+    while docs.iter().any(|d| d.slug == slug) {
+        slug = format!("{}-{}", slugify(&name), i);
+        i += 1;
+    }
+    let _ = app.emit(
+        "agent:activity",
+        Activity {
+            text: format!(
+                "🌐 embedding {name} — {} sources, {} chunks…",
+                sources.len(),
+                all_chunks.len()
+            ),
+        },
+    );
+    let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(all_chunks.len());
+    let mut tag = String::new();
+    let total_batches = all_chunks.len().div_ceil(BATCH);
+    for (bi, batch) in all_chunks.chunks(BATCH).enumerate() {
+        let input: Vec<String> = batch.to_vec();
+        let (t, vs) = embed_lane(&input).await;
+        tag = t;
+        if tag == LEX_TAG && bi == 0 {
+            let _ = app.emit(
+                "agent:activity",
+                Activity {
+                    text: format!(
+                        "⚠ {name}: embedder unavailable — indexed with local hash vectors (lexical match only)"
+                    ),
+                },
+            );
+        }
+        for v in vs.into_iter() {
+            vectors.push(normalize(v));
+        }
+        prog(&app, &name, 0, 1, "embed", bi + 1, total_batches);
+    }
+    if vectors.len() != all_chunks.len() {
+        return Err("embedding count mismatch".into());
+    }
+    let dims = vectors.first().map(|v| v.len()).unwrap_or(0) as u32;
+    save_vectors(&slug, &vectors)?;
+    finish_doc(
+        &mut docs,
+        RagDoc {
+            kind: "site".into(),
+            slug: slug.clone(),
+            name: name.clone(),
+            size: all_chunks.iter().map(|c| c.len() as u64).sum(),
+            dims,
+            added: now(),
+            embedder: tag,
+            scope,
+            sources,
+            chunks: all_chunks
+                .into_iter()
+                .enumerate()
+                .map(|(i, text)| Chunk {
+                    text,
+                    idx: i as u32,
+                })
+                .collect(),
+        },
+    )?;
+    let _ = app.emit("rag:changed", ());
+    let _ = app.emit(
+        "agent:activity",
+        Activity {
+            text: format!("✓ {name} indexed — ask it with @document {slug} <question>"),
+        },
+    );
+    if let Some(d) = docs.last() {
+        ensure_graph(&app, &d.slug, &d.name, &d.chunks);
+    }
+    Ok(())
+}
+
+/// persist a finished doc — appends, saves the index, returns the slug
+fn finish_doc(docs: &mut Vec<RagDoc>, doc: RagDoc) -> Result<String, String> {
+    let slug = doc.slug.clone();
+    docs.push(doc);
+    save_index(docs)?;
+    Ok(slug)
+}
+
+/// native-text extraction for web PDFs — no OCR round-trip: a web doc either
+/// has a text layer or it doesn't, and search enrichment can't wait for one
+pub(crate) fn pdf_native_text(bytes: &[u8]) -> Result<String, String> {
+    let doc = lopdf::Document::load_mem(bytes).map_err(|e| format!("can't read pdf: {e}"))?;
+    let pages: Vec<u32> = doc.get_pages().keys().copied().collect();
+    let text = doc.extract_text(&pages).unwrap_or_default();
+    if text.trim().chars().count() < 40 {
+        return Err("no text layer".into());
+    }
+    Ok(text)
+}
+
+/// chunk + embed + persist arbitrary text as a library doc — the shared tail
+/// of site indexing and search's auto-embed. `app` is optional because the
+/// search path runs without a window handle; it only loses progress/graph
+/// events, never the doc itself.
+pub(crate) async fn ingest_text(
+    app: Option<&AppHandle>,
+    name: String,
+    text: String,
+    kind: &str,
+    scope: String,
+    sources: Vec<SiteSource>,
+) -> Result<String, String> {
+    let chunks = chunk_text(&text);
+    if chunks.is_empty() {
+        return Err("no readable text".into());
+    }
+    let mut docs = load_index_for_write()?;
+    let mut slug = slugify(&name);
+    let mut i = 2;
+    while docs.iter().any(|d| d.slug == slug) {
+        slug = format!("{}-{}", slugify(&name), i);
+        i += 1;
+    }
+    let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(chunks.len());
+    let mut tag = String::new();
+    for batch in chunks.chunks(BATCH) {
+        let input: Vec<String> = batch.to_vec();
+        let (t, vs) = embed_lane(&input).await;
+        tag = t;
+        for v in vs.into_iter() {
+            vectors.push(normalize(v));
+        }
+    }
+    if vectors.len() != chunks.len() {
+        return Err("embedding count mismatch".into());
+    }
+    let dims = vectors.first().map(|v| v.len()).unwrap_or(0) as u32;
+    save_vectors(&slug, &vectors)?;
+    let size = chunks.iter().map(|c| c.len() as u64).sum();
+    let doc = RagDoc {
+        kind: kind.to_string(),
+        slug: slug.clone(),
+        name,
+        size,
+        dims,
+        added: now(),
+        embedder: tag,
+        scope,
+        sources,
+        chunks: chunks
+            .into_iter()
+            .enumerate()
+            .map(|(i, text)| Chunk {
+                text,
+                idx: i as u32,
+            })
+            .collect(),
+    };
+    let slug = finish_doc(&mut docs, doc)?;
+    if let Some(app) = app {
+        let _ = app.emit("rag:changed", ());
+        if let Some(d) = docs.last() {
+            ensure_graph(app, &d.slug, &d.name, &d.chunks);
+        }
+    }
+    Ok(slug)
 }
 
 #[tauri::command]
@@ -2266,7 +2786,7 @@ pub async fn rag_ask(
         // rewrite the question into a concrete query — the local excerpts
         // carry the names/terms a vague "who are these people?" is missing
         let search_q = web_query(&settings.model_rewrite, &query, &ctx).await;
-        if let Ok(hits) = tools::search(&search_q, 4).await {
+        if let Ok(hits) = tools::search(&search_q, 4, Some(&note)).await {
             if !hits.is_empty() {
                 let _ = app.emit(
                     "agent:activity",

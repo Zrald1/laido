@@ -392,7 +392,7 @@ async fn research_one(
 
     let settings = state::load_settings();
     let search_q = rag::web_query(&settings.model_rewrite, topic, &local).await;
-    let hits = match tools::search(&search_q, 5).await {
+    let hits = match tools::search(&search_q, 5, Some(name)).await {
         Ok(h) => h,
         Err(e) => {
             let _ = app.emit(

@@ -457,10 +457,11 @@ pub async fn term_ai(
     })
 }
 
-/// web search for the terminal AI — Tavily hits as readable evidence
+/// web search for the terminal AI — Tavily hits as readable evidence;
+/// pdf results are auto-embedded into the asking note's dedicated library
 #[tauri::command]
-pub async fn term_web(query: String) -> Result<String, String> {
-    let hits = crate::tools::search(&query, 5).await?;
+pub async fn term_web(query: String, note: Option<String>) -> Result<String, String> {
+    let hits = crate::tools::search(&query, 5, note.as_deref()).await?;
     if hits.is_empty() {
         return Ok("(no web results)".into());
     }
