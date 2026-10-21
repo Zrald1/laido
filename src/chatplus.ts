@@ -77,8 +77,6 @@ export function wireChatTools(
     onErr?: (msg: string) => void;
     /** recording state change for the host (e.g. disable send) */
     onRec?: (on: boolean) => void;
-    /** a send may be in flight — transcript still lands afterwards */
-    intoInput?: (text: string) => void;
     /** allow images (rag lanes only take text) */
     images?: boolean;
   } = {},
@@ -282,8 +280,9 @@ export function wireChatTools(
     });
   }
 
-  /* ---------------- voice: record → AssemblyAI → transcript ---------------- */
+  /* ---------------- voice: live transcription → input ---------------- */
   let recording = false;
+  let voicePrefix = "";
   let meterTimer = 0;
   const vu = document.createElement("div");
   vu.className = "ct-vu";
@@ -310,48 +309,85 @@ export function wireChatTools(
     window.clearInterval(meterTimer);
     vu.classList.remove("on");
   };
-  const putText = (t: string) =>
-    opts.intoInput
-      ? opts.intoInput(t)
-      : ((input.value = (input.value ? `${input.value} ` : "") + t), input.focus());
+  // live transcript lands directly in the field — voicePrefix keeps whatever
+  // the user typed before pressing the mic so dictation appends, not overwrites
+  const liveSet = (seen: string) => {
+    input.value = voicePrefix
+      ? seen
+        ? `${voicePrefix} ${seen}`
+        : voicePrefix
+      : seen;
+    input.focus();
+    input.selectionStart = input.selectionEnd = input.value.length;
+    sync();
+  };
+  const liveUiReset = () => {
+    recording = false;
+    opts.onRec?.(false);
+    stopMeter();
+    micBtn.disabled = false;
+    micBtn.classList.remove("rec", "spin");
+    micBtn.innerHTML = ICONS.mic;
+    micBtn.title = "record voice — click again to stop";
+    sync();
+  };
+  const vlisten = window.__TAURI__.event.listen;
+  void vlisten<{ final: string; partial: string }>("voice:partial", (e) => {
+    if (!recording) return;
+    liveSet(`${e.payload.final}${e.payload.partial}`.trim());
+  });
+  void vlisten<{ error: string }>("voice:error", (e) => {
+    if (!recording) return;
+    err(`✕ ${e.payload.error}`);
+    liveUiReset();
+    void invoke("voice_live_stop").catch(() => {});
+  });
 
   micBtn.addEventListener("click", async (e) => {
     e.stopPropagation();
     if (!recording) {
       try {
-        await invoke("voice_start");
-        recording = true;
-        opts.onRec?.(true);
-        micBtn.classList.add("rec");
-        micBtn.innerHTML = ICONS.stop; // a red square says "click to stop"
-        micBtn.title = "recording — click to stop and transcribe";
-        startMeter();
-        sync();
+        await invoke("voice_live_start");
       } catch (e2) {
-        err(`✕ mic: ${String(e2)}`);
+        // a wedged live session blocks restart — drain it once and retry
+        if (!String(e2).includes("already live")) {
+          err(`✕ mic: ${String(e2)}`);
+          return;
+        }
+        await invoke("voice_live_stop").catch(() => {});
+        try {
+          await invoke("voice_live_start");
+        } catch (e3) {
+          err(`✕ mic: ${String(e3)}`);
+          return;
+        }
       }
+      recording = true;
+      voicePrefix = input.value;
+      opts.onRec?.(true);
+      micBtn.classList.add("rec");
+      micBtn.innerHTML = ICONS.stop; // a red square says "click to stop"
+      micBtn.title = "listening — click to stop";
+      startMeter();
+      sync();
       return;
     }
     recording = false;
     opts.onRec?.(false);
     stopMeter();
     micBtn.classList.remove("rec");
-    micBtn.classList.add("spin"); // voice_stop uploads + polls — spinner
+    micBtn.classList.add("spin"); // live_stop flushes + terminates — brief spin
     micBtn.innerHTML = ICONS.spin;
     micBtn.disabled = true;
-    micBtn.title = "transcribing…";
+    micBtn.title = "finishing…";
     try {
-      const text = (await invoke<string>("voice_stop")).trim();
-      if (text) putText(text);
-      else err("nothing heard — try again closer to the mic");
+      const text = (await invoke<string>("voice_live_stop")).trim();
+      if (text) liveSet(text);
+      else if (!voicePrefix) err("nothing heard — try again closer to the mic");
     } catch (e2) {
       err(`✕ ${String(e2)}`);
     }
-    micBtn.disabled = false;
-    micBtn.classList.remove("spin");
-    micBtn.innerHTML = ICONS.mic;
-    micBtn.title = "record voice — click again to stop and transcribe";
-    sync();
+    liveUiReset();
   });
 
   const tools: ChatTools = {
