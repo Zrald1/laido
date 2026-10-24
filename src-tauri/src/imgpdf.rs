@@ -192,12 +192,11 @@ pub fn cli() -> Option<i32> {
 #[cfg(windows)]
 fn notice(msg: &str, ok: bool) {
     use windows::core::HSTRING;
-    use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::*;
     let (text, title) = (HSTRING::from(msg), HSTRING::from("Laido"));
     unsafe {
         let _ = MessageBoxW(
-            HWND::default(),
+            None,
             windows::core::PCWSTR(text.as_ptr()),
             windows::core::PCWSTR(title.as_ptr()),
             MB_OK | if ok { MB_ICONINFORMATION } else { MB_ICONERROR },
