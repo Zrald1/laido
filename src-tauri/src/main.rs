@@ -6,6 +6,7 @@ mod dlhttp;
 mod download;
 mod extensions;
 mod fsnav;
+mod imgpdf;
 mod llm;
 mod looprun;
 mod pageview;
@@ -437,6 +438,11 @@ fn main() {
     /* panics on the GUI path are otherwise invisible — a windows-subsystem
      * exe has no console, so the panic message would die with the process.
      * Write every panic to appdata/crash.log before the default hook runs */
+    /* Explorer "Convert to PDF" verb hands us --img2pdf <files> — convert
+     * headless and exit instead of booting the whole app */
+    if let Some(code) = imgpdf::cli() {
+        std::process::exit(code);
+    }
     std::panic::set_hook(Box::new(|info| {
         let msg = format!("panic: {info}\n{:?}", std::backtrace::Backtrace::capture());
         if let Some(d) = dirs::data_local_dir() {
@@ -526,6 +532,7 @@ fn main() {
             }
             #[cfg(windows)]
             register_file_association();
+            imgpdf::menu_sync();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -572,6 +579,7 @@ fn main() {
             rag::rag_list,
             rag::rag_add_files,
             rag::rag_add_site,
+            imgpdf::img_to_pdf,
             rag::rag_remove,
             rag::rag_ask,
             rag::rag_quiz,

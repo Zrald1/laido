@@ -32,12 +32,14 @@ futures-util = { version = "0.3", default-features = false, features = ["sink"] 
 calamine = "0.36.1"
 rust_xlsxwriter = "0.99.1"
 regex = "1.11"
+# image→PDF tool: decode non-jpeg sources for embedding (lean — no avif/exr/etc)
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif", "tiff"] }
 # engine sleep/memory levers — TrySuspend + MemoryUsageTargetLevel on the
 # child WebView2s the pageview lane owns (versions match wry's graph).
 # cfg-gated: the windows-* crate family cannot compile off-Windows.
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.39"
-windows = { version = "0.62", features = ["Win32_Foundation"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
 [profile.release]
 opt-level = 3

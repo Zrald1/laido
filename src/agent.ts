@@ -13,6 +13,7 @@ export interface Settings {
   assemblyai_api_key: string;
   voyage_api_key: string;
   voyage_model: string;
+  imgpdf_menu: boolean;
   theme: string;
   base_url: string;
   model_fast: string;
@@ -287,6 +288,27 @@ export async function refreshStatus() {
   $<HTMLInputElement>("#key-assemblyai").value = settings.assemblyai_api_key;
   $<HTMLInputElement>("#key-voyage").value = settings.voyage_api_key;
   $<HTMLSelectElement>("#voy-model").value = settings.voyage_model || "rerank-2.5";
+  const imgMenu = $<HTMLInputElement>("#imgpdf-menu");
+  imgMenu.checked = settings.imgpdf_menu;
+  imgMenu.onchange = () =>
+    void invoke("settings_set", { patch: { imgpdf_menu: imgMenu.checked } });
+  $<HTMLButtonElement>("#imgpdf-btn").onclick = async () => {
+    const pick = await window.__TAURI__?.dialog?.open({
+      multiple: true,
+      filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "bmp", "gif", "tif", "tiff"] }],
+    });
+    if (!pick) return;
+    try {
+      const out = await invoke<string>("img_to_pdf", {
+        paths: Array.isArray(pick) ? pick : [pick],
+      });
+      const st = $<HTMLElement>("#settings-status");
+      st.textContent = `✓ ${out}`;
+      st.title = out;
+    } catch (e) {
+      $<HTMLElement>("#settings-status").textContent = `✕ ${e}`;
+    }
+  };
   const dot = $("#api-status .dot");
   const text = $("#api-status-text");
   if (settings.nebius_api_key) {
