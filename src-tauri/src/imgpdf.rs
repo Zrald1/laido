@@ -115,7 +115,7 @@ pub fn convert(sources: &[PathBuf]) -> Result<PathBuf, String> {
         }
         out = dir.join(format!("{stem}-{n}.pdf"));
     }
-    doc.save_to(&out).map_err(|e| e.to_string())?;
+    doc.save(&out).map_err(|e| e.to_string())?;
     Ok(out)
 }
 
@@ -182,7 +182,7 @@ pub fn cli() -> Option<i32> {
     }
     let files: Vec<PathBuf> = args[2..].iter().map(PathBuf::from).collect();
     let (msg, ok) = match convert(&files) {
-        Ok(p) => (format!("Saved {p}"), true),
+        Ok(p) => (format!("Saved {}", p.display()), true),
         Err(e) => (format!("Image → PDF failed:\n{e}"), false),
     };
     notice(&msg, ok);
