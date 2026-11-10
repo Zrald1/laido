@@ -1,6 +1,8 @@
 use serde::Serialize;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn vault_root() -> PathBuf {
@@ -1039,11 +1041,63 @@ pub fn vault_index() -> VaultIndex {
     index_in(&notes_dir())
 }
 
+/// per-file derived facts — everything index_in can cache without
+/// re-reading the file. Keyed by (dir, name) + (mtime-ns, size), so a
+/// save re-reads only the file that changed instead of the whole vault
+/// (the rescan-every-save lag).
+#[derive(Clone, Default)]
+struct FileFacts {
+    links: Vec<String>,
+    heads: Vec<String>,
+    tags: Vec<String>,
+    props: Vec<(String, String)>,
+    /// `[[…]]`-stripped lowercase body — the unlinked-mention scan text
+    lowered: String,
+}
+
+static INDEX_CACHE: OnceLock<Mutex<HashMap<(PathBuf, String), (u64, u64, FileFacts)>>> =
+    OnceLock::new();
+
+/// `[[…]]` spans erased (mentions must be BARE text), then lowercased.
+fn stripped_lower(md: &str) -> String {
+    let mut stripped = String::with_capacity(md.len());
+    let mut rest = md;
+    while let Some(i) = rest.find("[[") {
+        stripped.push_str(&rest[..i]);
+        let after = &rest[i + 2..];
+        match after.find("]]") {
+            Some(j) => {
+                stripped.push(' ');
+                rest = &after[j + 2..];
+            }
+            None => {
+                stripped.push_str(after);
+                rest = "";
+            }
+        }
+    }
+    stripped.push_str(rest);
+    stripped.to_lowercase()
+}
+
+fn facts_of(md: &str) -> FileFacts {
+    FileFacts {
+        links: links_of(md),
+        heads: headings_of(md),
+        tags: tags_of(md),
+        props: props_of(md),
+        lowered: stripped_lower(md),
+    }
+}
+
 /// the scan, factored so tests pass a temp dir instead of the env-gated
 /// vault path (LAIDO_VAULT races would otherwise poison parallel tests)
 fn index_in(dir: &std::path::Path) -> VaultIndex {
     let mut notes: Vec<(String, u64, u64, u64)> = Vec::new();
-    let mut bodies: Vec<(String, String)> = Vec::new();
+    let mut facts: Vec<(String, FileFacts)> = Vec::new();
+    let cache = INDEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut live = cache.lock().unwrap();
+    let mut seen: HashSet<(PathBuf, String)> = HashSet::new();
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -1058,6 +1112,14 @@ fn index_in(dir: &std::path::Path) -> VaultIndex {
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
+            // cache key uses ns precision + size — two writes in the same
+            // second can't alias a stale parse
+            let mtn = meta
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
             let sz = meta.as_ref().map(|m| m.len()).unwrap_or(0);
             let ct = meta
                 .as_ref()
@@ -1066,16 +1128,30 @@ fn index_in(dir: &std::path::Path) -> VaultIndex {
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
             notes.push((name.clone(), mt, sz, ct));
-            if let Ok(c) = fs::read_to_string(&path) {
-                bodies.push((name, c));
-            }
+            let key = (dir.to_path_buf(), name.clone());
+            seen.insert(key.clone());
+            let f = match live.get(&key) {
+                Some((cmt, csz, f)) if *cmt == mtn && *csz == sz => f.clone(),
+                _ => {
+                    let f2 = fs::read_to_string(&path)
+                        .map(|c| facts_of(&c))
+                        .unwrap_or_default();
+                    live.insert(key, (mtn, sz, f2.clone()));
+                    f2
+                }
+            };
+            facts.push((name, f));
         }
     }
+    // drop cache entries for files that left this dir — but never other
+    // dirs' entries (test temp dirs share this cache)
+    live.retain(|k, _| k.0 != *dir || seen.contains(k));
+    drop(live);
     notes.sort_by(|a, b| b.1.cmp(&a.1));
     let sizes: Vec<(String, u64)> = notes.iter().map(|(n, _, s, _)| (n.clone(), *s)).collect();
     let created: Vec<(String, u64)> = notes.iter().map(|(n, _, _, c)| (n.clone(), *c)).collect();
 
-    let stems: Vec<String> = bodies
+    let stems: Vec<String> = facts
         .iter()
         .map(|(n, _)| n.trim_end_matches(".laido").trim_end_matches(".md").to_string())
         .collect();
@@ -1084,51 +1160,30 @@ fn index_in(dir: &std::path::Path) -> VaultIndex {
     let mut tags = Vec::new();
     let mut mentions = Vec::new();
     let mut props = Vec::new();
-    for (name, md) in &bodies {
-        for (k, v) in props_of(md) {
-            props.push((name.clone(), k, v));
+    for (name, f) in &facts {
+        for (k, v) in &f.props {
+            props.push((name.clone(), k.clone(), v.clone()));
         }
-        for t in links_of(md) {
-            links.push((name.clone(), t));
+        for t in &f.links {
+            links.push((name.clone(), t.clone()));
         }
-        for h in headings_of(md) {
-            heads.push((name.clone(), h));
+        for h in &f.heads {
+            heads.push((name.clone(), h.clone()));
         }
-        for tg in tags_of(md) {
-            tags.push((tg, name.clone()));
+        for tg in &f.tags {
+            tags.push((tg.clone(), name.clone()));
         }
         // unlinked mentions: another note's stem as bare text (≥4 chars,
-        // word-boundary-ish, not already inside [[ ]])
+        // not already inside [[ ]]) — scanned over the cached stripped
+        // body so a rescan costs string ops, not file reads
         let own = name
             .trim_end_matches(".laido")
             .trim_end_matches(".md");
-        // unlinked mentions must be BARE text — erase whole `[[…]]` spans
-        // so a real link doesn't double-count as a mention
-        let mut stripped = String::with_capacity(md.len());
-        {
-            let mut rest = md.as_str();
-            while let Some(i) = rest.find("[[") {
-                stripped.push_str(&rest[..i]);
-                let after = &rest[i + 2..];
-                match after.find("]]") {
-                    Some(j) => {
-                        stripped.push(' ');
-                        rest = &after[j + 2..];
-                    }
-                    None => {
-                        stripped.push_str(after);
-                        rest = "";
-                    }
-                }
-            }
-            stripped.push_str(rest);
-        }
-        let lowered = stripped.to_lowercase();
         for stem in &stems {
             if stem == own || stem.len() < 4 {
                 continue;
             }
-            if lowered.contains(&stem.to_lowercase()) {
+            if f.lowered.contains(&stem.to_lowercase()) {
                 mentions.push((name.clone(), stem.clone()));
             }
         }

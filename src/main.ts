@@ -1,6 +1,6 @@
 import { $, invoke } from "./ipc.js";
 import { initEditor } from "./editor.js";
-import { initTabs } from "./tabs.js";
+import { initTabs, stepTab, closeActiveTab, jumpTab } from "./tabs.js";
 import { initCalendar } from "./calendar.js";
 import { initLibrary, toggleLibrary } from "./rag.js";
 import { initFsPane } from "./fspane.js";
@@ -173,6 +173,18 @@ async function init() {
     if (k === "n") {
       e.preventDefault();
       $("#new-tab").click();
+    }
+    if (k === "w") {
+      e.preventDefault();
+      void closeActiveTab();
+    }
+    if (e.key === "Tab") {
+      e.preventDefault();
+      void stepTab(e.shiftKey ? -1 : 1);
+    }
+    if (/^[1-9]$/.test(e.key)) {
+      e.preventDefault();
+      void jumpTab(Number(e.key) - 1);
     }
     if (k === "j") {
       e.preventDefault();

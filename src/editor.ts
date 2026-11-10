@@ -261,6 +261,24 @@ function flowAroundCards() {
   const textEls = kids.filter(
     (k) => FLOW_TAGS.has(k.tagName) && !k.classList.contains("drag-gap"),
   );
+  /* fast path — no floats means nothing to flow around, so the whole
+   * measure pass is waste; the only residue possible is stale pad/drop
+   * styles left by a float that just left, which a style-read sweep
+   * clears without a single layout read. This runs once per keystroke
+   * frame — float-free notes (the common case) now pay ~zero */
+  if (!floatEls.length) {
+    for (const t of textEls) {
+      if (t.dataset.fdrop || t.style.paddingLeft || t.style.paddingRight) {
+        t.style.paddingLeft = "";
+        t.style.paddingRight = "";
+        if (t.dataset.fdrop) {
+          t.style.marginTop = "";
+          delete t.dataset.fdrop;
+        }
+      }
+    }
+    return;
+  }
   /* phase 1 — one layout pass: every geometry read happens before any
    * style write. Floats never receive writes here, so their rects stay
    * valid for the whole pass. */
@@ -1689,6 +1707,17 @@ export function scheduleCardLinks() {
 
 export function drawCardLinks() {
   const el = body();
+  /* early-out — this runs once per keystroke frame. With no linked
+   * cards there's nothing to draw: skip the canvas resize+clear and
+   * the per-card rect reads entirely. One DOM query vs a full-document
+   * bitmap churn */
+  if (!el.querySelector(".callout[data-parent]")) {
+    if (linksCv && (linksCv.width > 0 || linksCv.height > 0)) {
+      linksCv.width = 0;
+      linksCv.height = 0;
+    }
+    return;
+  }
   if (!linksCv) {
     linksCv = document.createElement("canvas");
     linksCv.className = "card-links";
@@ -2886,6 +2915,18 @@ const CMD_DESC: Record<string, string> = {
 };
 
 /** commands + skills whose name starts with the typed partial */
+/* skills_list is a disk read behind an IPC hop — the prefix picker used
+ * to pay one per keystroke while a command word formed. Skills change
+ * on the order of minutes, so a 5s cache is invisible but removes the
+ * per-keystroke round trip */
+let skillsCache: { at: number; rows: SkillRow[] } | null = null;
+async function skillsList(): Promise<SkillRow[]> {
+  if (skillsCache && Date.now() - skillsCache.at < 5000) return skillsCache.rows;
+  const rows = await invoke<SkillRow[]>("skills_list").catch(() => [] as SkillRow[]);
+  skillsCache = { at: Date.now(), rows };
+  return rows;
+}
+
 async function prefixRowsFor(partial: string): Promise<CmdPickRow[]> {
   const p = partial.toLowerCase();
   const rows: CmdPickRow[] = CMD_WORDS.filter((w) => w.startsWith(p)).map((w) => ({
@@ -2894,7 +2935,7 @@ async function prefixRowsFor(partial: string): Promise<CmdPickRow[]> {
     kind: "cmd" as const,
   }));
   if (rows.length) {
-    const skills = await invoke<SkillRow[]>("skills_list").catch(() => []);
+    const skills = await skillsList();
     for (const s of skills) {
       if (s.name.toLowerCase().startsWith(p))
         rows.push({ label: s.name, desc: s.description || "saved skill", kind: "skill" });
@@ -2906,7 +2947,7 @@ async function prefixRowsFor(partial: string): Promise<CmdPickRow[]> {
 /** rows the picker offers for a command word */
 async function cmdRowsFor(word: CmdWord): Promise<CmdPickRow[]> {
   if (word === "skill") {
-    const list = await invoke<SkillRow[]>("skills_list").catch(() => []);
+    const list = await skillsList();
     return list.map((s) => ({
       label: s.name,
       desc: s.description || "saved skill",

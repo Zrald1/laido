@@ -285,6 +285,23 @@ export async function openTab(name: string) {
   }
 }
 
+/** keyboard tab navigation — Ctrl+W / Ctrl+Tab / Ctrl+1..9 */
+export async function stepTab(dir: 1 | -1) {
+  if (tabs.length < 2) return;
+  const i = tabs.indexOf(active);
+  const next = tabs[((i < 0 ? 0 : i) + dir + tabs.length) % tabs.length];
+  if (next) await select(next);
+}
+
+export async function closeActiveTab() {
+  if (active) await close(active);
+}
+
+export async function jumpTab(n: number) {
+  const t = tabs[n];
+  if (t && t !== active) await select(t);
+}
+
 /** names saved before the .laido migration still say .md — repair them
  *  against the vault so restored tabs, recent lists and menus always work */
 function repairNames(names: string[], all: string[]): string[] {

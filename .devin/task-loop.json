@@ -1,0 +1,22 @@
+{
+  "enabled": true,
+  "goal": "Make the Tauri app very fast — eliminate the lags in browser widgets and rendering (do web research, fix real hot paths, verify).",
+  "iteration": 2,
+  "maxIterations": 0,
+  "current": null,
+  "pending": [
+    "Release build check — running binary is debug; verify Cargo.toml [profile.release] has lto/codegen-units=1 and produce a release exe for the real speed comparison",
+    "Startup path audit — what runs before first paint (initAgent/initModels network calls, refreshIndex first scan); parallelize or defer non-essentials",
+    "Measure: use Task Manager CPU while typing + scrolling a card-heavy note to confirm the win; report to user"
+  ],
+  "done": [
+    "flowAroundCards fast path — zero layout reads per keystroke when no floats (src/editor.ts)",
+    "drawCardLinks early-out — no more full-document canvas resize+repaint per keystroke when no linked callouts (src/editor.ts)",
+    "vault_index per-file mtime(ns)+size cache — save/watcher rescans re-read only changed files, was full-vault re-read (src-tauri/src/vault.rs, tests 13/13)",
+    "skillsList 5s cache — prefix command picker was doing skills_list IPC+disk read per keystroke (src/editor.ts)",
+    "Web research: incremental render + WebView2 instance reduction + batched surface sync are the proven wins (MS docs, mizchi/markdown, tauri perf guide)",
+    "snapCardsToGrid audited — already reads geometry only for callouts, not a hot path",
+    "Browser engine audit — already lazy (pv_open on nav only), budgeted (evictIdle), parked-reclaim, batched pv_sync; no change needed",
+    "Rebuilt exe + restarted (PID 25680) — all fixes live"
+  ]
+}
