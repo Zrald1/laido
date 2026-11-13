@@ -148,7 +148,7 @@ pub fn menu_set(on: bool) {
     let exe = exe.display().to_string();
     for ext in IMG_EXTS {
         let key =
-            format!("HKCU\\Software\\Classes\\SystemFileAssociations\\{ext}\\shell\\Laido.ImgToPdf");
+            format!("HKCU\\Software\\Classes\\SystemFileAssociations\\.{ext}\\shell\\Laido.ImgToPdf");
         if on {
             let icon = format!("\"{exe}\",0");
             let cmd = format!("\"{exe}\" --img2pdf \"%1\"");
