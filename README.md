@@ -6,7 +6,7 @@
 <p align="center"><strong>The way of AI — a notepad that acts on what you write.</strong></p>
 
 <p align="center"><a href="https://laido.zraldwebdevelopmentservices.shop">laido.zraldwebdevelopmentservices.shop</a> — sign in, manage keys &amp; plans</p>
-
+<p align="center"><a href="https://play.google.com/store/apps/details?id=app.laido.laido">Google Play Store</a> 
 <p align="center">
   <a href="https://github.com/Zrald1/laido/releases"><img src="https://img.shields.io/github/v/release/Zrald1/laido?label=download" alt="Download"></a>
   <a href="https://apps.microsoft.com/detail/9NT11XSG8H4B"><img src="https://img.shields.io/badge/Microsoft%20Store-Laido-0067C0?logo=microsoft&logoColor=white" alt="Microsoft Store"></a>
